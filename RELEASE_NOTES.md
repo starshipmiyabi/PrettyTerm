@@ -2,6 +2,10 @@
 
 This beta release focuses on reliability, session safety, and a more useful native workspace around Claude Code in Apple Terminal.
 
+## Download
+
+Download `PrettyTerm-Beta-0.7.8-build16-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+
 ## Highlights
 
 - Added a visible runtime version label for easier bug reporting.

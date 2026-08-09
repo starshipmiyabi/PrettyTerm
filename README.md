@@ -28,8 +28,8 @@ Building from source additionally requires the macOS Command Line Tools and Node
 
 ## Install a Release
 
-1. Download the latest `PrettyTerm-Beta-*.app.zip` from [Releases](https://github.com/starshipmiyabi/PrettyTerm/releases).
-2. Extract the archive and move `PrettyTerm Beta.app` to `/Applications`.
+1. Download the latest `PrettyTerm-Beta-*.dmg` from [Releases](https://github.com/starshipmiyabi/PrettyTerm/releases).
+2. Open the disk image and drag `PrettyTerm Beta.app` to the **Applications** shortcut.
 3. Start Claude Code in Apple Terminal.
 4. Open PrettyTerm, choose a session, and click **Sync Terminal** before sending.
 

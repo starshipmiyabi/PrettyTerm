@@ -13,7 +13,8 @@ PrettyTerm is a lightweight native macOS companion for Claude Code sessions runn
 - Markdown rendering for headings, lists, quotes, links, code blocks, and tables.
 - Bundled MathJax rendering for inline and display LaTeX.
 - Expandable thinking, tool, error, and line-by-line diff events.
-- Inspector for connection state, context usage, plan limits, estimated API-equivalent cost, changed files, and tasks.
+- Inspector for connection state, context usage, plan limits, estimated API-equivalent cost, changed files, tasks, and an expandable repository diff.
+- Remembered Git observation directories discovered from the selected Claude Code transcript, plus manually added directories.
 - Always-on-top floating conversation window.
 - Text and image composition shared by the main and floating windows.
 - Light and dark appearance support.
@@ -60,6 +61,17 @@ zsh Tests/verify.sh
 PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders a read-only conversation snapshot in a local `WKWebView`. Sending remains anchored to Apple Terminal: PrettyTerm validates the selected Claude process and session before writing to the bound tab.
 
 PrettyTerm does not replace Claude Code or run a separate agent service. Claude.ai Remote Control is intentionally disabled.
+
+## Git Inspector and Directory Scope
+
+The inspector can widen on demand to show the selected repository's local Git status and diff. PrettyTerm supports two sources for Git observation directories:
+
+- **Observed directories:** PrettyTerm collects absolute `cwd` values found in the selected Claude Code transcript and remembers them locally for later selection. This reflects directories recorded while Claude Code works, including paths seen after Claude Code has used an added directory.
+- **Manual directories:** Enter an absolute folder path in the inspector to add it directly to PrettyTerm's remembered Git directory list.
+
+Both controls only change where PrettyTerm runs its read-only Git probes. They do not change Claude Code's working directory, grant Claude Code access to a folder, send terminal input, or execute a Claude Code command. To let Claude Code access another folder, run `/add-dir /absolute/path` inside Claude Code itself. PrettyTerm can then remember transcript directories that Claude Code records while working.
+
+The diff panel shows tracked changes relative to `HEAD` and lists untracked files in the status section. Large output is truncated locally to keep the interface responsive.
 
 ## Privacy and Network Access
 

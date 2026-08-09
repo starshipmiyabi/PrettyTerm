@@ -33,6 +33,22 @@ test('the floating conversation uses the shared message path and closes cleanly'
   assert.match(source, /windowWillClose:[\s\S]*_floatingSessionID\s*=\s*nil/);
 });
 
+test('successful sends clear both composers through the native text editing transaction', () => {
+  const mainSend = source.match(
+    /- \(void\)sendMessage:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  const floatingSend = source.match(
+    /- \(void\)sendFloatingMessage:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(source, /clearAfterSuccessfulSubmissionMatchingText:/);
+  assert.match(source, /shouldChangeTextInRange:wholeRange replacementString:@""/);
+  assert.match(source, /replaceCharactersInRange:wholeRange withString:@""/);
+  assert.match(mainSend, /clearAfterSuccessfulSubmissionMatchingText:message/);
+  assert.match(floatingSend, /clearAfterSuccessfulSubmissionMatchingText:message/);
+  assert.doesNotMatch(mainSend, /_composerTextView\.string\s*=\s*@""/);
+  assert.doesNotMatch(floatingSend, /_floatingComposerTextView\.string\s*=\s*@""/);
+});
+
 test('both windows redraw from the complete JSONL snapshot without incremental DOM state', () => {
   const mainRender = source.match(
     /- \(void\)renderSession:\(PTSessionInfo \*\)session[\s\S]*?(?=\n- \([^\n]+\))/
@@ -114,4 +130,14 @@ test('changed-file buttons accept the first click after Finder deactivates the a
   assert.match(source, /acceptsFirstMouse:[\s\S]*return YES/);
   assert.match(source, /PTFirstMouseButton \*button/);
   assert.match(source, /action = @selector\(revealChangedFile:\)/);
+});
+
+test('Git diff observes remembered transcript directories without changing Claude Code cwd', () => {
+  assert.match(source, /NSMutableOrderedSet<NSString \*> \*accessedDirectories/);
+  assert.match(source, /session\.accessedDirectories = accessedDirectories\.array/);
+  assert.match(source, /PTGitObservedDirectories/);
+  assert.match(source, /PTRunGit\(directory, @\[@"diff", @"--no-ext-diff", @"--no-color", @"HEAD"/);
+  assert.match(source, /展开 Git diff →/);
+  assert.match(source, /不会改变 Claude Code/);
+  assert.match(source, /Claude Code 执行 \/add-dir/);
 });

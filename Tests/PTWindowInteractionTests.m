@@ -59,8 +59,14 @@ int main(void) {
         NSStackView *changedFiles = [delegate valueForKey:@"changedFilesStack"];
         NSSplitView *splitView = [delegate valueForKey:@"splitView"];
         NSView *inspector = [delegate valueForKey:@"inspectorView"];
-        PTAssert(window != nil && changedFiles != nil && splitView != nil && inspector != nil,
-            @"window, split view, inspector, and changed-files stack must exist");
+        NSPopUpButton *gitDirectoryPicker = [delegate valueForKey:@"gitDirectoryPicker"];
+        NSTextField *gitDirectoryHint = [delegate valueForKey:@"gitDirectoryHintLabel"];
+        NSScrollView *gitDiffScroll = [delegate valueForKey:@"gitDiffScroll"];
+        NSTextView *gitDiffTextView = [delegate valueForKey:@"gitDiffTextView"];
+        PTAssert(window != nil && changedFiles != nil && splitView != nil && inspector != nil &&
+            gitDirectoryPicker != nil && gitDirectoryHint != nil && gitDiffScroll != nil &&
+            gitDiffTextView != nil,
+            @"window, inspector, Git controls, and changed-files stack must exist");
 
         [window.contentView layoutSubtreeIfNeeded];
         CGFloat splitWidth = NSWidth(splitView.bounds);
@@ -86,6 +92,8 @@ int main(void) {
         id session = [[NSClassFromString(@"PTSessionInfo") alloc] init];
         [session setValue:@0 forKey:@"contextUsed"];
         [session setValue:@200000 forKey:@"contextWindow"];
+        [session setValue:@[@"/tmp"] forKey:@"accessedDirectories"];
+        [session setValue:@"/tmp" forKey:@"cwd"];
         [session setValue:@[@{
             @"displayName": @"interaction-test.txt",
             @"filePath": @"/tmp/interaction-test.txt",
@@ -94,6 +102,25 @@ int main(void) {
         }] forKey:@"changedFiles"];
         [session setValue:@[] forKey:@"tasks"];
         PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
+
+        PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
+            @"the inspector must remember and select directories observed in the Claude transcript");
+        PTAssert([gitDirectoryHint.stringValue containsString:@"不会改变 Claude Code"] &&
+            [gitDirectoryHint.stringValue containsString:@"/add-dir"],
+            @"Git directory controls must explain the Claude Code boundary and /add-dir requirement");
+
+        CGFloat compactInspectorWidth = NSWidth(inspector.frame);
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleGitDiff:"), nil);
+        [window.contentView layoutSubtreeIfNeeded];
+        CGFloat expandedInspectorWidth = NSWidth(inspector.frame);
+        PTAssert(!gitDiffScroll.hidden && expandedInspectorWidth > compactInspectorWidth + 100.0,
+            @"clicking Git diff must reveal it and widen the inspector");
+        PTAssert(NSWidth(gitDiffTextView.frame) > 0.0,
+            @"the expanded Git diff text document must have a visible width");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleGitDiff:"), nil);
+        [window.contentView layoutSubtreeIfNeeded];
+        PTAssert(gitDiffScroll.hidden,
+            @"clicking the expanded Git diff control again must collapse the diff view");
 
         NSButton *button = PTFirstButtonInStack(changedFiles);
         PTAssert(button != nil, @"changed-file action must render as a button");

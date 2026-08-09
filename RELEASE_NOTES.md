@@ -1,10 +1,20 @@
-# PrettyTerm Beta 0.8.1 (Build 18)
+# PrettyTerm Beta 0.8.3 (Build 20)
 
-This beta release applies the first security and performance audit of the 0.8 series.
+This beta hotfix restores message delivery after the Terminal safety audit and adds a small session-navigation improvement. Build 19 was never distributed: it fixed AppleScript error `-2740` but a second compiler error (`-1700`) in the same code path still blocked every send. Build 20 fixes both and adds regression coverage that compiles all three Terminal automation actions, closing the gap that let both errors ship unnoticed.
 
 ## Download
 
-Download `PrettyTerm-Beta-0.8.1-build18-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+Download `PrettyTerm-Beta-0.8.3-build20-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+
+## Critical Fix
+
+- Fixes AppleScript error `-2740` that prevented every text, multiline Return, and image-paste action from reaching Terminal. The PID revalidation shell command is now wrapped in syntax accepted by the macOS AppleScript compiler.
+- Fixes a second AppleScript error (`-1700`) in the same safety check: the process list returned by `processes of theTab` must be assigned to a local variable before its items can be coerced to text, or the coercion fails at runtime.
+- Adds compile-time regression coverage for all three Terminal automation actions (text, Return, image paste), including text containing quotes, backslashes, and line breaks, so a script that merely *looks* correct can no longer ship without actually compiling.
+
+## Session Navigation
+
+- Adds a session-table context menu for revealing the selected transcript in Finder or copying its absolute path without switching the active conversation.
 
 ## Security Fixes
 

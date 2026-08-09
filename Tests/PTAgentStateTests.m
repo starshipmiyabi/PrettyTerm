@@ -77,7 +77,7 @@ int main(void) {
             @"multiline Terminal submissions must use one complete bracketed-paste frame");
         NSString *automation = PTTerminalAutomationScript(
             @"/dev/ttys007", 4321, @"hello", PTTerminalAutomationActionWriteText);
-        PTAssert([automation containsString:@"my do shell script \"/bin/ps -p 4321 -o tty="],
+        PTAssert([automation containsString:@"my (do shell script \"/bin/ps -p 4321 -o tty="],
             @"Terminal automation must revalidate the exact Claude PID inside the AppleScript");
         PTAssert([automation containsString:@"if liveTTY is not \"ttys007\" then return \"unsafe\""],
             @"Terminal automation must reject a PID that moved away from the bound TTY");
@@ -87,6 +87,41 @@ int main(void) {
             @"Terminal automation must not accept substring process-name matches");
         PTAssert([automation containsString:@"if isSafe is false then return \"unsafe\""],
             @"Terminal automation must retain the unsafe early-return branch");
+        // containsString: 只能证明字符串拼对了，证明不了这是一段合法 AppleScript。
+        // 0.8.1 的 `my do shell script`（-2740）和裸 repeat 引用（-1700）都是从这个
+        // 缺口漏出去的，所以三种动作都必须真正过一遍编译器。
+        PTAssert([automation containsString:@"set processNames to processes of theTab"],
+            @"Terminal automation must dereference the process list before coercing to text");
+        PTTerminalAutomationAction automationActions[] = {
+            PTTerminalAutomationActionWriteText,
+            PTTerminalAutomationActionSubmitReturn,
+            PTTerminalAutomationActionPasteImage
+        };
+        for (size_t index = 0; index < sizeof(automationActions) / sizeof(automationActions[0]); index++) {
+            NSString *candidate = PTTerminalAutomationScript(
+                @"/dev/ttys007", 4321, @"hello", automationActions[index]);
+            NSDictionary *compileError = nil;
+            PTAssert([[[NSAppleScript alloc] initWithSource:candidate]
+                compileAndReturnError:&compileError],
+                @"every Terminal automation action must compile as valid AppleScript");
+        }
+        for (NSNumber *actionValue in @[
+            @(PTTerminalAutomationActionWriteText),
+            @(PTTerminalAutomationActionSubmitReturn),
+            @(PTTerminalAutomationActionPasteImage),
+        ]) {
+            PTTerminalAutomationAction action = actionValue.integerValue;
+            NSString *compileMessage = action == PTTerminalAutomationActionWriteText
+                ? @"带有\\反斜杠、\"引号\"与\n换行的消息"
+                : @"";
+            NSString *candidate = PTTerminalAutomationScript(
+                @"/dev/ttys007", 4321, compileMessage, action);
+            NSAppleScript *appleScript = [[NSAppleScript alloc] initWithSource:candidate];
+            NSDictionary *compileError = nil;
+            PTAssert([appleScript compileAndReturnError:&compileError],
+                [NSString stringWithFormat:@"Terminal automation action %@ must compile: %@",
+                    actionValue, compileError ?: @{}]);
+        }
         PTAssert(PTLatestTerminalPasteMarker(@"before\n[Pasted text #2 +4 lines]\nafter") == 2,
             @"Terminal paste acknowledgement must read Claude's visible marker number");
         PTAssert(PTLatestTerminalPasteMarker(

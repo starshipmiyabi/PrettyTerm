@@ -217,10 +217,14 @@ NSString *PTTerminalAutomationScript(
          "repeat with theWindow in windows\n"
          "repeat with theTab in tabs of theWindow\n"
          "if (tty of theTab) is \"%@\" then\n"
-         "set liveTTY to my do shell script \"/bin/ps -p %d -o tty= | /usr/bin/xargs\"\n"
+         "set liveTTY to my (do shell script \"/bin/ps -p %d -o tty= | /usr/bin/xargs\")\n"
          "if liveTTY is not \"%@\" then return \"unsafe\"\n"
          "set isSafe to false\n"
-         "repeat with p in (processes of theTab)\n"
+         // 必须先落到一个本地变量：直接 repeat with p in (processes of theTab) 时，
+         // p 仍是 "item N of «class prcs» of item N of every ttab of ..." 这样的多层
+         // 嵌套引用，(contents of p) as text 会以 -1700 强转失败。先赋值一次即完成解引用。
+         "set processNames to processes of theTab\n"
+         "repeat with p in processNames\n"
          "set processName to (contents of p) as text\n"
          "if processName is \"claude\" then set isSafe to true\n"
          "end repeat\n"

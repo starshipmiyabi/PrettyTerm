@@ -1556,7 +1556,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 }
 @end
 
-@interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate>
+@interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate, NSMenuDelegate>
 @end
 
 @implementation PTAppDelegate {
@@ -1964,6 +1964,12 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _sessionTable.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
     _sessionTable.dataSource = self;
     _sessionTable.delegate = self;
+    // 右键菜单的条目在 menuNeedsUpdate: 里按 clickedRow 现场重建，所以这里只挂一个空壳。
+    // autoenablesItems 关掉，否则 AppKit 会忽略我们自己算出来的 enabled（文件已被删时要变灰）。
+    NSMenu *sessionMenu = [[NSMenu alloc] init];
+    sessionMenu.delegate = self;
+    sessionMenu.autoenablesItems = NO;
+    _sessionTable.menu = sessionMenu;
     NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"session"];
     column.resizingMask = NSTableColumnAutoresizingMask;
     [_sessionTable addTableColumn:column];
@@ -3810,6 +3816,56 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         rowView.identifier = @"PTSessionRow";
     }
     return rowView;
+}
+
+// 右键菜单只对 clickedRow 生效，不改选中项——老师可能只想看看某个会话的文件在哪，
+// 不希望右键顺手把正在同步的会话切走。行号会被 1.5 秒一次的 applySessions 打乱，
+// 所以路径在菜单弹出时就固化进 representedObject，回调时不再按行号回查。
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != _sessionTable.menu) return;
+    [menu removeAllItems];
+    NSInteger row = _sessionTable.clickedRow;
+    if (row < 0 || row >= (NSInteger)_sessions.count) return;
+
+    PTSessionInfo *session = _sessions[row];
+    NSString *path = session.filePath ?: @"";
+    BOOL exists = path.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:path];
+
+    NSMenuItem *reveal = [menu addItemWithTitle:@"在 Finder 中显示"
+                                         action:@selector(revealSessionTranscript:)
+                                  keyEquivalent:@""];
+    reveal.target = self;
+    reveal.representedObject = path;
+    reveal.enabled = exists;
+    reveal.toolTip = exists ? path : @"transcript 文件已不存在";
+
+    NSMenuItem *copyPath = [menu addItemWithTitle:@"拷贝 transcript 路径"
+                                           action:@selector(copySessionTranscriptPath:)
+                                    keyEquivalent:@""];
+    copyPath.target = self;
+    copyPath.representedObject = path;
+    copyPath.enabled = path.length > 0;
+}
+
+- (void)revealSessionTranscript:(NSMenuItem *)sender {
+    NSString *path = [sender.representedObject isKindOfClass:NSString.class]
+        ? sender.representedObject : nil;
+    if (path.length == 0) return;
+    if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
+        _statusLabel.stringValue = @"transcript 文件已不存在";
+        return;
+    }
+    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
+}
+
+- (void)copySessionTranscriptPath:(NSMenuItem *)sender {
+    NSString *path = [sender.representedObject isKindOfClass:NSString.class]
+        ? sender.representedObject : nil;
+    if (path.length == 0) return;
+    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
+    [pasteboard clearContents];
+    [pasteboard setString:path forType:NSPasteboardTypeString];
+    _statusLabel.stringValue = @"已拷贝 transcript 路径";
 }
 
 // 三个地方（bridge 状态变化 / 切换选中会话 / 点击接入按钮）都会想改按钮文案，

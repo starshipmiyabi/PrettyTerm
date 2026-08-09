@@ -17,6 +17,14 @@ test('conversation renderer declares a complete dark appearance', () => {
   assert.match(html, /@media[\s\S]*--ink:\s*#[0-9a-f]{6}/i);
 });
 
+test('local WebView content is isolated from network and dynamic MathJax packages', () => {
+  assert.match(html, /Content-Security-Policy/);
+  assert.match(html, /connect-src 'none'/);
+  assert.match(html, /object-src 'none'/);
+  assert.match(html, /packages:\s*\{\s*'\[-\]'\s*:\s*\['require', 'autoload'\]\s*\}/);
+  assert.match(html, /loader:\s*\{\s*load:\s*\[\]\s*\}/);
+});
+
 test('native chrome does not use fixed light surfaces or fixed dark title text', () => {
   assert.doesNotMatch(nativeSource, /layer\.backgroundColor\s*=\s*PTColor\(0\.9/);
   assert.doesNotMatch(nativeSource, /color:PTColor\(0\.(?:08|10|12),/);

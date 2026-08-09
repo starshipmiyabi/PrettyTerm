@@ -2,11 +2,36 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <WebKit/WebKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <Security/Security.h>
 #import <signal.h>
 #import "PTAgentState.h"
 #import "PTUsageMetrics.h"
 
 static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments);
+
+static NSData *PTClaudeCredentialData(NSError **error) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: @"Claude Code-credentials",
+        (__bridge id)kSecAttrAccount: NSUserName(),
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+    };
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (status != errSecSuccess) {
+        if (error) {
+            NSString *description = CFBridgingRelease(SecCopyErrorMessageString(status, NULL))
+                ?: [NSString stringWithFormat:@"Keychain 状态 %d", (int)status];
+            *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status
+                userInfo:@{NSLocalizedDescriptionKey: description}];
+        }
+        if (result) CFRelease(result);
+        return nil;
+    }
+    id value = CFBridgingRelease(result);
+    return [value isKindOfClass:NSData.class] ? value : nil;
+}
 
 static NSColor *PTColor(CGFloat red, CGFloat green, CGFloat blue) {
     return [NSColor colorWithSRGBRed:red green:green blue:blue alpha:1.0];
@@ -140,6 +165,12 @@ static NSString *PTTextFromMessageContent(id content) {
 @property(nonatomic) NSUInteger contextWindow;
 @property(nonatomic) double apiEquivalentCostUSD;
 @property(nonatomic) BOOL apiCostAvailable;
+@property(nonatomic, copy) NSString *parseCustomTitle;
+@property(nonatomic, copy) NSString *parseGeneratedTitle;
+@property(nonatomic, copy) NSString *parseLastPrompt;
+@property(nonatomic, copy) NSString *parseFirstPrompt;
+@property(nonatomic, strong) NSSet<NSString *> *parseMessageKeys;
+@property(nonatomic, strong) NSSet<NSString *> *parseUsageMessageKeys;
 @end
 
 @implementation PTSessionInfo
@@ -168,8 +199,12 @@ static NSArray<NSDictionary *> *PTLoadTasksForSession(NSString *sessionID) {
     return tasks;
 }
 
-static PTSessionInfo *PTParseSession(NSString *filePath, NSDate *modifiedAt) {
-    NSData *data = [NSData dataWithContentsOfFile:filePath options:NSDataReadingMappedIfSafe error:nil];
+static PTSessionInfo *PTParseSessionData(
+    NSData *data,
+    NSString *filePath,
+    NSDate *modifiedAt,
+    PTSessionInfo *baseSession
+) {
     if (!data) return nil;
     // Claude 还在往这个文件追加写的时候，文件末尾可能截在一个多字节 UTF-8
     // 字符的中间，导致整段 initWithData:encoding: 直接返回 nil，
@@ -193,24 +228,29 @@ static PTSessionInfo *PTParseSession(NSString *filePath, NSDate *modifiedAt) {
     }
 
     PTSessionInfo *session = [[PTSessionInfo alloc] init];
-    session.sessionID = filePath.lastPathComponent.stringByDeletingPathExtension;
+    session.sessionID = baseSession.sessionID.length
+        ? baseSession.sessionID : filePath.lastPathComponent.stringByDeletingPathExtension;
     session.filePath = filePath;
     session.modifiedAt = modifiedAt;
-    session.cwd = @"";
-    session.model = @"";
-    session.contextUsed = 0;
-    session.contextWindow = 200000;
-    session.apiEquivalentCostUSD = 0;
-    session.apiCostAvailable = NO;
+    session.cwd = baseSession.cwd ?: @"";
+    session.model = baseSession.model ?: @"";
+    session.contextUsed = baseSession.contextUsed;
+    session.contextWindow = baseSession ? baseSession.contextWindow : 200000;
+    session.apiEquivalentCostUSD = baseSession.apiEquivalentCostUSD;
+    session.apiCostAvailable = baseSession.apiCostAvailable;
 
-    NSString *customTitle = @"";
-    NSString *generatedTitle = @"";
-    NSString *lastPrompt = @"";
-    NSString *firstPrompt = @"";
-    NSMutableArray<NSDictionary *> *messages = [NSMutableArray array];
-    NSMutableSet<NSString *> *messageKeys = [NSMutableSet set];
-    NSMutableSet<NSString *> *usageMessageKeys = [NSMutableSet set];
-    NSMutableOrderedSet<NSString *> *accessedDirectories = [NSMutableOrderedSet orderedSet];
+    NSString *customTitle = baseSession.parseCustomTitle ?: @"";
+    NSString *generatedTitle = baseSession.parseGeneratedTitle ?: @"";
+    NSString *lastPrompt = baseSession.parseLastPrompt ?: @"";
+    NSString *firstPrompt = baseSession.parseFirstPrompt ?: @"";
+    NSMutableArray<NSDictionary *> *messages = baseSession
+        ? [baseSession.assistantMessages mutableCopy] : [NSMutableArray array];
+    NSMutableSet<NSString *> *messageKeys = baseSession
+        ? [baseSession.parseMessageKeys mutableCopy] : [NSMutableSet set];
+    NSMutableSet<NSString *> *usageMessageKeys = baseSession
+        ? [baseSession.parseUsageMessageKeys mutableCopy] : [NSMutableSet set];
+    NSMutableOrderedSet<NSString *> *accessedDirectories = [NSMutableOrderedSet orderedSetWithArray:
+        baseSession.accessedDirectories ?: @[]];
 
     for (NSString *line in [source componentsSeparatedByString:@"\n"]) {
         if (line.length < 2) continue;
@@ -372,6 +412,12 @@ static PTSessionInfo *PTParseSession(NSString *filePath, NSDate *modifiedAt) {
         (generatedTitle.length ? generatedTitle :
         (lastPrompt.length ? lastPrompt : firstPrompt));
     session.title = PTShortText(title.length ? title : @"未命名会话", 58);
+    session.parseCustomTitle = customTitle;
+    session.parseGeneratedTitle = generatedTitle;
+    session.parseLastPrompt = lastPrompt;
+    session.parseFirstPrompt = firstPrompt;
+    session.parseMessageKeys = messageKeys;
+    session.parseUsageMessageKeys = usageMessageKeys;
     session.accessedDirectories = accessedDirectories.array;
     session.assistantMessages = messages;
     session.changedFiles = PTAggregateChangedFiles(messages);
@@ -380,6 +426,74 @@ static PTSessionInfo *PTParseSession(NSString *filePath, NSDate *modifiedAt) {
         return nil;
     }
     return session;
+}
+
+static NSUInteger PTCompleteJSONLLength(NSData *data) {
+    if (data.length == 0) return 0;
+    const uint8_t *bytes = data.bytes;
+    NSUInteger lastNewline = NSNotFound;
+    for (NSUInteger index = data.length; index > 0; index--) {
+        if (bytes[index - 1] == '\n') {
+            lastNewline = index;
+            break;
+        }
+    }
+    if (lastNewline == data.length) return data.length;
+    NSUInteger tailStart = lastNewline == NSNotFound ? 0 : lastNewline;
+    NSData *tail = [data subdataWithRange:NSMakeRange(tailStart, data.length - tailStart)];
+    id object = tail.length
+        ? [NSJSONSerialization JSONObjectWithData:tail options:0 error:nil] : nil;
+    if ([object isKindOfClass:NSDictionary.class]) return data.length;
+    return lastNewline == NSNotFound ? 0 : lastNewline;
+}
+
+static NSData *PTReadFileDataFromOffset(NSString *filePath, NSUInteger offset) {
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:filePath];
+    if (!handle) return nil;
+    @try {
+        [handle seekToFileOffset:offset];
+        NSData *data = [handle readDataToEndOfFile];
+        [handle closeFile];
+        return data;
+    } @catch (__unused NSException *exception) {
+        [handle closeFile];
+        return nil;
+    }
+}
+
+static PTSessionInfo *PTParseSession(
+    NSString *filePath,
+    NSDate *modifiedAt,
+    NSUInteger *parsedSize
+) {
+    NSData *data = [NSData dataWithContentsOfFile:filePath options:NSDataReadingMappedIfSafe error:nil];
+    if (!data) return nil;
+    NSUInteger completeLength = PTCompleteJSONLLength(data);
+    if (parsedSize) *parsedSize = completeLength;
+    if (completeLength == 0) return nil;
+    NSData *completeData = completeLength == data.length
+        ? data : [data subdataWithRange:NSMakeRange(0, completeLength)];
+    return PTParseSessionData(completeData, filePath, modifiedAt, nil);
+}
+
+static PTSessionInfo *PTParseSessionAppending(
+    NSString *filePath,
+    NSDate *modifiedAt,
+    NSUInteger previousParsedSize,
+    PTSessionInfo *baseSession,
+    NSUInteger *parsedSize
+) {
+    NSData *newData = PTReadFileDataFromOffset(filePath, previousParsedSize);
+    if (!newData) return nil;
+    NSUInteger completeLength = PTCompleteJSONLLength(newData);
+    if (parsedSize) *parsedSize = previousParsedSize + completeLength;
+    if (completeLength == 0) {
+        baseSession.modifiedAt = modifiedAt;
+        return baseSession;
+    }
+    NSData *completeData = completeLength == newData.length
+        ? newData : [newData subdataWithRange:NSMakeRange(0, completeLength)];
+    return PTParseSessionData(completeData, filePath, modifiedAt, baseSession);
 }
 
 @interface PTSessionStore : NSObject
@@ -486,14 +600,22 @@ static PTSessionInfo *PTParseSession(NSString *filePath, NSDate *modifiedAt) {
 
             NSDictionary *cached = self->_cache[url.path];
             PTSessionInfo *session = nil;
+            NSUInteger parsedSize = 0;
             if (cached && [cached[@"modified"] isEqual:modified] && [cached[@"size"] isEqual:size]) {
                 session = cached[@"session"];
             } else {
-                session = PTParseSession(url.path, modified ?: NSDate.distantPast);
+                NSUInteger previousParsedSize = [cached[@"parsedSize"] unsignedIntegerValue];
+                BOOL canAppend = cached[@"session"] && size.unsignedIntegerValue > previousParsedSize;
+                session = canAppend
+                    ? PTParseSessionAppending(
+                        url.path, modified ?: NSDate.distantPast, previousParsedSize,
+                        cached[@"session"], &parsedSize)
+                    : PTParseSession(url.path, modified ?: NSDate.distantPast, &parsedSize);
                 if (session) {
                     self->_cache[url.path] = @{
                         @"modified": modified ?: NSDate.distantPast,
                         @"size": size ?: @0,
+                        @"parsedSize": @(parsedSize),
                         @"session": session
                     };
                 } else {
@@ -532,13 +654,15 @@ static PTSessionInfo *PTParseSession(NSString *filePath, NSDate *modifiedAt) {
         [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
         [url getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
         [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+        NSUInteger parsedSize = 0;
         PTSessionInfo *session = regular.boolValue
-            ? PTParseSession(filePath, modified ?: NSDate.distantPast)
+            ? PTParseSession(filePath, modified ?: NSDate.distantPast, &parsedSize)
             : nil;
         if (session) {
             self->_cache[filePath] = @{
                 @"modified": modified ?: NSDate.distantPast,
                 @"size": size ?: @0,
+                @"parsedSize": @(parsedSize),
                 @"session": session
             };
         } else {
@@ -875,26 +999,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 // 避免 Claude 恰好退出的瞬间，消息被 shell 当命令执行。
 - (BOOL)sendToTerminal:(NSString *)message {
     if (_terminalTTY.length == 0 || message.length == 0) return NO;
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "repeat with theWindow in windows\n"
-         "repeat with theTab in tabs of theWindow\n"
-         "if (tty of theTab) is \"%@\" then\n"
-         "set isSafe to false\n"
-         "set processNames to processes of theTab\n"
-         "repeat with p in processNames\n"
-         "set processName to (contents of p) as text\n"
-         "if processName contains \"laude\" then set isSafe to true\n"
-         "end repeat\n"
-         "if isSafe is false then return \"unsafe\"\n"
-         "do script \"%@\" in theTab\n"
-         "return \"ok\"\n"
-         "end if\n"
-         "end repeat\n"
-         "end repeat\n"
-         "return \"missing\"\n"
-         "end tell",
-         PTAppleScriptString(_terminalTTY), PTAppleScriptString(message)];
+    NSString *source = PTTerminalAutomationScript(
+        _terminalTTY, _terminalPID, message, PTTerminalAutomationActionWriteText);
     NSDictionary *error = nil;
     NSAppleEventDescriptor *result =
         [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
@@ -940,27 +1046,11 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 
 - (BOOL)sendReturnToTerminal {
     if (_terminalTTY.length == 0) return NO;
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "repeat with theWindow in windows\n"
-         "repeat with theTab in tabs of theWindow\n"
-         "if (tty of theTab) is \"%@\" then\n"
-         "set isSafe to false\n"
-         "repeat with p in (processes of theTab)\n"
-         "if ((contents of p) as text) contains \"laude\" then set isSafe to true\n"
-         "end repeat\n"
-         "if isSafe is false then return \"unsafe\"\n"
-         // 空字符串会被 AppleEvent 桥接成 Null descriptor，Terminal 实际没有
-         // 可写数据。显式传入 CR 后，Terminal 自身再附加一枚 CR；marker 已
-         // 确认闭合，因此第一枚负责提交，第二枚落在空输入上并被 Claude 忽略。
-         "do script (ASCII character 13) in theTab\n"
-         "return \"ok\"\n"
-         "end if\n"
-         "end repeat\n"
-         "end repeat\n"
-         "return \"missing\"\n"
-         "end tell",
-         PTAppleScriptString(_terminalTTY)];
+    // 空字符串会被 AppleEvent 桥接成 Null descriptor，Terminal 实际没有
+    // 可写数据。显式传入 CR 后，Terminal 自身再附加一枚 CR；marker 已
+    // 确认闭合，因此第一枚负责提交，第二枚落在空输入上并被 Claude 忽略。
+    NSString *source = PTTerminalAutomationScript(
+        _terminalTTY, _terminalPID, @"", PTTerminalAutomationActionSubmitReturn);
     NSDictionary *error = nil;
     NSAppleEventDescriptor *result =
         [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
@@ -1008,7 +1098,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
          "set processNames to processes of theTab\n"
          "repeat with p in processNames\n"
          "set processName to (contents of p) as text\n"
-         "if processName contains \"laude\" then set isSafe to true\n"
+         "if processName is \"claude\" then set isSafe to true\n"
          "end repeat\n"
          "if isSafe is false then return \"unsafe\"\n"
          "set selected tab of theWindow to theTab\n"
@@ -1228,7 +1318,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         [message rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound;
     BOOL sent = isMultiline
         ? [self sendMultilineMessage:message]
-        : [self sendToTerminal:message];
+        : [self sendToTerminal:PTNormalizedTerminalPasteText(message)];
     if (sent) {
         if (self.statusChanged) self.statusChanged(@"已写入 Terminal，等待 Claude 回复…");
         return YES;
@@ -1238,26 +1328,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 
 - (BOOL)pasteCurrentClipboardImageIntoTerminal {
     if (_terminalTTY.length == 0) return NO;
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "repeat with windowIndex from 1 to count windows\n"
-         "repeat with tabIndex from 1 to count tabs of window windowIndex\n"
-         "if (tty of tab tabIndex of window windowIndex) is \"%@\" then\n"
-         "set isSafe to false\n"
-         "set processNames to processes of tab tabIndex of window windowIndex\n"
-         "repeat with p in processNames\n"
-         "set processName to (contents of p) as text\n"
-         "if processName contains \"laude\" then set isSafe to true\n"
-         "end repeat\n"
-         "if isSafe is false then return \"unsafe\"\n"
-         "do script (ASCII character 22) in tab tabIndex of window windowIndex\n"
-         "return \"ok\"\n"
-         "end if\n"
-         "end repeat\n"
-         "end repeat\n"
-         "return \"missing\"\n"
-         "end tell",
-         PTAppleScriptString(_terminalTTY)];
+    NSString *source = PTTerminalAutomationScript(
+        _terminalTTY, _terminalPID, @"", PTTerminalAutomationActionPasteImage);
     NSDictionary *error = nil;
     NSAppleEventDescriptor *result =
         [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
@@ -2603,7 +2675,22 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSString *json = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
     if (!json) return;
 
-    NSString *script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
+    NSUInteger messageCount = session.assistantMessages.count;
+    BOOL canAppend = [_floatingRenderedSessionID isEqual:session.sessionID] &&
+        _floatingRenderedModifiedAt != nil && _floatingRenderedMessageCount < messageCount;
+    NSString *script = nil;
+    if (canAppend) {
+        NSArray *incoming = [session.assistantMessages subarrayWithRange:
+            NSMakeRange(_floatingRenderedMessageCount, messageCount - _floatingRenderedMessageCount)];
+        NSData *incomingData = [NSJSONSerialization dataWithJSONObject:incoming options:0 error:nil];
+        NSString *incomingJSON = incomingData
+            ? [[NSString alloc] initWithData:incomingData encoding:NSUTF8StringEncoding] : nil;
+        if (incomingJSON) {
+            script = [NSString stringWithFormat:
+                @"window.appendClaudeMessages(%@, %@); null;", json, incomingJSON];
+        }
+    }
+    if (!script) script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
     NSUInteger generation = _floatingRenderGeneration;
     NSString *targetSessionID = [session.sessionID copy];
     NSDate *targetModifiedAt = session.modifiedAt;
@@ -3176,11 +3263,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _usageFetchInFlight = YES;
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSString *credentialText = PTRunTool(@"/usr/bin/security", @[
-            @"find-generic-password", @"-s", @"Claude Code-credentials",
-            @"-a", NSUserName(), @"-w"
-        ]);
-        NSData *credentialData = [credentialText dataUsingEncoding:NSUTF8StringEncoding];
+        NSError *keychainError = nil;
+        NSData *credentialData = PTClaudeCredentialData(&keychainError);
         NSDictionary *credentials = credentialData
             ? [NSJSONSerialization JSONObjectWithData:credentialData options:0 error:nil] : nil;
         NSDictionary *oauth = [credentials[@"claudeAiOauth"] isKindOfClass:NSDictionary.class]
@@ -3189,7 +3273,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
             ? oauth[@"accessToken"] : @"";
         if (token.length == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf finishClaudeUsageWithPayload:nil error:@"未读取到 Claude Code 登录凭据"];
+                [weakSelf finishClaudeUsageWithPayload:nil error:keychainError.localizedDescription
+                    ?: @"未读取到 Claude Code 登录凭据"];
             });
             return;
         }
@@ -3627,7 +3712,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 }
 
 // 被 applySessions（每 1.5 秒一次）和 tableViewSelectionDidChange 双双调用到。
-// JSONL 有修订时完整重绘；完全相同的修订仍直接跳过，避免轮询干扰历史阅读。
+// JSONL 只追加新消息时走 DOM 增量追加，保留老师展开的 details、选区和滚动位置；
+// 切换会话、消息数回退或同数量内容修订时才用完整快照校正状态。
 - (void)renderSession:(PTSessionInfo *)session {
     if (!_webReady || !session) return;
     if (_renderInFlight) {
@@ -3659,9 +3745,21 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     if (!jsonData) return;
     NSString *json = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     if (!json) return;
-    // JSONL 是唯一真相源。每次文件修订都用完整快照覆盖 WebView，避免原生计数、
-    // JavaScript 增量状态和两个窗口之间出现三套互相漂移的缓存。
-    NSString *script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
+    BOOL canAppend = [_renderedSessionID isEqual:session.sessionID] &&
+        _renderedModifiedAt != nil && _renderedMessageCount < messageCount;
+    NSString *script = nil;
+    if (canAppend) {
+        NSArray *incoming = [session.assistantMessages subarrayWithRange:
+            NSMakeRange(_renderedMessageCount, messageCount - _renderedMessageCount)];
+        NSData *incomingData = [NSJSONSerialization dataWithJSONObject:incoming options:0 error:nil];
+        NSString *incomingJSON = incomingData
+            ? [[NSString alloc] initWithData:incomingData encoding:NSUTF8StringEncoding] : nil;
+        if (incomingJSON) {
+            script = [NSString stringWithFormat:
+                @"window.appendClaudeMessages(%@, %@); null;", json, incomingJSON];
+        }
+    }
+    if (!script) script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
 
     _renderInFlight = YES;
     __weak typeof(self) weakSelf = self;

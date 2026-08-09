@@ -329,13 +329,12 @@
   function diffLines(oldValue, newValue) {
     const before = String(oldValue || '').replace(/\r\n?/g, '\n').split('\n');
     const after = String(newValue || '').replace(/\r\n?/g, '\n').split('\n');
-    const table = Array.from({ length: before.length + 1 },
-      () => new Uint32Array(after.length + 1));
-
     if (before.length * after.length > 120000) {
       return before.map(text => ({ type: 'remove', text }))
         .concat(after.map(text => ({ type: 'add', text })));
     }
+    const table = Array.from({ length: before.length + 1 },
+      () => new Uint32Array(after.length + 1));
     for (let i = before.length - 1; i >= 0; i--) {
       for (let j = after.length - 1; j >= 0; j--) {
         table[i][j] = before[i] === after[j]
@@ -488,18 +487,42 @@
     const incoming = Array.isArray(newMessages) ? newMessages : [];
     const identity = value => value && (value.sessionId || value.title || '');
     if (!state.session || identity(state.session) !== identity(session)) {
-      return setClaudeSession(Object.assign({}, session, { messages: incoming }));
+      return setClaudeSession(session);
     }
-    state.session = Object.assign({}, state.session, session, {
+    const metadata = Object.assign({}, session);
+    delete metadata.messages;
+    state.session = Object.assign({}, state.session, metadata, {
       messages: state.session.messages.concat(incoming)
     });
-    state.renderedCount += incoming.length;
+    state.renderedCount = state.session.messages.length;
     const root = rootElement();
     if (!root || !incoming.length) return renderSession(state.session);
 
     const shouldFollow = nearBottom();
-    root.innerHTML = renderSession(state.session);
-    await typeset([root]);
+    const addedNodes = [];
+    const appendHTML = (parent, html) => {
+      const template = scope.document.createElement('template');
+      template.innerHTML = html;
+      const nodes = Array.from(template.content.childNodes);
+      nodes.forEach(node => parent.appendChild(node));
+      addedNodes.push(...nodes.filter(node => node.nodeType === 1));
+      return nodes.find(node => node.nodeType === 1) || null;
+    };
+    const emptyTurn = () => appendHTML(root,
+      '<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span></header><div class="turn-events"></div></section>');
+
+    incoming.forEach(message => {
+      if (eventKind(message) === 'user') {
+        appendHTML(root,
+          `<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span>${renderEvent(message, state.session)}</header><div class="turn-events"></div></section>`);
+        return;
+      }
+      let turn = root.querySelector('section.turn:last-of-type');
+      if (!turn) turn = emptyTurn();
+      const events = turn.querySelector('.turn-events');
+      appendHTML(events, renderEvent(message, state.session));
+    });
+    await typeset(addedNodes);
     if (shouldFollow && typeof scope.scrollTo === 'function') {
       const reduce = scope.matchMedia && scope.matchMedia('(prefers-reduced-motion: reduce)').matches;
       scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: reduce ? 'auto' : 'smooth' });
@@ -513,6 +536,7 @@
     cleanTranscriptText,
     inlineMarkup,
     renderMarkdown,
+    diffLines,
     renderEvent,
     renderSession,
     quotePayloadFromSelection,

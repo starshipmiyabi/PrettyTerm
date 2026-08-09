@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <sys/types.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -50,10 +51,25 @@ FOUNDATION_EXPORT NSString *PTMessageForClaudeAttachments(
     NSUInteger imageCount
 );
 
-// 原生粘贴前统一行尾；粘贴动作和唯一一次 Return 由 Bridge 分阶段投递。
+// 原生粘贴前统一行尾并剥离可改变 TTY 状态的控制字符；粘贴动作和唯一一次
+// Return 由 Bridge 分阶段投递。
 FOUNDATION_EXPORT NSString *PTNormalizedTerminalPasteText(NSString *message);
 FOUNDATION_EXPORT NSString *PTTerminalSubmissionPayload(NSString *message);
 FOUNDATION_EXPORT NSInteger PTLatestTerminalPasteMarker(NSString *contents);
+
+typedef NS_ENUM(NSInteger, PTTerminalAutomationAction) {
+    PTTerminalAutomationActionWriteText,
+    PTTerminalAutomationActionSubmitReturn,
+    PTTerminalAutomationActionPasteImage,
+};
+
+// 构造带 TTY、PID 与精确 Claude 进程名校验的 Terminal AppleScript。
+FOUNDATION_EXPORT NSString *PTTerminalAutomationScript(
+    NSString *tty,
+    pid_t claudePID,
+    NSString *message,
+    PTTerminalAutomationAction action
+);
 
 typedef NS_ENUM(NSInteger, PTComposerKeyAction) {
     PTComposerKeyActionDefer,

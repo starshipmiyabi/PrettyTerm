@@ -38,6 +38,16 @@ test('thinking and ordinary tools start folded while diff and errors start open'
   assert.match(error, /^<details class="event error-event" open>/);
 });
 
+test('large diffs take the bounded fallback before allocating an LCS table', () => {
+  const before = Array.from({ length: 20000 }, (_, index) => `old ${index}`).join('\n');
+  const after = Array.from({ length: 20000 }, (_, index) => `new ${index}`).join('\n');
+  const lines = renderer.diffLines(before, after);
+
+  assert.equal(lines.length, 40000);
+  assert.equal(lines[0].type, 'remove');
+  assert.equal(lines.at(-1).type, 'add');
+});
+
 test('terminal residue is removed without deleting useful text', () => {
   const dirty = '\u001b[31m失败\u001b[0m <local-command-stdout>保留这段</local-command-stdout>\n<command-name>npm test</command-name>';
   const clean = renderer.cleanTranscriptText(dirty);

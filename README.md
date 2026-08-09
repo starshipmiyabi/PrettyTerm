@@ -44,6 +44,12 @@ cd PrettyTerm
 ./build-app.command
 ```
 
+Local builds use ad-hoc signing by default, with Hardened Runtime and the minimum Apple Events entitlement enabled. For a distributable build with stable identity, provide an Apple-issued Developer ID Application identity:
+
+```bash
+PRETTYTERM_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build-app.command
+```
+
 The application is written to:
 
 ```text
@@ -56,9 +62,15 @@ Run the complete validation suite with:
 zsh Tests/verify.sh
 ```
 
+Create the versioned DMG and `SHA256SUMS.txt` with:
+
+```bash
+./package-dmg.command
+```
+
 ## How It Works
 
-PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders a read-only conversation snapshot in a local `WKWebView`. Sending remains anchored to Apple Terminal: PrettyTerm validates the selected Claude process and session before writing to the bound tab.
+PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders a read-only conversation snapshot in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. Sending remains anchored to Apple Terminal: PrettyTerm validates the selected Claude PID, TTY, exact process name, and session before writing to the bound tab.
 
 PrettyTerm does not replace Claude Code or run a separate agent service. Claude.ai Remote Control is intentionally disabled.
 
@@ -77,7 +89,9 @@ The diff panel shows tracked changes relative to `HEAD` and lists untracked file
 
 - Conversation transcripts are read from the local machine.
 - PrettyTerm does not upload transcript contents to its own server.
-- The plan-usage panel requests the authenticated Claude usage endpoint to display the current 5-hour and 7-day limits.
+- The plan-usage panel reads the `Claude Code-credentials` item through macOS Security APIs under PrettyTerm's own code identity. It does not invoke `/usr/bin/security` or print the credential.
+- The access token is sent only as authorization for Anthropic's authenticated Claude usage endpoint to display the current 5-hour and 7-day limits.
+- The conversation WebView blocks network connections with Content Security Policy; bundled MathJax cannot dynamically load `require` or `autoload` extensions.
 - API-equivalent cost is an estimate based on transcript usage data and public API pricing; it is not a subscription charge.
 
 ## Current Limitations
@@ -94,7 +108,9 @@ Sources/       Native Objective-C application code
 Resources/     Conversation renderer, MathJax bundle, and app artwork
 Tests/         Native and JavaScript regression tests
 Info.plist     Bundle metadata and release version
+PrettyTerm.entitlements
 build-app.command
+package-dmg.command
 ```
 
 ## Contributing

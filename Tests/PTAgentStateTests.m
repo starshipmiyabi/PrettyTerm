@@ -65,12 +65,28 @@ int main(void) {
         PTAssert([PTNormalizedTerminalPasteText(@"第一行\r\n第二行\r第三行") isEqual:
             @"第一行\n第二行\n第三行"],
             @"native multiline paste must normalize CRLF and CR without losing line breaks");
+        NSString *unsafeControls = [NSString stringWithFormat:@"安全%C[201~尾部%C",
+            (unichar)0x1B, (unichar)0x07];
+        PTAssert([PTNormalizedTerminalPasteText(unsafeControls) isEqual:@"安全[201~尾部"],
+            @"terminal messages must strip ESC and other executable control characters");
         PTAssert([PTTerminalSubmissionPayload(@"单行消息") isEqual:@"单行消息"],
             @"single-line Terminal submissions must not gain control sequences");
         NSString *escape = [NSString stringWithFormat:@"%C", (unichar)0x1B];
         PTAssert([PTTerminalSubmissionPayload(@"第一行\r\n第二行") isEqual:
             [NSString stringWithFormat:@"%@[200~第一行\n第二行%@[201~", escape, escape]],
             @"multiline Terminal submissions must use one complete bracketed-paste frame");
+        NSString *automation = PTTerminalAutomationScript(
+            @"/dev/ttys007", 4321, @"hello", PTTerminalAutomationActionWriteText);
+        PTAssert([automation containsString:@"my do shell script \"/bin/ps -p 4321 -o tty="],
+            @"Terminal automation must revalidate the exact Claude PID inside the AppleScript");
+        PTAssert([automation containsString:@"if liveTTY is not \"ttys007\" then return \"unsafe\""],
+            @"Terminal automation must reject a PID that moved away from the bound TTY");
+        PTAssert([automation containsString:@"if processName is \"claude\" then set isSafe to true"],
+            @"Terminal automation must use an exact Claude process-name check");
+        PTAssert(![automation containsString:@"contains \"laude\""],
+            @"Terminal automation must not accept substring process-name matches");
+        PTAssert([automation containsString:@"if isSafe is false then return \"unsafe\""],
+            @"Terminal automation must retain the unsafe early-return branch");
         PTAssert(PTLatestTerminalPasteMarker(@"before\n[Pasted text #2 +4 lines]\nafter") == 2,
             @"Terminal paste acknowledgement must read Claude's visible marker number");
         PTAssert(PTLatestTerminalPasteMarker(

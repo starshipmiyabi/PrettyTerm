@@ -19,6 +19,7 @@ clang \
   -framework AppKit \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
+  -framework Security \
   "$project_dir/Sources/PTAgentState.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Sources/PrettyTerm.m" \
@@ -32,10 +33,23 @@ if [[ -f "$project_dir/Resources/app.js" ]]; then
   cp "$project_dir/Resources/app.js" "$resources_dir/app.js"
 fi
 
-# 注意：ad-hoc 签名（--sign -）每次重新构建都会换 cdhash，
-# 这会让系统认为这是"新 app"，之前授予的"允许 PrettyTerm 控制 Terminal"权限要重新弹窗。
-# 想要跨重建保留权限，需要在钥匙串里建一个自签名证书，改用 --sign "证书名"。
-codesign --force --sign - "$app_dir"
+# 正式发布时传入 Developer ID Application 身份：
+# PRETTYTERM_SIGNING_IDENTITY="Developer ID Application: ..." ./build-app.command
+# 未提供身份时保留可复现的本地 ad-hoc 构建，但仍启用 Hardened Runtime 与最小权限。
+signing_identity="${PRETTYTERM_SIGNING_IDENTITY:--}"
+codesign_args=(
+  --force
+  --options runtime
+  --entitlements "$project_dir/PrettyTerm.entitlements"
+  --sign "$signing_identity"
+)
+if [[ "$signing_identity" != "-" ]]; then
+  codesign_args+=(--timestamp)
+else
+  codesign_args+=(--timestamp=none)
+  print -u2 "warning: ad-hoc signing is for local beta builds; Developer ID is required for stable distributed trust"
+fi
+codesign "${codesign_args[@]}" "$app_dir"
 
 # Finder 会长时间缓存同一路径下旧 bundle 的占位图标。构建完成后主动更新
 # bundle 时间戳并重新交给 LaunchServices 注册，避免新 icns 已在包内却仍显示默认图标。

@@ -9,6 +9,10 @@ const source = fs.readFileSync(
   path.resolve(__dirname, '../Sources/PrettyTerm.m'),
   'utf8'
 );
+const agentSource = fs.readFileSync(
+  path.resolve(__dirname, '../Sources/PTAgentState.m'),
+  'utf8'
+);
 
 test('Command-O toggles one independent always-on-top conversation panel', () => {
   assert.match(source, /keyEquivalent:@"o"/);
@@ -49,7 +53,7 @@ test('successful sends clear both composers through the native text editing tran
   assert.doesNotMatch(floatingSend, /_floatingComposerTextView\.string\s*=\s*@""/);
 });
 
-test('both windows redraw from the complete JSONL snapshot without incremental DOM state', () => {
+test('both windows append new JSONL messages and retain full-snapshot recovery', () => {
   const mainRender = source.match(
     /- \(void\)renderSession:\(PTSessionInfo \*\)session[\s\S]*?(?=\n- \([^\n]+\))/
   );
@@ -59,8 +63,9 @@ test('both windows redraw from the complete JSONL snapshot without incremental D
   assert.ok(mainRender, 'main renderer must exist');
   assert.ok(floatingRender, 'floating renderer must exist');
   assert.match(mainRender[0], /window\.setClaudeSession/);
-  assert.doesNotMatch(mainRender[0], /window\.appendClaudeMessages/);
+  assert.match(mainRender[0], /window\.appendClaudeMessages/);
   assert.match(floatingRender[0], /window\.setClaudeSession/);
+  assert.match(floatingRender[0], /window\.appendClaudeMessages/);
   assert.match(mainRender[0], /PTSessionInfo \*latest = self->_selectedSession/);
   assert.match(floatingRender[0], /sessionWithID:self->_floatingSessionID/);
 });
@@ -104,12 +109,14 @@ test('both composers are taller and keep slightly wider side margins', () => {
 test('production sending keeps both single-line and multiline messages on the safe Terminal channel', () => {
   const sendMethod = source.match(/- \(BOOL\)sendMessage:\(NSString \*\)message \{[\s\S]*?\n\}/)?.[0] || '';
   assert.match(sendMethod, /\? \[self sendMultilineMessage:message\]/);
-  assert.match(sendMethod, /: \[self sendToTerminal:message\]/);
+  assert.match(sendMethod, /: \[self sendToTerminal:PTNormalizedTerminalPasteText\(message\)\]/);
   assert.doesNotMatch(sendMethod, /pasteAndSubmitMultilineMessage/);
   assert.doesNotMatch(sendMethod, /AXIsProcessTrusted/);
   assert.match(source, /markerAfter >= 0 && markerAfter != markerBefore/);
-  assert.match(source, /do script \(ASCII character 13\) in theTab/);
-  assert.doesNotMatch(source, /do script \\\"\\\" in theTab/);
+  assert.match(agentSource, /do script \(ASCII character 13\) in theTab/);
+  assert.match(agentSource, /if processName is \\\"claude\\\" then set isSafe to true/);
+  assert.doesNotMatch(agentSource, /contains \\\"laude\\\"/);
+  assert.doesNotMatch(agentSource, /do script \\\"\\\" in theTab/);
 });
 
 test('Claude.ai Remote Control is hard-disabled', () => {
@@ -140,4 +147,18 @@ test('Git diff observes remembered transcript directories without changing Claud
   assert.match(source, /展开 Git diff →/);
   assert.match(source, /不会改变 Claude Code/);
   assert.match(source, /Claude Code 执行 \/add-dir/);
+});
+
+test('active transcripts parse only appended JSONL bytes', () => {
+  assert.match(source, /PTReadFileDataFromOffset/);
+  assert.match(source, /previousParsedSize/);
+  assert.match(source, /PTParseSessionAppending/);
+  assert.match(source, /@"parsedSize"/);
+});
+
+test('Claude credentials are read by PrettyTerm instead of the security CLI', () => {
+  assert.match(source, /SecItemCopyMatching/);
+  assert.match(source, /kSecAttrService:\s*@"Claude Code-credentials"/);
+  assert.doesNotMatch(source, /find-generic-password/);
+  assert.doesNotMatch(source, /PTRunTool\(@"\/usr\/bin\/security"/);
 });

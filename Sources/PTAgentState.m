@@ -125,8 +125,22 @@ NSString *PTMessageForClaudeAttachments(NSString *message, NSUInteger imageCount
 
 NSString *PTNormalizedTerminalPasteText(NSString *message) {
     NSString *value = message ?: @"";
-    return [[value stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+    NSString *normalized = [[value stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
         stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSMutableString *safe = [NSMutableString stringWithCapacity:normalized.length];
+    [normalized enumerateSubstringsInRange:NSMakeRange(0, normalized.length)
+        options:NSStringEnumerationByComposedCharacterSequences
+        usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
+            (void)substringRange;
+            (void)enclosingRange;
+            (void)stop;
+            if (substring.length == 0) return;
+            unichar first = [substring characterAtIndex:0];
+            BOOL permittedWhitespace = first == '\n' || first == '\t';
+            BOOL control = first < 0x20 || (first >= 0x7F && first <= 0x9F);
+            if (!control || permittedWhitespace) [safe appendString:substring];
+        }];
+    return safe;
 }
 
 NSString *PTTerminalSubmissionPayload(NSString *message) {
@@ -161,6 +175,65 @@ NSInteger PTLatestTerminalPasteMarker(NSString *contents) {
             latest = MAX(latest, value);
         }];
     return latest;
+}
+
+static NSString *PTAppleScriptEmbeddedText(NSString *value) {
+    NSString *escaped = [value ?: @"" stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+    NSString *escape = [NSString stringWithFormat:@"%C", (unichar)0x1B];
+    escaped = [escaped stringByReplacingOccurrencesOfString:escape
+        withString:@"\" & (ASCII character 27) & \""];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\n\n"
+        withString:@"\" & linefeed & linefeed & \""];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\n"
+        withString:@"\" & linefeed & \""];
+    return [escaped stringByReplacingOccurrencesOfString:@"\r" withString:@""];
+}
+
+NSString *PTTerminalAutomationScript(
+    NSString *tty,
+    pid_t claudePID,
+    NSString *message,
+    PTTerminalAutomationAction action
+) {
+    if (tty.length == 0 || claudePID <= 0) return @"";
+    NSString *writeCommand = nil;
+    switch (action) {
+        case PTTerminalAutomationActionWriteText:
+            if (message.length == 0) return @"";
+            writeCommand = [NSString stringWithFormat:@"do script \"%@\" in theTab",
+                PTAppleScriptEmbeddedText(message)];
+            break;
+        case PTTerminalAutomationActionSubmitReturn:
+            writeCommand = @"do script (ASCII character 13) in theTab";
+            break;
+        case PTTerminalAutomationActionPasteImage:
+            writeCommand = @"do script (ASCII character 22) in theTab";
+            break;
+    }
+    NSString *shortTTY = tty.lastPathComponent;
+    return [NSString stringWithFormat:
+        @"tell application id \"com.apple.Terminal\"\n"
+         "repeat with theWindow in windows\n"
+         "repeat with theTab in tabs of theWindow\n"
+         "if (tty of theTab) is \"%@\" then\n"
+         "set liveTTY to my do shell script \"/bin/ps -p %d -o tty= | /usr/bin/xargs\"\n"
+         "if liveTTY is not \"%@\" then return \"unsafe\"\n"
+         "set isSafe to false\n"
+         "repeat with p in (processes of theTab)\n"
+         "set processName to (contents of p) as text\n"
+         "if processName is \"claude\" then set isSafe to true\n"
+         "end repeat\n"
+         "if isSafe is false then return \"unsafe\"\n"
+         "%@\n"
+         "return \"ok\"\n"
+         "end if\n"
+         "end repeat\n"
+         "end repeat\n"
+         "return \"missing\"\n"
+         "end tell",
+         PTAppleScriptEmbeddedText(tty), claudePID,
+         PTAppleScriptEmbeddedText(shortTTY), writeCommand];
 }
 
 PTComposerKeyAction PTComposerActionForKey(

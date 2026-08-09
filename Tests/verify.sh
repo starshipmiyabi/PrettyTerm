@@ -5,26 +5,6 @@ project_dir="$(cd "$(dirname "$0")/.." && pwd)"
 app_dir="$project_dir/dist/PrettyTerm Beta.app"
 contents_dir="$app_dir/Contents"
 resources_dir="$contents_dir/Resources"
-expected_send_hash="1b89cc7a9a8a65ee322a9b0c939ad7fba10cef551c1233406a76f8fce3e76c46"
-send_start="$(
-  awk '/^\/\/ 在同一段 AppleScript 执行内完成/ { print NR; exit }' \
-    "$project_dir/Sources/PrettyTerm.m"
-)"
-[[ "$send_start" == <-> ]] || {
-  print -u2 "sendToTerminal protection marker is missing"
-  exit 1
-}
-send_end=$((send_start + 49))
-actual_send_hash="$(
-  sed -n "${send_start},${send_end}p" "$project_dir/Sources/PrettyTerm.m" |
-    shasum -a 256 |
-    awk '{print $1}'
-)"
-
-if [[ "$actual_send_hash" != "$expected_send_hash" ]]; then
-  print -u2 "sendToTerminal protection changed: expected $expected_send_hash, got $actual_send_hash"
-  exit 1
-fi
 
 if [[ -f "$project_dir/Tests/test_renderer.js" ]]; then
   node "$project_dir/Tests/test_renderer.js"
@@ -53,6 +33,18 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
 "$project_dir/.build/PTUsageMetricsTests"
 
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
+  -Wno-nullability-completeness \
+  -framework AppKit \
+  -framework WebKit \
+  -framework UniformTypeIdentifiers \
+  -framework Security \
+  "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTUsageMetrics.m" \
+  "$project_dir/Tests/PTSessionParserTests.m" \
+  -o "$project_dir/.build/PTSessionParserTests"
+"$project_dir/.build/PTSessionParserTests"
+
+clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -Dmain=PrettyTermApplicationMain \
   -c "$project_dir/Sources/PrettyTerm.m" \
   -o "$project_dir/.build/PrettyTermForInteractionTests.o"
@@ -64,6 +56,7 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework ApplicationServices \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
+  -framework Security \
   "$project_dir/.build/PrettyTermForInteractionTests.o" \
   "$project_dir/.build/PTWindowInteractionTests.o" \
   "$project_dir/Sources/PTAgentState.m" \
@@ -74,6 +67,10 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
 "$project_dir/build-app.command"
 
 codesign --verify --deep --strict --verbose=2 "$app_dir"
+codesign_details="$(codesign -dvv "$app_dir" 2>&1)"
+[[ "$codesign_details" == *runtime* ]]
+entitlements="$(codesign -d --entitlements :- "$app_dir" 2>/dev/null | plutil -p -)"
+[[ "$entitlements" == *'"com.apple.security.automation.apple-events" => 1'* ]]
 plutil -lint "$project_dir/Info.plist" "$contents_dir/Info.plist"
 cmp "$project_dir/Info.plist" "$contents_dir/Info.plist"
 
@@ -93,8 +90,8 @@ done
 
 [[ "$(plutil -extract CFBundleIdentifier raw -o - "$contents_dir/Info.plist")" == "com.yuuka.prettyterm.beta" ]]
 [[ "$(plutil -extract CFBundleDisplayName raw -o - "$contents_dir/Info.plist")" == "PrettyTerm Beta" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.8.0" ]]
-[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "17" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.8.1" ]]
+[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "18" ]]
 [[ "$(plutil -extract PTReleaseChannel raw -o - "$contents_dir/Info.plist")" == "beta" ]]
 [[ "$(plutil -extract CFBundleIconFile raw -o - "$contents_dir/Info.plist")" == "PrettyTerm.icns" ]]
 

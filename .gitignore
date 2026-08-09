@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+dist/
+.claude/
+*.app.zip
+*.xcuserstate
+
+# Local audit notes may contain machine-specific findings and paths.
+docs/code-review-findings.md
+docs/superpowers/

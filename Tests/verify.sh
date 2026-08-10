@@ -5,6 +5,7 @@ project_dir="$(cd "$(dirname "$0")/.." && pwd)"
 app_dir="$project_dir/dist/PrettyTerm Beta.app"
 contents_dir="$app_dir/Contents"
 resources_dir="$contents_dir/Resources"
+mkdir -p "$project_dir/.build"
 
 if [[ -f "$project_dir/Tests/test_renderer.js" ]]; then
   node "$project_dir/Tests/test_renderer.js"
@@ -16,7 +17,14 @@ if [[ -f "$project_dir/Tests/test_floating_window.js" ]]; then
   node "$project_dir/Tests/test_floating_window.js"
 fi
 
-mkdir -p "$project_dir/.build"
+clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
+  -framework AppKit \
+  -I"$project_dir/Sources" \
+  "$project_dir/Sources/PTGitReview.m" \
+  "$project_dir/Tests/PTGitReviewTests.m" \
+  -o "$project_dir/.build/PTGitReviewTests"
+"$project_dir/.build/PTGitReviewTests"
+
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework Foundation \
   "$project_dir/Sources/PTAgentState.m" \
@@ -39,6 +47,7 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework UniformTypeIdentifiers \
   -framework Security \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Tests/PTSessionParserTests.m" \
   -o "$project_dir/.build/PTSessionParserTests"
@@ -60,6 +69,7 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   "$project_dir/.build/PrettyTermForInteractionTests.o" \
   "$project_dir/.build/PTWindowInteractionTests.o" \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   -o "$project_dir/.build/PTWindowInteractionTests"
 "$project_dir/.build/PTWindowInteractionTests"
@@ -90,8 +100,8 @@ done
 
 [[ "$(plutil -extract CFBundleIdentifier raw -o - "$contents_dir/Info.plist")" == "com.yuuka.prettyterm.beta" ]]
 [[ "$(plutil -extract CFBundleDisplayName raw -o - "$contents_dir/Info.plist")" == "PrettyTerm Beta" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.8.3" ]]
-[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "20" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.8.4" ]]
+[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "22" ]]
 [[ "$(plutil -extract PTReleaseChannel raw -o - "$contents_dir/Info.plist")" == "beta" ]]
 [[ "$(plutil -extract CFBundleIconFile raw -o - "$contents_dir/Info.plist")" == "PrettyTerm.icns" ]]
 

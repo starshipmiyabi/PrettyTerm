@@ -5,6 +5,7 @@
 #import <Security/Security.h>
 #import <signal.h>
 #import "PTAgentState.h"
+#import "PTGitReview.h"
 #import "PTUsageMetrics.h"
 
 static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments);
@@ -728,40 +729,60 @@ static NSString *PTRunGit(NSString *directory, NSArray<NSString *> *arguments, i
     return output;
 }
 
-static NSString *PTGitDiffForDirectory(NSString *directory) {
+static NSDictionary<NSString *, NSString *> *PTGitReviewSnapshotForDirectory(NSString *directory) {
     BOOL isDirectory = NO;
     BOOL exists = directory.length > 0 &&
         [NSFileManager.defaultManager fileExistsAtPath:directory isDirectory:&isDirectory];
-    if (!exists || !isDirectory) return @"所选 Git 观察目录不存在。";
+    if (!exists || !isDirectory) {
+        return @{ @"directory": directory ?: @"", @"error": @"所选 Git 观察目录不存在。" };
+    }
 
     int rootStatus = 0;
     NSString *root = [PTRunGit(directory, @[@"rev-parse", @"--show-toplevel"], &rootStatus)
         stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (rootStatus != 0 || root.length == 0) {
-        return @"这里不是 Git 仓库。切换目录只影响 PrettyTerm 的 Git 探测，不会改变 Claude Code；需要 Claude 访问该目录时，请在 Claude Code 执行 /add-dir。";
+        return @{
+            @"directory": directory,
+            @"error": @"这里不是 Git 仓库。切换目录只影响 PrettyTerm 的 Git 探测，不会改变 Claude Code；需要 Claude 访问该目录时，请在 Claude Code 执行 /add-dir。"
+        };
     }
 
+    int branchCode = 0;
+    NSString *branch = [PTRunGit(directory, @[@"branch", @"--show-current"], &branchCode)
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    int upstreamCode = 0;
+    NSString *upstream = [PTRunGit(directory,
+        @[@"rev-parse", @"--abbrev-ref", @"--symbolic-full-name", @"@{upstream}"], &upstreamCode)
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     int statusCode = 0;
-    NSString *status = PTRunGit(directory, @[@"status", @"--short", @"--untracked-files=normal"], &statusCode);
+    NSString *status = PTRunGit(directory,
+        @[@"-c", @"core.quotepath=false", @"status", @"--short", @"--untracked-files=normal"],
+        &statusCode);
     int diffCode = 0;
-    NSString *diff = PTRunGit(directory, @[@"diff", @"--no-ext-diff", @"--no-color", @"HEAD", @"--", @"."], &diffCode);
+    NSString *diff = PTRunGit(directory,
+        @[@"-c", @"core.quotepath=false", @"diff", @"--no-ext-diff", @"--no-color",
+          @"--unified=3", @"HEAD", @"--", @"."], &diffCode);
     if (diffCode != 0) {
-        diff = PTRunGit(directory, @[@"diff", @"--no-ext-diff", @"--no-color", @"--", @"."], &diffCode);
+        diff = PTRunGit(directory,
+            @[@"-c", @"core.quotepath=false", @"diff", @"--no-ext-diff", @"--no-color",
+              @"--unified=3", @"--", @"."], &diffCode);
     }
     if (statusCode != 0 || diffCode != 0) {
-        return [NSString stringWithFormat:@"Git 探测失败。\n\n%@%@", status ?: @"", diff ?: @""];
+        return @{
+            @"directory": directory,
+            @"root": root,
+            @"error": [NSString stringWithFormat:@"Git 探测失败：%@%@",
+                status ?: @"", diff ?: @""]
+        };
     }
-
-    NSString *trimmedStatus = [status stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    NSString *trimmedDiff = [diff stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trimmedStatus.length == 0 && trimmedDiff.length == 0) {
-        return [NSString stringWithFormat:@"仓库：%@\n\n工作树干净，没有可显示的 Git diff。", root];
-    }
-    NSMutableString *result = [NSMutableString stringWithFormat:@"仓库：%@\n观察：%@\n", root, directory];
-    if (trimmedStatus.length > 0) [result appendFormat:@"\n状态\n%@\n", trimmedStatus];
-    if (trimmedDiff.length > 0) [result appendFormat:@"\nDiff（相对 HEAD）\n%@\n", trimmedDiff];
-    else [result appendString:@"\n没有已跟踪文件的 diff；未跟踪文件仅列在状态中。\n"];
-    return result;
+    return @{
+        @"directory": directory,
+        @"root": root,
+        @"branch": branchCode == 0 ? branch : @"HEAD",
+        @"upstream": upstreamCode == 0 ? upstream : @"",
+        @"status": status ?: @"",
+        @"diff": diff ?: @""
+    };
 }
 
 static NSString *PTAppleScriptString(NSString *value) {
@@ -1640,18 +1661,22 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSTextField *_inspectorQuotaLabel;
     NSTextField *_inspectorCostLabel;
     NSPopUpButton *_gitDirectoryPicker;
+    NSButton *_removeGitDirectoryButton;
     NSTextField *_gitDirectoryInput;
     NSTextField *_gitDirectoryHintLabel;
     NSButton *_gitDiffToggleButton;
     NSButton *_gitDiffRefreshButton;
+    NSProgressIndicator *_gitDiffProgress;
     NSScrollView *_gitDiffScroll;
     NSTextView *_gitDiffTextView;
     NSMutableArray<NSString *> *_gitDirectoryPaths;
+    NSMutableSet<NSString *> *_gitDirectoriesSuppressedUntilSessionChange;
     NSString *_gitObservedDirectory;
     BOOL _gitDiffExpanded;
     BOOL _gitDirectoryManuallySelected;
     CGFloat _inspectorWidthBeforeGitDiff;
     NSUInteger _gitDiffGeneration;
+    NSUInteger _gitDiffAnimationGeneration;
     NSTextField *_bottomStatusLabel;
     NSButton *_inspectorToggleButton;
     NSStackView *_tasksStack;
@@ -2101,7 +2126,22 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _gitDirectoryPicker.action = @selector(gitDirectorySelectionChanged:);
     [_gitDirectoryPicker addItemWithTitle:@"等待会话目录…"];
     _gitDirectoryPicker.enabled = NO;
-    [gitStack addArrangedSubview:_gitDirectoryPicker];
+    NSStackView *directoryRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    directoryRow.translatesAutoresizingMaskIntoConstraints = NO;
+    directoryRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    directoryRow.alignment = NSLayoutAttributeCenterY;
+    directoryRow.spacing = 6;
+    _removeGitDirectoryButton = [NSButton buttonWithTitle:@"删除"
+        target:self action:@selector(removeSelectedGitDirectory:)];
+    _removeGitDirectoryButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _removeGitDirectoryButton.bezelStyle = NSBezelStyleRounded;
+    _removeGitDirectoryButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
+    _removeGitDirectoryButton.toolTip = @"从 PrettyTerm 记忆中删除当前目录";
+    _removeGitDirectoryButton.enabled = NO;
+    [directoryRow addArrangedSubview:_gitDirectoryPicker];
+    [directoryRow addArrangedSubview:_removeGitDirectoryButton];
+    [_removeGitDirectoryButton.widthAnchor constraintEqualToConstant:48].active = YES;
+    [gitStack addArrangedSubview:directoryRow];
 
     NSStackView *manualRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
     manualRow.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2134,7 +2174,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     gitActionRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     gitActionRow.alignment = NSLayoutAttributeCenterY;
     gitActionRow.spacing = 6;
-    _gitDiffToggleButton = [NSButton buttonWithTitle:@"展开 Git diff →" target:self action:@selector(toggleGitDiff:)];
+    _gitDiffToggleButton = [NSButton buttonWithTitle:@"展开 Git 审阅  ›" target:self action:@selector(toggleGitDiff:)];
     _gitDiffToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
     _gitDiffToggleButton.bezelStyle = NSBezelStyleRounded;
     _gitDiffToggleButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
@@ -2143,8 +2183,17 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _gitDiffRefreshButton.bezelStyle = NSBezelStyleRounded;
     _gitDiffRefreshButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
     _gitDiffRefreshButton.hidden = YES;
+    _gitDiffProgress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    _gitDiffProgress.translatesAutoresizingMaskIntoConstraints = NO;
+    _gitDiffProgress.style = NSProgressIndicatorStyleSpinning;
+    _gitDiffProgress.controlSize = NSControlSizeSmall;
+    _gitDiffProgress.displayedWhenStopped = NO;
+    _gitDiffProgress.hidden = YES;
     [gitActionRow addArrangedSubview:_gitDiffToggleButton];
     [gitActionRow addArrangedSubview:_gitDiffRefreshButton];
+    [gitActionRow addArrangedSubview:_gitDiffProgress];
+    [_gitDiffProgress.widthAnchor constraintEqualToConstant:14].active = YES;
+    [_gitDiffProgress.heightAnchor constraintEqualToConstant:14].active = YES;
     [gitStack addArrangedSubview:gitActionRow];
 
     _gitDiffScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -2152,22 +2201,32 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _gitDiffScroll.hasVerticalScroller = YES;
     _gitDiffScroll.hasHorizontalScroller = YES;
     _gitDiffScroll.autohidesScrollers = YES;
-    _gitDiffScroll.borderType = NSBezelBorder;
+    _gitDiffScroll.borderType = NSNoBorder;
+    _gitDiffScroll.drawsBackground = YES;
+    _gitDiffScroll.backgroundColor = NSColor.textBackgroundColor;
+    _gitDiffScroll.wantsLayer = YES;
+    _gitDiffScroll.layer.cornerRadius = 10.0;
+    _gitDiffScroll.layer.borderWidth = 0.7;
+    _gitDiffScroll.layer.borderColor = [NSColor.separatorColor colorWithAlphaComponent:0.7].CGColor;
+    _gitDiffScroll.layer.masksToBounds = YES;
     _gitDiffScroll.hidden = YES;
     // 隐藏状态不能携带一个 560px 的初始 frame，否则它会通过 scroll/stack 的
     // fitting size 把整个检查器锁宽，分隔条看似又“拖不动”。展开后由外层宽度决定。
     _gitDiffTextView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 0, 360)];
     _gitDiffTextView.editable = NO;
     _gitDiffTextView.selectable = YES;
-    _gitDiffTextView.richText = NO;
+    _gitDiffTextView.richText = YES;
+    _gitDiffTextView.drawsBackground = NO;
+    _gitDiffTextView.usesFindBar = YES;
+    _gitDiffTextView.usesAdaptiveColorMappingForDarkAppearance = YES;
     _gitDiffTextView.font = [NSFont monospacedSystemFontOfSize:10.5 weight:NSFontWeightRegular];
-    _gitDiffTextView.textContainerInset = NSMakeSize(8, 8);
+    _gitDiffTextView.textContainerInset = NSMakeSize(10, 10);
     _gitDiffTextView.horizontallyResizable = YES;
     _gitDiffTextView.verticallyResizable = YES;
     _gitDiffTextView.minSize = NSMakeSize(0, 0);
     _gitDiffTextView.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
     _gitDiffTextView.textContainer.widthTracksTextView = NO;
-    _gitDiffTextView.string = @"选择目录后展开 Git diff。";
+    _gitDiffTextView.string = @"选择目录后展开 Git 审阅。";
     _gitDiffScroll.documentView = _gitDiffTextView;
     [_gitDiffScroll.heightAnchor constraintEqualToConstant:360].active = YES;
     [gitStack addArrangedSubview:_gitDiffScroll];
@@ -2178,7 +2237,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         [gitStack.leadingAnchor constraintEqualToAnchor:gitCard.leadingAnchor constant:12],
         [gitStack.trailingAnchor constraintEqualToAnchor:gitCard.trailingAnchor constant:-12],
         [gitStack.bottomAnchor constraintEqualToAnchor:gitCard.bottomAnchor constant:-12],
-        [_gitDirectoryPicker.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
+        [directoryRow.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
         [manualRow.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
         [_gitDirectoryHintLabel.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
         [gitActionRow.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
@@ -3321,8 +3380,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         item.toolTip = path;
     }
     _gitDirectoryPicker.enabled = _gitDirectoryPaths.count > 0;
+    _removeGitDirectoryButton.enabled = _gitDirectoryPaths.count > 0;
     if (_gitDirectoryPaths.count == 0) {
         [_gitDirectoryPicker addItemWithTitle:@"尚未发现目录"];
+        _gitObservedDirectory = nil;
         return;
     }
     NSUInteger selectedIndex = [_gitDirectoryPaths indexOfObject:selectedPath];
@@ -3334,9 +3395,15 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 - (void)rememberGitDirectoriesForSession:(PTSessionInfo *)session {
     NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
     for (NSString *path in session.accessedDirectories ?: @[]) {
-        if ([path isKindOfClass:NSString.class] && [path hasPrefix:@"/"]) [paths addObject:path];
+        if ([path isKindOfClass:NSString.class] && [path hasPrefix:@"/"] &&
+            ![_gitDirectoriesSuppressedUntilSessionChange containsObject:path]) {
+            [paths addObject:path];
+        }
     }
-    if (session.cwd.length > 0 && [session.cwd hasPrefix:@"/"]) [paths addObject:session.cwd];
+    if (session.cwd.length > 0 && [session.cwd hasPrefix:@"/"] &&
+        ![_gitDirectoriesSuppressedUntilSessionChange containsObject:session.cwd]) {
+        [paths addObject:session.cwd];
+    }
     NSArray *stored = [NSUserDefaults.standardUserDefaults arrayForKey:@"PTGitObservedDirectories"];
     for (id value in stored ?: @[]) {
         if ([value isKindOfClass:NSString.class] && [value hasPrefix:@"/"]) [paths addObject:value];
@@ -3353,6 +3420,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     } else if (!_gitObservedDirectory.length && nextPaths.count > 0) {
         [self reloadGitDirectoryPickerSelecting:preferred];
     }
+}
+
+- (void)allowRediscoveryOfGitDirectoriesForNewSession {
+    [_gitDirectoriesSuppressedUntilSessionChange removeAllObjects];
 }
 
 - (void)resizeInspectorToWidth:(CGFloat)requestedWidth {
@@ -3394,6 +3465,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         return;
     }
     if (!_gitDirectoryPaths) _gitDirectoryPaths = [NSMutableArray array];
+    [_gitDirectoriesSuppressedUntilSessionChange removeObject:path];
     if (![_gitDirectoryPaths containsObject:path]) [_gitDirectoryPaths insertObject:path atIndex:0];
     _gitObservedDirectory = [path copy];
     _gitDirectoryManuallySelected = YES;
@@ -3405,6 +3477,45 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     if (_gitDiffExpanded) [self refreshGitDiff:nil];
 }
 
+- (void)removeSelectedGitDirectory:(id)sender {
+    (void)sender;
+    NSString *path = [_gitDirectoryPicker.selectedItem.representedObject
+        isKindOfClass:NSString.class] ? _gitDirectoryPicker.selectedItem.representedObject : @"";
+    NSUInteger removedIndex = [_gitDirectoryPaths indexOfObject:path];
+    if (path.length == 0 || removedIndex == NSNotFound) return;
+
+    if (!_gitDirectoriesSuppressedUntilSessionChange) {
+        _gitDirectoriesSuppressedUntilSessionChange = [NSMutableSet set];
+    }
+    [_gitDirectoriesSuppressedUntilSessionChange addObject:path];
+    [_gitDirectoryPaths removeObjectAtIndex:removedIndex];
+    [NSUserDefaults.standardUserDefaults setObject:_gitDirectoryPaths
+        forKey:@"PTGitObservedDirectories"];
+
+    NSString *fallback = @"";
+    if (_gitDirectoryPaths.count > 0) {
+        NSUInteger fallbackIndex = MIN(removedIndex, _gitDirectoryPaths.count - 1);
+        fallback = _gitDirectoryPaths[fallbackIndex];
+    }
+    _gitObservedDirectory = nil;
+    _gitDirectoryManuallySelected = fallback.length > 0;
+    [self reloadGitDirectoryPickerSelecting:fallback];
+
+    if (_gitDirectoryPaths.count == 0) {
+        _gitDiffGeneration++;
+        [self replaceGitReviewDocument:[self gitReviewDocumentForSnapshot:@{
+            @"error": @"尚未选择 Git 观察目录。"
+        }] animated:_gitDiffExpanded];
+        _gitDiffRefreshButton.enabled = NO;
+    } else if (_gitDiffExpanded) {
+        [self refreshGitDiff:nil];
+    }
+    _statusLabel.stringValue = [NSString stringWithFormat:
+        @"已从 PrettyTerm 记忆中删除 %@", path.lastPathComponent ?: path];
+    _bottomStatusLabel.stringValue =
+        @"重新打开相关对话或手动添加即可恢复 · Claude Code 目录未改变";
+}
+
 - (void)toggleGitDiff:(id)sender {
     (void)sender;
     if (!_gitDiffExpanded && _gitObservedDirectory.length == 0) {
@@ -3412,17 +3523,74 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         return;
     }
     _gitDiffExpanded = !_gitDiffExpanded;
-    _gitDiffScroll.hidden = !_gitDiffExpanded;
-    _gitDiffRefreshButton.hidden = !_gitDiffExpanded;
-    _gitDiffToggleButton.title = _gitDiffExpanded ? @"收起 Git diff ←" : @"展开 Git diff →";
+    NSUInteger animationGeneration = ++_gitDiffAnimationGeneration;
+    BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+    _gitDiffToggleButton.title = _gitDiffExpanded ? @"收起 Git 审阅  ‹" : @"展开 Git 审阅  ›";
     if (_gitDiffExpanded) {
+        _gitDiffScroll.hidden = NO;
+        _gitDiffRefreshButton.hidden = NO;
+        _gitDiffScroll.alphaValue = reduceMotion ? 1.0 : 0.0;
         _inspectorWidthBeforeGitDiff = MAX(210.0, NSWidth(_inspectorView.frame));
         [self resizeInspectorToWidth:660.0];
+        if (!reduceMotion) {
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                context.duration = 0.20;
+                self->_gitDiffScroll.animator.alphaValue = 1.0;
+            } completionHandler:nil];
+        }
         [self refreshGitDiff:nil];
     } else {
         _gitDiffGeneration++;
+        [_gitDiffProgress stopAnimation:nil];
+        _gitDiffProgress.hidden = YES;
+        _gitDiffRefreshButton.hidden = YES;
         [self resizeInspectorToWidth:_inspectorWidthBeforeGitDiff > 0 ? _inspectorWidthBeforeGitDiff : 260.0];
+        if (reduceMotion) {
+            _gitDiffScroll.hidden = YES;
+            _gitDiffScroll.alphaValue = 1.0;
+        } else {
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                context.duration = 0.14;
+                self->_gitDiffScroll.animator.alphaValue = 0.0;
+            } completionHandler:^{
+                if (animationGeneration != self->_gitDiffAnimationGeneration ||
+                    self->_gitDiffExpanded) return;
+                self->_gitDiffScroll.hidden = YES;
+                self->_gitDiffScroll.alphaValue = 1.0;
+            }];
+        }
     }
+}
+
+- (NSAttributedString *)gitReviewDocumentForSnapshot:
+    (NSDictionary<NSString *, NSString *> *)snapshot {
+    __block NSAttributedString *document = nil;
+    [_gitDiffTextView.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        document = PTGitReviewAttributedString(snapshot);
+    }];
+    return document ?: [[NSAttributedString alloc] initWithString:@""];
+}
+
+- (void)replaceGitReviewDocument:(NSAttributedString *)document animated:(BOOL)animated {
+    if (!document) return;
+    BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+    if (!animated || reduceMotion || _gitDiffScroll.hidden) {
+        [_gitDiffTextView.textStorage setAttributedString:document];
+        _gitDiffTextView.alphaValue = 1.0;
+        [_gitDiffTextView scrollRangeToVisible:NSMakeRange(0, 0)];
+        return;
+    }
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.08;
+        self->_gitDiffTextView.animator.alphaValue = 0.22;
+    } completionHandler:^{
+        [self->_gitDiffTextView.textStorage setAttributedString:document];
+        [self->_gitDiffTextView scrollRangeToVisible:NSMakeRange(0, 0)];
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.18;
+            self->_gitDiffTextView.animator.alphaValue = 1.0;
+        } completionHandler:nil];
+    }];
 }
 
 - (void)refreshGitDiff:(id)sender {
@@ -3431,15 +3599,25 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     if (directory.length == 0) return;
     NSUInteger generation = ++_gitDiffGeneration;
     _gitDiffRefreshButton.enabled = NO;
-    _gitDiffTextView.string = @"正在读取 Git 状态与 diff…";
+    _gitDiffProgress.hidden = NO;
+    [_gitDiffProgress startAnimation:nil];
+    if (_gitDiffTextView.string.length == 0 ||
+        [_gitDiffTextView.string containsString:@"选择目录后"]) {
+        [self replaceGitReviewDocument:PTGitReviewLoadingAttributedString() animated:NO];
+    } else if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+        _gitDiffTextView.animator.alphaValue = 0.58;
+    }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *result = PTGitDiffForDirectory(directory);
+        NSDictionary<NSString *, NSString *> *snapshot =
+            PTGitReviewSnapshotForDirectory(directory);
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != self->_gitDiffGeneration ||
                 ![directory isEqual:self->_gitObservedDirectory]) return;
-            self->_gitDiffTextView.string = result ?: @"Git 没有返回内容。";
-            [self->_gitDiffTextView scrollRangeToVisible:NSMakeRange(0, 0)];
+            [self->_gitDiffProgress stopAnimation:nil];
+            self->_gitDiffProgress.hidden = YES;
             self->_gitDiffRefreshButton.enabled = YES;
+            [self replaceGitReviewDocument:[self gitReviewDocumentForSnapshot:snapshot]
+                                  animated:YES];
         });
     });
 }
@@ -3885,6 +4063,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSInteger row = _sessionTable.selectedRow;
     if (row < 0 || row >= (NSInteger)_sessions.count) return;
     BOOL changed = ![_selectedSession.sessionID isEqual:_sessions[row].sessionID];
+    if (changed) [self allowRediscoveryOfGitDirectoriesForNewSession];
     _selectedSession = _sessions[row];
     [self showSelectedSession];
     [self updateConnectButtonTitle];

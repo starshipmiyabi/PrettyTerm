@@ -143,10 +143,17 @@ test('Git diff observes remembered transcript directories without changing Claud
   assert.match(source, /NSMutableOrderedSet<NSString \*> \*accessedDirectories/);
   assert.match(source, /session\.accessedDirectories = accessedDirectories\.array/);
   assert.match(source, /PTGitObservedDirectories/);
-  assert.match(source, /PTRunGit\(directory, @\[@"diff", @"--no-ext-diff", @"--no-color", @"HEAD"/);
-  assert.match(source, /展开 Git diff →/);
+  assert.match(source, /PTGitReviewSnapshotForDirectory/);
+  assert.match(source, /@"--unified=3"/);
+  assert.match(source, /展开 Git 审阅/);
   assert.match(source, /不会改变 Claude Code/);
   assert.match(source, /Claude Code 执行 \/add-dir/);
+  assert.match(source, /removeSelectedGitDirectory:/);
+  assert.match(source, /gitDirectoriesSuppressedUntilSessionChange/);
+  assert.match(source, /重新打开相关对话或手动添加即可恢复/);
+  assert.match(source, /replaceGitReviewDocument:/);
+  assert.match(source, /NSAnimationContext runAnimationGroup/);
+  assert.match(source, /NSProgressIndicatorStyleSpinning/);
 });
 
 test('active transcripts parse only appended JSONL bytes', () => {

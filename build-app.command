@@ -21,6 +21,7 @@ clang \
   -framework UniformTypeIdentifiers \
   -framework Security \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Sources/PrettyTerm.m" \
   -o "$macos_dir/PrettyTerm"

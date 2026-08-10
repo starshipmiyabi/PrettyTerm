@@ -1,3 +1,44 @@
+# PrettyTerm Beta 0.8.4 (Build 22)
+
+This beta replaces the inspector's terminal-style Git dump with a native review experience and includes the directory-memory controls developed during the local 0.8.3 preview.
+
+## Download
+
+Download PrettyTerm-Beta-0.8.4-build22-macOS.dmg, open it, and drag PrettyTerm to the Applications shortcut. SHA256SUMS.txt is provided for integrity verification.
+
+## Native Git Review
+
+- Replaces raw Git status and unified-diff protocol output with a structured AppKit review document.
+- Groups changes by file and shows branch/upstream context plus per-file and aggregate addition/deletion totals.
+- Adds old/new line-number columns, green and red line backgrounds, collapsed unchanged-range summaries, binary-file notices, and untracked-file entries.
+- Keeps raw file markers, object indexes, and hunk headers out of the user-facing inspector.
+
+## Motion and Interaction
+
+- Adds a motion-aware fade when the review expands and contracts.
+- Adds a compact activity indicator during Git refresh.
+- Cross-fades refreshed review content instead of abruptly replacing the document.
+- Respects the macOS Reduce Motion accessibility setting.
+
+## Git Directory Memory
+
+- Adds a delete control for removing the selected Git observation directory from PrettyTerm's saved directory list.
+- Keeps a deleted directory hidden during polling of the currently open conversation, preventing immediate accidental rediscovery.
+- Allows restoration either by manually adding the directory again or by reopening a conversation whose transcript records it.
+- Deletion still affects only PrettyTerm's read-only Git observation scope and never changes Claude Code's working directory or permissions.
+
+## Validation
+
+The release passed renderer, appearance, structured Git-review, directory-memory, Terminal-safety, transcript-increment, usage, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+
+## Known Limitations
+
+- Requires macOS 13 or later and Apple Terminal.
+- This beta is not notarized. The published DMG uses ad-hoc signing because no Apple Developer ID identity is available in the build environment.
+- Terminal automation permission may need to be granted again after an update.
+
+---
+
 # PrettyTerm Beta 0.8.3 (Build 20)
 
 This beta hotfix restores message delivery after the Terminal safety audit and adds a small session-navigation improvement. Build 19 was never distributed: it fixed AppleScript error `-2740` but a second compiler error (`-1700`) in the same code path still blocked every send. Build 20 fixes both and adds regression coverage that compiles all three Terminal automation actions, closing the gap that let both errors ship unnoticed.

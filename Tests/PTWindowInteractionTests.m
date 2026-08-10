@@ -15,6 +15,14 @@ static void PTCallOneObject(id object, SEL selector, id argument) {
     ((void (*)(id, SEL, id))objc_msgSend)(object, selector, argument);
 }
 
+static void PTPumpRunLoop(NSTimeInterval duration) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:duration];
+    while ([deadline timeIntervalSinceNow] > 0) {
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode
+                              beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+}
+
 static id PTCreateWithObject(Class classObject, SEL selector, id argument) {
     id allocated = ((id (*)(id, SEL))objc_msgSend)(classObject, @selector(alloc));
     return ((id (*)(id, SEL, id))objc_msgSend)(allocated, selector, argument);
@@ -60,12 +68,16 @@ int main(void) {
         NSSplitView *splitView = [delegate valueForKey:@"splitView"];
         NSView *inspector = [delegate valueForKey:@"inspectorView"];
         NSPopUpButton *gitDirectoryPicker = [delegate valueForKey:@"gitDirectoryPicker"];
+        NSButton *removeGitDirectoryButton = [delegate valueForKey:@"removeGitDirectoryButton"];
+        NSTextField *gitDirectoryInput = [delegate valueForKey:@"gitDirectoryInput"];
         NSTextField *gitDirectoryHint = [delegate valueForKey:@"gitDirectoryHintLabel"];
         NSScrollView *gitDiffScroll = [delegate valueForKey:@"gitDiffScroll"];
         NSTextView *gitDiffTextView = [delegate valueForKey:@"gitDiffTextView"];
+        NSProgressIndicator *gitDiffProgress = [delegate valueForKey:@"gitDiffProgress"];
         PTAssert(window != nil && changedFiles != nil && splitView != nil && inspector != nil &&
-            gitDirectoryPicker != nil && gitDirectoryHint != nil && gitDiffScroll != nil &&
-            gitDiffTextView != nil,
+            gitDirectoryPicker != nil && removeGitDirectoryButton != nil &&
+            gitDirectoryInput != nil && gitDirectoryHint != nil && gitDiffScroll != nil &&
+            gitDiffTextView != nil && gitDiffProgress != nil,
             @"window, inspector, Git controls, and changed-files stack must exist");
 
         [window.contentView layoutSubtreeIfNeeded];
@@ -105,9 +117,29 @@ int main(void) {
 
         PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
             @"the inspector must remember and select directories observed in the Claude transcript");
+        PTAssert(removeGitDirectoryButton.enabled,
+            @"a remembered Git directory must expose its delete control");
         PTAssert([gitDirectoryHint.stringValue containsString:@"不会改变 Claude Code"] &&
             [gitDirectoryHint.stringValue containsString:@"/add-dir"],
             @"Git directory controls must explain the Claude Code boundary and /add-dir requirement");
+
+        PTCallOneObject(delegate, NSSelectorFromString(@"removeSelectedGitDirectory:"), nil);
+        PTAssert(!gitDirectoryPicker.enabled && !removeGitDirectoryButton.enabled,
+            @"deleting the only remembered Git directory must empty and disable the picker row");
+        PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
+        PTAssert(!gitDirectoryPicker.enabled,
+            @"polling the currently open transcript must not immediately restore a deleted directory");
+
+        gitDirectoryInput.stringValue = @"/tmp";
+        PTCallOneObject(delegate, NSSelectorFromString(@"addManualGitDirectory:"), nil);
+        PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
+            @"manual entry must restore a deleted Git directory immediately");
+
+        PTCallOneObject(delegate, NSSelectorFromString(@"removeSelectedGitDirectory:"), nil);
+        PTCallNoArgument(delegate, NSSelectorFromString(@"allowRediscoveryOfGitDirectoriesForNewSession"));
+        PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
+        PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
+            @"reopening a related conversation must rediscover its deleted Git directory");
 
         CGFloat compactInspectorWidth = NSWidth(inspector.frame);
         PTCallOneObject(delegate, NSSelectorFromString(@"toggleGitDiff:"), nil);
@@ -115,10 +147,16 @@ int main(void) {
         CGFloat expandedInspectorWidth = NSWidth(inspector.frame);
         PTAssert(!gitDiffScroll.hidden && expandedInspectorWidth > compactInspectorWidth + 100.0,
             @"clicking Git diff must reveal it and widen the inspector");
+        PTPumpRunLoop(0.24);
+        PTAssert(gitDiffScroll.alphaValue > 0.95,
+            @"the Git review must finish its expansion fade at full opacity");
         PTAssert(NSWidth(gitDiffTextView.frame) > 0.0,
             @"the expanded Git diff text document must have a visible width");
+        PTAssert(gitDiffTextView.richText && gitDiffScroll.borderType == NSNoBorder,
+            @"Git review must use a styled native document instead of a terminal text box");
         PTCallOneObject(delegate, NSSelectorFromString(@"toggleGitDiff:"), nil);
         [window.contentView layoutSubtreeIfNeeded];
+        PTPumpRunLoop(0.18);
         PTAssert(gitDiffScroll.hidden,
             @"clicking the expanded Git diff control again must collapse the diff view");
 

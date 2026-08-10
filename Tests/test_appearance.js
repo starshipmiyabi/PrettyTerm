@@ -17,6 +17,21 @@ test('conversation renderer declares a complete dark appearance', () => {
   assert.match(html, /@media[\s\S]*--ink:\s*#[0-9a-f]{6}/i);
 });
 
+test('conversation and native surfaces use the warm beige and deep-orange palette', () => {
+  assert.match(html, /--canvas:\s*#f4ecde/i);
+  assert.match(html, /--blue:\s*#a34717/i);
+  assert.match(html, /@media[\s\S]*--canvas:\s*#211912/i);
+  assert.match(html, /@media[\s\S]*--blue:\s*#e58a49/i);
+  assert.match(nativeSource, /PTWarmCanvasColor/);
+  assert.match(nativeSource, /PTWarmAccentColor/);
+});
+
+test('turn edit summaries expose a warm review card', () => {
+  assert.match(html, /\.edit-summary\s*\{/);
+  assert.match(html, /\.open-local-review\s*\{/);
+  assert.match(html, /\.edit-review-label/);
+});
+
 test('local WebView content is isolated from network and dynamic MathJax packages', () => {
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /connect-src 'none'/);

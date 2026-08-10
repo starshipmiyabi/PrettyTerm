@@ -20,7 +20,7 @@ test('assistant text is flat inside a Reasonix-style turn', () => {
   assert.doesNotMatch(html, /class="[^"]*assistant-text[^"]*card/);
 });
 
-test('thinking and ordinary tools start folded while diff and errors start open', () => {
+test('thinking, tools, and per-file diffs start folded while errors start open', () => {
   const thinking = renderer.renderEvent({ kind: 'thinking', text: '分析中' }, {});
   const tool = renderer.renderEvent({ kind: 'tool', toolName: 'Read', text: '读取文件' }, {});
   const diff = renderer.renderEvent({
@@ -32,10 +32,48 @@ test('thinking and ordinary tools start folded while diff and errors start open'
   }, {});
   const error = renderer.renderEvent({ kind: 'error', text: '命令失败' }, {});
 
-  assert.match(thinking, /^<details class="event thinking-event">/);
-  assert.match(tool, /^<details class="event tool-event">/);
-  assert.match(diff, /^<details class="event diff-event" open>/);
-  assert.match(error, /^<details class="event error-event" open>/);
+  assert.match(thinking, /^<details class="event thinking-event"(?: data-message-key="[^"]*")?>/);
+  assert.match(tool, /^<details class="event tool-event"(?: data-message-key="[^"]*")?>/);
+  assert.match(diff, /^<details class="event diff-event">/);
+  assert.match(error, /^<details class="event error-event" open(?: data-message-key="[^"]*")?>/);
+});
+
+test('each turn ends with one Codex-style edited-files summary', () => {
+  const html = renderer.renderSession({
+    sessionId: 'session-edits',
+    messages: [
+      { role: 'user', text: '改一下' },
+      { kind: 'diff', filePath: '/tmp/A.m', oldText: 'old', newText: 'new\nextra' },
+      { kind: 'diff', filePath: '/tmp/B.m', oldText: '', newText: 'created' },
+      { role: 'assistant', text: '完成。' },
+      { role: 'user', text: '再解释一下' },
+      { role: 'assistant', text: '说明。' }
+    ]
+  });
+
+  assert.equal((html.match(/data-edit-summary/g) || []).length, 1);
+  assert.match(html, /已编辑 2 个文件/);
+  assert.match(html, /class="open-local-review"/);
+  assert.match(html, /data-session-id="session-edits"/);
+  assert.match(html, /data-turn-index="0"/);
+  assert.match(html, />A\.m<|>B\.m</);
+});
+
+test('renderer switches conversation chrome between Chinese and English', () => {
+  const html = renderer.renderSession({
+    interfaceLanguage: 'en',
+    sessionId: 'session-en',
+    messages: [
+      { role: 'user', text: 'Change it' },
+      { kind: 'thinking', text: 'Checking' },
+      { kind: 'diff', filePath: '/tmp/A.m', oldText: 'old', newText: 'new' }
+    ]
+  });
+  assert.match(html, /Thinking/);
+  assert.match(html, /Edited 1 files/);
+  assert.match(html, />Review</);
+  assert.doesNotMatch(html, /已编辑|审阅|思考过程/);
+  renderer.setPrettyTermLanguage('zh-Hans');
 });
 
 test('large diffs take the bounded fallback before allocating an LCS table', () => {

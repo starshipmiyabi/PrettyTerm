@@ -6,6 +6,7 @@
 #import <signal.h>
 #import "PTAgentState.h"
 #import "PTGitReview.h"
+#import "PTLocalization.h"
 #import "PTUsageMetrics.h"
 
 static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments);
@@ -36,6 +37,43 @@ static NSData *PTClaudeCredentialData(NSError **error) {
 
 static NSColor *PTColor(CGFloat red, CGFloat green, CGFloat blue) {
     return [NSColor colorWithSRGBRed:red green:green blue:blue alpha:1.0];
+}
+
+static NSColor *PTWarmDynamicColor(
+    CGFloat lightRed, CGFloat lightGreen, CGFloat lightBlue,
+    CGFloat darkRed, CGFloat darkGreen, CGFloat darkBlue
+) {
+    return [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
+        NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:@[
+            NSAppearanceNameAqua, NSAppearanceNameDarkAqua
+        ]];
+        BOOL dark = [match isEqual:NSAppearanceNameDarkAqua];
+        return PTColor(
+            dark ? darkRed : lightRed,
+            dark ? darkGreen : lightGreen,
+            dark ? darkBlue : lightBlue
+        );
+    }];
+}
+
+static NSColor *PTWarmCanvasColor(void) {
+    return PTWarmDynamicColor(0.953, 0.922, 0.867, 0.129, 0.098, 0.071);
+}
+
+static NSColor *PTWarmCardColor(void) {
+    return PTWarmDynamicColor(0.988, 0.969, 0.925, 0.176, 0.129, 0.094);
+}
+
+static NSColor *PTWarmChipColor(void) {
+    return PTWarmDynamicColor(0.973, 0.937, 0.878, 0.220, 0.153, 0.106);
+}
+
+static NSColor *PTWarmBorderColor(void) {
+    return PTWarmDynamicColor(0.835, 0.733, 0.608, 0.376, 0.259, 0.173);
+}
+
+static NSColor *PTWarmAccentColor(void) {
+    return PTWarmDynamicColor(0.639, 0.278, 0.090, 0.910, 0.537, 0.286);
 }
 
 typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
@@ -73,14 +111,14 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 
 - (void)updateLayer {
     [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        NSColor *background = NSColor.windowBackgroundColor;
+        NSColor *background = PTWarmCanvasColor();
         NSColor *border = NSColor.clearColor;
         if (self.surfaceStyle == PTAppearanceSurfaceStyleCard) {
-            background = NSColor.controlBackgroundColor;
-            border = NSColor.separatorColor;
+            background = PTWarmCardColor();
+            border = PTWarmBorderColor();
         } else if (self.surfaceStyle == PTAppearanceSurfaceStyleChip) {
-            background = [NSColor.controlBackgroundColor colorWithAlphaComponent:0.94];
-            border = NSColor.separatorColor;
+            background = PTWarmChipColor();
+            border = PTWarmBorderColor();
         }
         self.layer.backgroundColor = background.CGColor;
         self.layer.borderColor = border.CGColor;
@@ -710,12 +748,16 @@ static NSString *PTRunGit(NSString *directory, NSArray<NSString *> *arguments, i
     [allArguments addObjectsFromArray:arguments];
     task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/git"];
     task.arguments = allArguments;
+    NSMutableDictionary<NSString *, NSString *> *environment =
+        [NSProcessInfo.processInfo.environment mutableCopy];
+    environment[@"GIT_TERMINAL_PROMPT"] = @"0";
+    task.environment = environment;
     task.standardOutput = pipe;
     task.standardError = pipe;
     NSError *launchError = nil;
     if (![task launchAndReturnError:&launchError]) {
         if (exitStatus) *exitStatus = -1;
-        return launchError.localizedDescription ?: @"无法启动 Git";
+        return launchError.localizedDescription ?: PTL(@"无法启动 Git", @"Unable to launch Git");
     }
     NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
     [task waitUntilExit];
@@ -724,7 +766,7 @@ static NSString *PTRunGit(NSString *directory, NSArray<NSString *> *arguments, i
     const NSUInteger limit = 600000;
     if (output.length > limit) {
         output = [[output substringToIndex:limit]
-            stringByAppendingString:@"\n\n… Git diff 过大，已在 600,000 字符处截断。"];
+            stringByAppendingString:PTL(@"\n\n… Git diff 过大，已在 600,000 字符处截断。", @"\n\n… Git diff is too large and was truncated at 600,000 characters.")];
     }
     return output;
 }
@@ -734,7 +776,7 @@ static NSDictionary<NSString *, NSString *> *PTGitReviewSnapshotForDirectory(NSS
     BOOL exists = directory.length > 0 &&
         [NSFileManager.defaultManager fileExistsAtPath:directory isDirectory:&isDirectory];
     if (!exists || !isDirectory) {
-        return @{ @"directory": directory ?: @"", @"error": @"所选 Git 观察目录不存在。" };
+        return @{ @"directory": directory ?: @"", @"error": PTL(@"所选 Git 观察目录不存在。", @"The selected Git observation directory does not exist.") };
     }
 
     int rootStatus = 0;
@@ -743,7 +785,7 @@ static NSDictionary<NSString *, NSString *> *PTGitReviewSnapshotForDirectory(NSS
     if (rootStatus != 0 || root.length == 0) {
         return @{
             @"directory": directory,
-            @"error": @"这里不是 Git 仓库。切换目录只影响 PrettyTerm 的 Git 探测，不会改变 Claude Code；需要 Claude 访问该目录时，请在 Claude Code 执行 /add-dir。"
+            @"error": PTL(@"这里不是 Git 仓库。切换目录只影响 PrettyTerm 的 Git 探测，不会改变 Claude Code；需要 Claude 访问该目录时，请在 Claude Code 执行 /add-dir。", @"This is not a Git repository. Changing this directory only affects PrettyTerm's Git probe and does not change Claude Code; run /add-dir in Claude Code when Claude needs access.")
         };
     }
 
@@ -771,7 +813,7 @@ static NSDictionary<NSString *, NSString *> *PTGitReviewSnapshotForDirectory(NSS
         return @{
             @"directory": directory,
             @"root": root,
-            @"error": [NSString stringWithFormat:@"Git 探测失败：%@%@",
+            @"error": [NSString stringWithFormat:PTL(@"Git 探测失败：%@%@", @"Git probe failed: %@%@"),
                 status ?: @"", diff ?: @""]
         };
     }
@@ -1489,11 +1531,12 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 }
 
 - (void)configure:(PTSessionInfo *)session {
-    self.titleLabel.stringValue = session.title ?: @"未命名会话";
+    self.titleLabel.stringValue = session.title ?: PTL(@"未命名会话", @"Untitled conversation");
     NSString *folder = session.cwd.lastPathComponent.length ? session.cwd.lastPathComponent : session.cwd;
     // folder 为 @"" 时不是 nil，?: 不会生效，得显式判断 length 才能落到"未知目录"
-    self.detailLabel.stringValue = [NSString stringWithFormat:@"%@ · %lu 条消息",
-        folder.length ? folder : @"未知目录", (unsigned long)session.assistantMessages.count];
+    self.detailLabel.stringValue = [NSString stringWithFormat:PTL(@"%@ · %lu 条消息", @"%@ · %lu messages"),
+        folder.length ? folder : PTL(@"未知目录", @"Unknown directory"),
+        (unsigned long)session.assistantMessages.count];
     NSTimeInterval age = -session.modifiedAt.timeIntervalSinceNow;
     BOOL active = age < 600;
     self.activityDot.layer.backgroundColor =
@@ -1502,10 +1545,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     self.activityDot.layer.shadowOpacity = active ? 0.28 : 0;
     self.activityDot.layer.shadowRadius = active ? 4 : 0;
     self.activityDot.layer.shadowOffset = CGSizeZero;
-    if (age < 60) self.timeLabel.stringValue = @"刚刚";
-    else if (age < 3600) self.timeLabel.stringValue = [NSString stringWithFormat:@"%ld分", (long)(age / 60)];
-    else if (age < 86400) self.timeLabel.stringValue = [NSString stringWithFormat:@"%ld时", (long)(age / 3600)];
-    else self.timeLabel.stringValue = [NSString stringWithFormat:@"%ld天", (long)(age / 86400)];
+    if (age < 60) self.timeLabel.stringValue = PTL(@"刚刚", @"now");
+    else if (age < 3600) self.timeLabel.stringValue = [NSString stringWithFormat:PTL(@"%ld分", @"%ldm"), (long)(age / 60)];
+    else if (age < 86400) self.timeLabel.stringValue = [NSString stringWithFormat:PTL(@"%ld时", @"%ldh"), (long)(age / 3600)];
+    else self.timeLabel.stringValue = [NSString stringWithFormat:PTL(@"%ld天", @"%ldd"), (long)(age / 86400)];
 }
 @end
 
@@ -1577,7 +1620,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 }
 @end
 
-@interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate, NSMenuDelegate>
+@interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate, NSMenuDelegate, NSTextFieldDelegate>
 @end
 
 @implementation PTAppDelegate {
@@ -1593,6 +1636,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSTextField *_statusLabel;
     NSTextField *_contextLabel;
     NSTextField *_quotaLabel;
+    NSPopUpButton *_languagePicker;
     NSProgressIndicator *_contextBar;
     NSPopUpButton *_modelPicker;
     PTComposerTextView *_composerTextView;
@@ -1666,6 +1710,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSTextField *_gitDirectoryHintLabel;
     NSButton *_gitDiffToggleButton;
     NSButton *_gitDiffRefreshButton;
+    NSButton *_gitPublishButton;
     NSProgressIndicator *_gitDiffProgress;
     NSScrollView *_gitDiffScroll;
     NSTextView *_gitDiffTextView;
@@ -1673,10 +1718,22 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSMutableSet<NSString *> *_gitDirectoriesSuppressedUntilSessionChange;
     NSString *_gitObservedDirectory;
     BOOL _gitDiffExpanded;
+    BOOL _gitReviewShowsTranscriptEdits;
+    NSArray<NSDictionary *> *_transcriptEditReviewEvents;
     BOOL _gitDirectoryManuallySelected;
     CGFloat _inspectorWidthBeforeGitDiff;
     NSUInteger _gitDiffGeneration;
     NSUInteger _gitDiffAnimationGeneration;
+    NSPopover *_gitActionPopover;
+    NSTextField *_gitActionBranchLabel;
+    NSTextField *_gitCommitMessageField;
+    NSButton *_gitIncludeUnstagedButton;
+    NSButton *_gitCommitButton;
+    NSButton *_gitCommitAndPushButton;
+    NSButton *_gitPushButton;
+    NSTextField *_gitActionStatusLabel;
+    NSProgressIndicator *_gitActionProgress;
+    BOOL _gitActionInFlight;
     NSTextField *_bottomStatusLabel;
     NSButton *_inspectorToggleButton;
     NSStackView *_tasksStack;
@@ -1717,6 +1774,70 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     }
 }
 
+- (void)changeInterfaceLanguage:(NSPopUpButton *)sender {
+    NSString *language = [sender.selectedItem.representedObject isKindOfClass:NSString.class]
+        ? sender.selectedItem.representedObject : @"zh-Hans";
+    NSString *stored = PTInterfaceLanguageCode();
+    if ([language isEqualToString:stored]) return;
+
+    [NSUserDefaults.standardUserDefaults setObject:language
+        forKey:PTInterfaceLanguageDefaultsKey];
+    [NSUserDefaults.standardUserDefaults synchronize];
+
+    // Rebuild only PrettyTerm's presentation tree. The session store, Terminal bridge,
+    // selected Claude session, pending attachments, and unsent draft remain untouched.
+    NSString *draft = _composerTextView.string ?: @"";
+    NSRect previousFrame = _window.frame;
+    CGFloat sidebarWidth = _splitView.subviews.count >= 3
+        ? NSWidth(_splitView.subviews[0].frame) : 270.0;
+    CGFloat inspectorWidth = _splitView.subviews.count >= 3
+        ? NSWidth(_splitView.subviews[2].frame) : 260.0;
+    BOOL inspectorWasHidden = _inspectorView.hidden;
+    NSWindow *previousWindow = _window;
+    [_conversationView.configuration.userContentController
+        removeScriptMessageHandlerForName:@"quoteSelection"];
+    [_conversationView.configuration.userContentController
+        removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
+    if (_floatingConversationView) {
+        [_floatingConversationView.configuration.userContentController
+            removeScriptMessageHandlerForName:@"quoteSelection"];
+        [_floatingConversationView.configuration.userContentController
+            removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
+    }
+    [_floatingPanel orderOut:nil];
+    _floatingPanel = nil;
+    _floatingConversationView = nil;
+    _floatingWebReady = NO;
+    [previousWindow orderOut:nil];
+
+    _webReady = NO;
+    _renderInFlight = NO;
+    _renderedSessionID = nil;
+    _renderedModifiedAt = nil;
+    _renderedMessageCount = 0;
+    _gitDiffExpanded = NO;
+    _gitReviewShowsTranscriptEdits = NO;
+    _transcriptEditReviewEvents = nil;
+    [self buildMainMenu];
+    [self buildWindow];
+    [_window setFrame:previousFrame display:NO];
+    [_splitView setPosition:sidebarWidth ofDividerAtIndex:0];
+    [_splitView setPosition:NSWidth(_splitView.bounds) - inspectorWidth
+          ofDividerAtIndex:1];
+    _inspectorView.hidden = inspectorWasHidden;
+    _composerTextView.string = draft;
+    [self updateImagePreviews];
+    [_sessionTable reloadData];
+    if (_selectedSession) {
+        [self updateInspectorForSession:_selectedSession];
+        [self updateContextAndModelForSession:_selectedSession];
+    }
+    [self refreshAgentStateAndControls];
+    [self updateConnectButtonTitle];
+    [_window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
 // 之前没建 mainMenu，输入框粘不了字（Cmd+V）、Cmd+Q 也退不出去。
 // 补一个最小够用的 App 菜单 + Edit 菜单，标准 selector 会自动接到 NSTextField 的响应链上。
 - (void)buildMainMenu {
@@ -1726,36 +1847,36 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     [mainMenu addItem:appMenuItem];
     NSMenu *appMenu = [[NSMenu alloc] init];
     NSString *appName = NSProcessInfo.processInfo.processName;
-    [appMenu addItemWithTitle:[NSString stringWithFormat:@"关于 %@", appName]
+    [appMenu addItemWithTitle:[NSString stringWithFormat:PTL(@"关于 %@", @"About %@"), appName]
                        action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:[NSString stringWithFormat:@"隐藏 %@", appName]
+    [appMenu addItemWithTitle:[NSString stringWithFormat:PTL(@"隐藏 %@", @"Hide %@"), appName]
                        action:@selector(hide:) keyEquivalent:@"h"];
-    NSMenuItem *hideOthers = [appMenu addItemWithTitle:@"隐藏其他"
+    NSMenuItem *hideOthers = [appMenu addItemWithTitle:PTL(@"隐藏其他", @"Hide Others")
                        action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
     hideOthers.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
-    [appMenu addItemWithTitle:@"显示全部" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+    [appMenu addItemWithTitle:PTL(@"显示全部", @"Show All") action:@selector(unhideAllApplications:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    _floatingMenuItem = [appMenu addItemWithTitle:@"悬浮当前对话"
+    _floatingMenuItem = [appMenu addItemWithTitle:PTL(@"悬浮当前对话", @"Float Current Conversation")
                        action:@selector(toggleFloatingConversation:) keyEquivalent:@"o"];
     _floatingMenuItem.target = self;
     _floatingMenuItem.enabled = NO;
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:[NSString stringWithFormat:@"退出 %@", appName]
+    [appMenu addItemWithTitle:[NSString stringWithFormat:PTL(@"退出 %@", @"Quit %@"), appName]
                        action:@selector(terminate:) keyEquivalent:@"q"];
     appMenuItem.submenu = appMenu;
 
     NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
     [mainMenu addItem:editMenuItem];
-    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
-    [editMenu addItemWithTitle:@"撤销" action:@selector(undo:) keyEquivalent:@"z"];
-    NSMenuItem *redo = [editMenu addItemWithTitle:@"重做" action:@selector(redo:) keyEquivalent:@"z"];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:PTL(@"编辑", @"Edit")];
+    [editMenu addItemWithTitle:PTL(@"撤销", @"Undo") action:@selector(undo:) keyEquivalent:@"z"];
+    NSMenuItem *redo = [editMenu addItemWithTitle:PTL(@"重做", @"Redo") action:@selector(redo:) keyEquivalent:@"z"];
     redo.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [editMenu addItem:[NSMenuItem separatorItem]];
-    [editMenu addItemWithTitle:@"剪切" action:@selector(cut:) keyEquivalent:@"x"];
-    [editMenu addItemWithTitle:@"拷贝" action:@selector(copy:) keyEquivalent:@"c"];
-    [editMenu addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
-    [editMenu addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenu addItemWithTitle:PTL(@"剪切", @"Cut") action:@selector(cut:) keyEquivalent:@"x"];
+    [editMenu addItemWithTitle:PTL(@"拷贝", @"Copy") action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:PTL(@"粘贴", @"Paste") action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:PTL(@"全选", @"Select All") action:@selector(selectAll:) keyEquivalent:@"a"];
     editMenuItem.submenu = editMenu;
 
     NSApp.mainMenu = mainMenu;
@@ -1765,7 +1886,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     [_refreshTimer invalidate];
     [_usageRefreshTimer invalidate];
     [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"quoteSelection"];
+    [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
     [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"quoteSelection"];
+    [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
     [_bridge stop];
     [_transcriptWatcher stopWatching];
     [_store stopWatchingGlobalSettings];
@@ -1790,7 +1913,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _window.title = visibleAppVersion;
     _window.titleVisibility = NSWindowTitleHidden;
     _window.titlebarAppearsTransparent = YES;
-    _window.backgroundColor = NSColor.windowBackgroundColor;
+    _window.backgroundColor = PTWarmCanvasColor();
     _window.minSize = NSMakeSize(900, 600);
     [_window center];
 
@@ -1798,11 +1921,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     root.wantsLayer = YES;
     root.layer.backgroundColor = NSColor.clearColor.CGColor;
 
-    NSVisualEffectView *topBar = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    PTAppearanceSurfaceView *topBar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
     topBar.translatesAutoresizingMaskIntoConstraints = NO;
-    topBar.material = NSVisualEffectMaterialUnderWindowBackground;
-    topBar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    topBar.state = NSVisualEffectStateActive;
+    topBar.surfaceStyle = PTAppearanceSurfaceStyleChip;
     [root addSubview:topBar];
 
     NSImageView *logo = [[NSImageView alloc] initWithFrame:NSZeroRect];
@@ -1812,13 +1933,13 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     [topBar addSubview:logo];
 
     NSTextField *title = [self label:visibleAppVersion size:17 weight:NSFontWeightBold color:NSColor.labelColor];
-    title.toolTip = [NSString stringWithFormat:@"当前运行版本：v%@，构建 %@",
+    title.toolTip = [NSString stringWithFormat:PTL(@"当前运行版本：v%@，构建 %@", @"Running version: v%@, build %@"),
         shortVersion, buildVersion];
     [topBar addSubview:title];
-    NSTextField *subtitle = [self label:@"Claude Code 终端伴生 Agent" size:10.5 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    NSTextField *subtitle = [self label:PTL(@"Claude Code 终端伴生 Agent", @"Claude Code terminal companion") size:10.5 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
     [topBar addSubview:subtitle];
 
-    _statusLabel = [self label:@"正在读取本地会话…" size:11 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    _statusLabel = [self label:PTL(@"正在读取本地会话…", @"Reading local conversations…") size:11 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
     _statusLabel.alignment = NSTextAlignmentRight;
     [topBar addSubview:_statusLabel];
 
@@ -1828,8 +1949,20 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 
     _quotaLabel = [self label:@"5h — · 7d —" size:10 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
     _quotaLabel.alignment = NSTextAlignmentRight;
-    _quotaLabel.toolTip = @"正在读取 Claude 套餐额度";
+    _quotaLabel.toolTip = PTL(@"正在读取 Claude 套餐额度", @"Reading Claude plan limits");
     [topBar addSubview:_quotaLabel];
+
+    _languagePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    _languagePicker.translatesAutoresizingMaskIntoConstraints = NO;
+    [_languagePicker addItemWithTitle:@"中文"];
+    _languagePicker.lastItem.representedObject = @"zh-Hans";
+    [_languagePicker addItemWithTitle:@"English"];
+    _languagePicker.lastItem.representedObject = @"en";
+    [_languagePicker selectItemAtIndex:PTInterfaceLanguageIsEnglish() ? 1 : 0];
+    _languagePicker.target = self;
+    _languagePicker.action = @selector(changeInterfaceLanguage:);
+    _languagePicker.toolTip = PTL(@"界面语言", @"Interface language");
+    [topBar addSubview:_languagePicker];
 
     _contextBar = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
     _contextBar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1900,7 +2033,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         [_quotaLabel.trailingAnchor constraintEqualToAnchor:_contextBar.leadingAnchor constant:-10],
         [_quotaLabel.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
         [_quotaLabel.widthAnchor constraintEqualToConstant:114],
-        [_quotaLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:20]
+        [_languagePicker.trailingAnchor constraintEqualToAnchor:_quotaLabel.leadingAnchor constant:-8],
+        [_languagePicker.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
+        [_languagePicker.widthAnchor constraintEqualToConstant:84],
+        [_languagePicker.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:20]
     ]];
 }
 
@@ -1958,23 +2094,21 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 }
 
 - (NSView *)buildSidebar {
-    NSVisualEffectView *sidebar = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    PTAppearanceSurfaceView *sidebar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
     sidebar.translatesAutoresizingMaskIntoConstraints = NO;
-    sidebar.material = NSVisualEffectMaterialSidebar;
-    sidebar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    sidebar.state = NSVisualEffectStateActive;
+    sidebar.surfaceStyle = PTAppearanceSurfaceStyleChip;
 
     NSView *header = [[NSView alloc] initWithFrame:NSZeroRect];
     header.translatesAutoresizingMaskIntoConstraints = NO;
     [sidebar addSubview:header];
-    NSTextField *heading = [self label:@"会话" size:14 weight:NSFontWeightBold color:NSColor.labelColor];
+    NSTextField *heading = [self label:PTL(@"会话", @"Conversations") size:14 weight:NSFontWeightBold color:NSColor.labelColor];
     [header addSubview:heading];
     _refreshButton = [NSButton buttonWithTitle:@"↻" target:self action:@selector(refreshSessions:)];
     _refreshButton.translatesAutoresizingMaskIntoConstraints = NO;
     _refreshButton.bezelStyle = NSBezelStyleInline;
     _refreshButton.font = [NSFont systemFontOfSize:17 weight:NSFontWeightMedium];
-    _refreshButton.contentTintColor = PTColor(0.24, 0.52, 0.58);
-    _refreshButton.toolTip = @"刷新本地会话";
+    _refreshButton.contentTintColor = PTWarmAccentColor();
+    _refreshButton.toolTip = PTL(@"刷新本地会话", @"Refresh local conversations");
     [header addSubview:_refreshButton];
 
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -2001,7 +2135,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     scroll.documentView = _sessionTable;
     [sidebar addSubview:scroll];
 
-    NSTextField *privacy = [self label:@"仅在本机读取 ~/.claude/projects" size:9.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
+    NSTextField *privacy = [self label:PTL(@"仅在本机读取 ~/.claude/projects", @"Reads ~/.claude/projects locally only") size:9.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
     privacy.alignment = NSTextAlignmentCenter;
     [sidebar addSubview:privacy];
 
@@ -2035,9 +2169,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
     _inspectorView = inspector;
 
-    NSTextField *title = [self label:@"检查器" size:13 weight:NSFontWeightBold color:NSColor.labelColor];
+    NSTextField *title = [self label:PTL(@"检查器", @"Inspector") size:13 weight:NSFontWeightBold color:NSColor.labelColor];
     [inspector addSubview:title];
-    NSButton *collapse = [NSButton buttonWithTitle:@"收起 ›" target:self action:@selector(toggleInspector:)];
+    NSButton *collapse = [NSButton buttonWithTitle:PTL(@"收起 ›", @"Collapse ›") target:self action:@selector(toggleInspector:)];
     collapse.translatesAutoresizingMaskIntoConstraints = NO;
     collapse.bezelStyle = NSBezelStyleInline;
     collapse.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
@@ -2086,10 +2220,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSTextField *contextValue = nil;
     NSTextField *quotaValue = nil;
     NSTextField *costValue = nil;
-    NSView *connectionCard = makeCard(@"TERMINAL 连接", &connectionValue);
-    NSView *contextCard = makeCard(@"上下文使用", &contextValue);
-    NSView *quotaCard = makeCard(@"CLAUDE 套餐额度", &quotaValue);
-    NSView *costCard = makeCard(@"本会话 API 等价成本", &costValue);
+    NSView *connectionCard = makeCard(PTL(@"TERMINAL 连接", @"TERMINAL CONNECTION"), &connectionValue);
+    NSView *contextCard = makeCard(PTL(@"上下文使用", @"CONTEXT USAGE"), &contextValue);
+    NSView *quotaCard = makeCard(PTL(@"CLAUDE 套餐额度", @"CLAUDE PLAN LIMITS"), &quotaValue);
+    NSView *costCard = makeCard(PTL(@"本会话 API 等价成本", @"API-EQUIVALENT SESSION COST"), &costValue);
     _inspectorConnectionLabel = connectionValue;
     _inspectorContextLabel = contextValue;
     _inspectorQuotaLabel = quotaValue;
@@ -2117,26 +2251,26 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
     [gitCard addSubview:gitStack];
 
-    NSTextField *gitTitle = [self label:@"GIT 观察目录" size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+    NSTextField *gitTitle = [self label:PTL(@"GIT 观察目录", @"GIT OBSERVED DIRECTORY") size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
     [gitStack addArrangedSubview:gitTitle];
     _gitDirectoryPicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _gitDirectoryPicker.translatesAutoresizingMaskIntoConstraints = NO;
     _gitDirectoryPicker.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
     _gitDirectoryPicker.target = self;
     _gitDirectoryPicker.action = @selector(gitDirectorySelectionChanged:);
-    [_gitDirectoryPicker addItemWithTitle:@"等待会话目录…"];
+    [_gitDirectoryPicker addItemWithTitle:PTL(@"等待会话目录…", @"Waiting for conversation directory…")];
     _gitDirectoryPicker.enabled = NO;
     NSStackView *directoryRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
     directoryRow.translatesAutoresizingMaskIntoConstraints = NO;
     directoryRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     directoryRow.alignment = NSLayoutAttributeCenterY;
     directoryRow.spacing = 6;
-    _removeGitDirectoryButton = [NSButton buttonWithTitle:@"删除"
+    _removeGitDirectoryButton = [NSButton buttonWithTitle:PTL(@"删除", @"Remove")
         target:self action:@selector(removeSelectedGitDirectory:)];
     _removeGitDirectoryButton.translatesAutoresizingMaskIntoConstraints = NO;
     _removeGitDirectoryButton.bezelStyle = NSBezelStyleRounded;
     _removeGitDirectoryButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    _removeGitDirectoryButton.toolTip = @"从 PrettyTerm 记忆中删除当前目录";
+    _removeGitDirectoryButton.toolTip = PTL(@"从 PrettyTerm 记忆中删除当前目录", @"Remove the current directory from PrettyTerm memory");
     _removeGitDirectoryButton.enabled = NO;
     [directoryRow addArrangedSubview:_gitDirectoryPicker];
     [directoryRow addArrangedSubview:_removeGitDirectoryButton];
@@ -2150,9 +2284,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     manualRow.spacing = 6;
     _gitDirectoryInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
     _gitDirectoryInput.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitDirectoryInput.placeholderString = @"手动输入文件夹路径";
+    _gitDirectoryInput.placeholderString = PTL(@"手动输入文件夹路径", @"Enter a folder path manually");
     _gitDirectoryInput.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
-    NSButton *addDirectoryButton = [NSButton buttonWithTitle:@"添加" target:self action:@selector(addManualGitDirectory:)];
+    NSButton *addDirectoryButton = [NSButton buttonWithTitle:PTL(@"添加", @"Add") target:self action:@selector(addManualGitDirectory:)];
     addDirectoryButton.translatesAutoresizingMaskIntoConstraints = NO;
     addDirectoryButton.bezelStyle = NSBezelStyleRounded;
     addDirectoryButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
@@ -2162,7 +2296,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     [addDirectoryButton.widthAnchor constraintEqualToConstant:48].active = YES;
     [gitStack addArrangedSubview:manualRow];
 
-    _gitDirectoryHintLabel = [self label:@"这里只切换 PrettyTerm 的 Git diff 探测目录，不会改变 Claude Code。要让 Claude 访问新目录，请在 Claude Code 执行 /add-dir <路径>。" size:9.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
+    _gitDirectoryHintLabel = [self label:PTL(@"这里只切换 PrettyTerm 的 Git diff 探测目录，不会改变 Claude Code。要让 Claude 访问新目录，请在 Claude Code 执行 /add-dir <路径>。", @"This only changes PrettyTerm's Git diff probe; it does not change Claude Code. Run /add-dir <path> in Claude Code to grant Claude access.") size:9.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
     _gitDirectoryHintLabel.lineBreakMode = NSLineBreakByWordWrapping;
     _gitDirectoryHintLabel.maximumNumberOfLines = 0;
     [_gitDirectoryHintLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
@@ -2174,15 +2308,23 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     gitActionRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     gitActionRow.alignment = NSLayoutAttributeCenterY;
     gitActionRow.spacing = 6;
-    _gitDiffToggleButton = [NSButton buttonWithTitle:@"展开 Git 审阅  ›" target:self action:@selector(toggleGitDiff:)];
+    _gitDiffToggleButton = [NSButton buttonWithTitle:PTL(@"展开 Git 审阅  ›", @"Expand Git Review  ›") target:self action:@selector(toggleGitDiff:)];
     _gitDiffToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
     _gitDiffToggleButton.bezelStyle = NSBezelStyleRounded;
     _gitDiffToggleButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
-    _gitDiffRefreshButton = [NSButton buttonWithTitle:@"刷新" target:self action:@selector(refreshGitDiff:)];
+    _gitDiffRefreshButton = [NSButton buttonWithTitle:PTL(@"刷新", @"Refresh") target:self action:@selector(refreshGitDiff:)];
     _gitDiffRefreshButton.translatesAutoresizingMaskIntoConstraints = NO;
     _gitDiffRefreshButton.bezelStyle = NSBezelStyleRounded;
     _gitDiffRefreshButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
     _gitDiffRefreshButton.hidden = YES;
+    _gitPublishButton = [NSButton buttonWithTitle:PTL(@"提交或推送…", @"Commit or Push…")
+        target:self action:@selector(showGitActions:)];
+    _gitPublishButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _gitPublishButton.bezelStyle = NSBezelStyleRounded;
+    _gitPublishButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
+    _gitPublishButton.contentTintColor = PTWarmAccentColor();
+    _gitPublishButton.toolTip = PTL(@"手动填写提交信息后提交，或推送已有提交", @"Enter a commit message manually, or push existing commits");
+    _gitPublishButton.enabled = NO;
     _gitDiffProgress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
     _gitDiffProgress.translatesAutoresizingMaskIntoConstraints = NO;
     _gitDiffProgress.style = NSProgressIndicatorStyleSpinning;
@@ -2191,6 +2333,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _gitDiffProgress.hidden = YES;
     [gitActionRow addArrangedSubview:_gitDiffToggleButton];
     [gitActionRow addArrangedSubview:_gitDiffRefreshButton];
+    [gitActionRow addArrangedSubview:_gitPublishButton];
     [gitActionRow addArrangedSubview:_gitDiffProgress];
     [_gitDiffProgress.widthAnchor constraintEqualToConstant:14].active = YES;
     [_gitDiffProgress.heightAnchor constraintEqualToConstant:14].active = YES;
@@ -2203,7 +2346,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _gitDiffScroll.autohidesScrollers = YES;
     _gitDiffScroll.borderType = NSNoBorder;
     _gitDiffScroll.drawsBackground = YES;
-    _gitDiffScroll.backgroundColor = NSColor.textBackgroundColor;
+    _gitDiffScroll.backgroundColor = PTWarmCardColor();
     _gitDiffScroll.wantsLayer = YES;
     _gitDiffScroll.layer.cornerRadius = 10.0;
     _gitDiffScroll.layer.borderWidth = 0.7;
@@ -2226,7 +2369,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _gitDiffTextView.minSize = NSMakeSize(0, 0);
     _gitDiffTextView.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
     _gitDiffTextView.textContainer.widthTracksTextView = NO;
-    _gitDiffTextView.string = @"选择目录后展开 Git 审阅。";
+    _gitDiffTextView.string = PTL(@"选择目录后展开 Git 审阅。", @"Select a directory, then expand Git Review.");
     _gitDiffScroll.documentView = _gitDiffTextView;
     [_gitDiffScroll.heightAnchor constraintEqualToConstant:360].active = YES;
     [gitStack addArrangedSubview:_gitDiffScroll];
@@ -2249,7 +2392,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     changesCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
     changesCard.layer.cornerRadius = 14;
     changesCard.layer.borderWidth = 0.6;
-    NSTextField *changesTitle = [self label:@"本轮改动" size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+    NSTextField *changesTitle = [self label:PTL(@"本轮改动", @"CURRENT CHANGES") size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
     [changesCard addSubview:changesTitle];
     _changedFilesStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     _changedFilesStack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2264,7 +2407,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     tasksCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
     tasksCard.layer.cornerRadius = 14;
     tasksCard.layer.borderWidth = 0.6;
-    NSTextField *tasksTitle = [self label:@"任务列表" size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+    NSTextField *tasksTitle = [self label:PTL(@"任务列表", @"TASKS") size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
     [tasksCard addSubview:tasksTitle];
     _tasksStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     _tasksStack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2319,9 +2462,13 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     header.state = NSVisualEffectStateActive;
     [pane addSubview:header];
 
-    _conversationTitle = [self label:@"选择一个 Claude 会话" size:14 weight:NSFontWeightBold color:NSColor.labelColor];
+    _conversationTitle = [self label:PTL(@"选择一个 Claude 会话", @"Select a conversation") size:14 weight:NSFontWeightBold color:NSColor.labelColor];
+    [_conversationTitle setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
     [header addSubview:_conversationTitle];
-    _conversationDetail = [self label:@"显示老师和 Claude 的文本对话" size:10.5 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    _conversationDetail = [self label:PTL(@"显示老师和 Claude 的文本对话", @"Claude transcript view") size:10.5 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    [_conversationDetail setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
     [header addSubview:_conversationDetail];
 
     _modelPicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -2330,7 +2477,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _modelPicker.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
     _modelPicker.target = self;
     _modelPicker.action = @selector(changeModel:);
-    [_modelPicker addItemWithTitle:@"当前模型"];
+    [_modelPicker addItemWithTitle:PTL(@"当前模型", @"Current model")];
     NSArray<NSArray<NSString *> *> *models = @[
         @[@"Claude Fable 5", @"claude-fable-5"],
         @[@"Claude Opus 5", @"claude-opus-5"],
@@ -2344,36 +2491,40 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _modelPicker.enabled = NO;
     [header addSubview:_modelPicker];
 
-    _remoteButton = [NSButton buttonWithTitle:@"RC 已禁用" target:nil action:nil];
+    _remoteButton = [NSButton buttonWithTitle:PTL(@"RC禁用", @"RC Off") target:nil action:nil];
     _remoteButton.translatesAutoresizingMaskIntoConstraints = NO;
     _remoteButton.bezelStyle = NSBezelStyleRounded;
     _remoteButton.enabled = NO;
+    _remoteButton.toolTip = PTL(@"Claude.ai Remote Control 已禁用", @"Claude.ai Remote Control is disabled");
     [header addSubview:_remoteButton];
 
-    _inspectorToggleButton = [NSButton buttonWithTitle:@"检查器" target:self action:@selector(toggleInspector:)];
+    _inspectorToggleButton = [NSButton buttonWithTitle:PTL(@"检查器", @"Inspect") target:self action:@selector(toggleInspector:)];
     _inspectorToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
     _inspectorToggleButton.bezelStyle = NSBezelStyleRounded;
+    _inspectorToggleButton.toolTip = PTL(@"显示或收起检查器", @"Show or collapse the inspector");
     [header addSubview:_inspectorToggleButton];
 
-    _connectButton = [NSButton buttonWithTitle:@"同步 Terminal" target:self action:@selector(connectSelectedSession:)];
+    _connectButton = [NSButton buttonWithTitle:PTL(@"同步 Terminal", @"Sync") target:self action:@selector(connectSelectedSession:)];
     _connectButton.translatesAutoresizingMaskIntoConstraints = NO;
     _connectButton.bezelStyle = NSBezelStyleRounded;
-    _connectButton.contentTintColor = PTColor(0.54, 0.42, 0.90);
+    _connectButton.contentTintColor = PTWarmAccentColor();
     _connectButton.enabled = NO;
+    _connectButton.toolTip = PTL(@"同步选中的 Terminal Claude Code 会话", @"Sync the selected Terminal Claude Code conversation");
     [header addSubview:_connectButton];
 
     _floatingButton = [NSButton buttonWithImage:
-        [NSImage imageWithSystemSymbolName:@"pin" accessibilityDescription:@"悬浮当前对话"]
+        [NSImage imageWithSystemSymbolName:@"pin" accessibilityDescription:PTL(@"悬浮当前对话", @"Float current conversation")]
         target:self action:@selector(toggleFloatingConversation:)];
     _floatingButton.translatesAutoresizingMaskIntoConstraints = NO;
     _floatingButton.bezelStyle = NSBezelStyleRounded;
-    _floatingButton.toolTip = @"悬浮当前对话（⌘O）";
+    _floatingButton.toolTip = PTL(@"悬浮当前对话（⌘O）", @"Float current conversation (⌘O)");
     _floatingButton.enabled = NO;
     [header addSubview:_floatingButton];
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
     [configuration.userContentController addScriptMessageHandler:self name:@"quoteSelection"];
+    [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptEditReview"];
     _conversationView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
     _conversationView.translatesAutoresizingMaskIntoConstraints = NO;
     _conversationView.navigationDelegate = self;
@@ -2389,7 +2540,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     composerBar.state = NSVisualEffectStateActive;
     [pane addSubview:composerBar];
 
-    _composerTargetLabel = [self label:@"只读 · 请先同步当前会话" size:10.5 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    _composerTargetLabel = [self label:PTL(@"只读 · 请先同步当前会话", @"Read only · sync this conversation first") size:10.5 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
     [composerBar addSubview:_composerTargetLabel];
 
     _imagePreviewScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -2410,10 +2561,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _imagePreviewScroll.documentView = _imagePreviewStack;
 
     _imageButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"photo.badge.plus"
-        accessibilityDescription:@"添加图片"] target:self action:@selector(chooseImages:)];
+        accessibilityDescription:PTL(@"添加图片", @"Add images")] target:self action:@selector(chooseImages:)];
     _imageButton.translatesAutoresizingMaskIntoConstraints = NO;
     _imageButton.bezelStyle = NSBezelStyleRounded;
-    _imageButton.toolTip = @"添加图片（仅支持图片文件）";
+    _imageButton.toolTip = PTL(@"添加图片（仅支持图片文件）", @"Add images (image files only)");
     _imageButton.enabled = NO;
     [composerBar addSubview:_imageButton];
 
@@ -2423,7 +2574,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     composerScroll.hasVerticalScroller = YES;
     composerScroll.autohidesScrollers = YES;
     composerScroll.drawsBackground = YES;
-    composerScroll.backgroundColor = NSColor.textBackgroundColor;
+    composerScroll.backgroundColor = PTWarmCardColor();
     composerScroll.wantsLayer = YES;
     composerScroll.layer.cornerRadius = 12;
     composerScroll.layer.masksToBounds = YES;
@@ -2448,10 +2599,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     };
     composerScroll.documentView = _composerTextView;
 
-    _sendButton = [NSButton buttonWithTitle:@"发送 ↗" target:self action:@selector(sendMessage:)];
+    _sendButton = [NSButton buttonWithTitle:PTL(@"发送 ↗", @"Send ↗") target:self action:@selector(sendMessage:)];
     _sendButton.translatesAutoresizingMaskIntoConstraints = NO;
     _sendButton.bezelStyle = NSBezelStyleRounded;
-    _sendButton.contentTintColor = PTColor(0.19, 0.63, 0.68);
+    _sendButton.contentTintColor = PTWarmAccentColor();
     _sendButton.enabled = NO;
     [composerBar addSubview:_sendButton];
 
@@ -2461,7 +2612,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     statusBar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
     statusBar.state = NSVisualEffectStateActive;
     [pane addSubview:statusBar];
-    _bottomStatusLabel = [self label:@"只读 · Terminal 是唯一执行引擎" size:10 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    _bottomStatusLabel = [self label:PTL(@"只读 · Terminal 是唯一执行引擎", @"Read only · Terminal is the sole execution engine") size:10 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
     [statusBar addSubview:_bottomStatusLabel];
 
     _composerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:116];
@@ -2487,7 +2638,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         [_inspectorToggleButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
         [_modelPicker.trailingAnchor constraintEqualToAnchor:_inspectorToggleButton.leadingAnchor constant:-8],
         [_modelPicker.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_modelPicker.widthAnchor constraintEqualToConstant:146],
+        [_modelPicker.widthAnchor constraintEqualToConstant:110],
+        [_inspectorToggleButton.widthAnchor constraintEqualToConstant:62],
+        [_remoteButton.widthAnchor constraintEqualToConstant:60],
+        [_connectButton.widthAnchor constraintEqualToConstant:84],
         [_conversationTitle.trailingAnchor constraintLessThanOrEqualToAnchor:_modelPicker.leadingAnchor constant:-12],
         [_conversationDetail.trailingAnchor constraintLessThanOrEqualToAnchor:_modelPicker.leadingAnchor constant:-12],
 
@@ -2569,7 +2723,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _floatingPanel.minSize = NSMakeSize(360, 320);
     _floatingPanel.releasedWhenClosed = NO;
     _floatingPanel.titlebarAppearsTransparent = YES;
-    _floatingPanel.backgroundColor = NSColor.windowBackgroundColor;
+    _floatingPanel.backgroundColor = PTWarmCanvasColor();
 
     PTAppearanceSurfaceView *surface = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
     surface.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
@@ -2578,6 +2732,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
     [configuration.userContentController addScriptMessageHandler:self name:@"quoteSelection"];
+    [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptEditReview"];
     _floatingConversationView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
     _floatingConversationView.translatesAutoresizingMaskIntoConstraints = NO;
     _floatingConversationView.navigationDelegate = self;
@@ -2591,7 +2746,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     composerBar.state = NSVisualEffectStateActive;
     [surface addSubview:composerBar];
 
-    _floatingComposerLabel = [self label:@"未同步此会话" size:10.5
+    _floatingComposerLabel = [self label:PTL(@"未同步此会话", @"Conversation not synced") size:10.5
         weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
     [composerBar addSubview:_floatingComposerLabel];
 
@@ -2612,10 +2767,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _floatingImagePreviewScroll.documentView = _floatingImagePreviewStack;
 
     _floatingImageButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"photo.badge.plus"
-        accessibilityDescription:@"添加图片"] target:self action:@selector(chooseFloatingImages:)];
+        accessibilityDescription:PTL(@"添加图片", @"Add images")] target:self action:@selector(chooseFloatingImages:)];
     _floatingImageButton.translatesAutoresizingMaskIntoConstraints = NO;
     _floatingImageButton.bezelStyle = NSBezelStyleRounded;
-    _floatingImageButton.toolTip = @"添加图片（仅支持图片文件）";
+    _floatingImageButton.toolTip = PTL(@"添加图片（仅支持图片文件）", @"Add images (image files only)");
     _floatingImageButton.enabled = NO;
     [composerBar addSubview:_floatingImageButton];
 
@@ -2625,7 +2780,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     composerScroll.hasVerticalScroller = YES;
     composerScroll.autohidesScrollers = YES;
     composerScroll.drawsBackground = YES;
-    composerScroll.backgroundColor = NSColor.textBackgroundColor;
+    composerScroll.backgroundColor = PTWarmCardColor();
     composerScroll.wantsLayer = YES;
     composerScroll.layer.cornerRadius = 11;
     composerScroll.layer.masksToBounds = YES;
@@ -2650,10 +2805,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     };
     composerScroll.documentView = _floatingComposerTextView;
 
-    _floatingSendButton = [NSButton buttonWithTitle:@"发送 ↗" target:self action:@selector(sendFloatingMessage:)];
+    _floatingSendButton = [NSButton buttonWithTitle:PTL(@"发送 ↗", @"Send ↗") target:self action:@selector(sendFloatingMessage:)];
     _floatingSendButton.translatesAutoresizingMaskIntoConstraints = NO;
     _floatingSendButton.bezelStyle = NSBezelStyleRounded;
-    _floatingSendButton.contentTintColor = PTColor(0.19, 0.63, 0.68);
+    _floatingSendButton.contentTintColor = PTWarmAccentColor();
     _floatingSendButton.enabled = NO;
     [composerBar addSubview:_floatingSendButton];
 
@@ -2734,6 +2889,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         @"title": session.title ?: @"未命名会话",
         @"cwd": session.cwd ?: @"",
         @"model": session.model ?: @"Claude",
+        @"interfaceLanguage": PTInterfaceLanguageCode(),
         @"messages": session.assistantMessages ?: @[]
     };
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
@@ -3218,17 +3374,20 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _remoteButton.enabled = NO;
     _modelPicker.enabled = ready;
 
-    NSString *ttyState = _bridge.running ? @"Terminal 已验证" : @"未连接 Terminal";
+    NSString *ttyState = _bridge.running
+        ? PTL(@"Terminal 已验证", @"Terminal verified")
+        : PTL(@"未连接 Terminal", @"Terminal not connected");
     _inspectorConnectionLabel.stringValue = [NSString stringWithFormat:@"%@\n%@",
-        ttyState, ready ? @"当前选中会话可发送" : @"只读，未绑定当前会话"];
+        ttyState, ready ? PTL(@"当前选中会话可发送", @"Selected conversation can send")
+                        : PTL(@"只读，未绑定当前会话", @"Read only; conversation not bound")];
     _composerTargetLabel.stringValue = ready
-        ? [NSString stringWithFormat:@"发送给：%@ · 可粘贴图片 · ↩ 发送，⌘↩ 换行",
-            _selectedSession.title ?: @"当前会话"]
-        : @"只读 · 请先同步当前选中的 Terminal 会话";
+        ? [NSString stringWithFormat:PTL(@"发送给：%@ · 可粘贴图片 · ↩ 发送，⌘↩ 换行", @"To: %@ · image paste · ↩ send, ⌘↩ newline"),
+            _selectedSession.title ?: PTL(@"当前会话", @"Current conversation")]
+        : PTL(@"只读 · 请先同步当前选中的 Terminal 会话", @"Read only · sync the selected Terminal conversation first");
     _bottomStatusLabel.stringValue = ready
-        ? [NSString stringWithFormat:@"● 已连接 · %@ · 等待操作 · Terminal 是唯一执行引擎",
-            _selectedSession.title ?: @"当前会话"]
-        : @"○ 只读 · 当前会话未绑定 · Terminal 是唯一执行引擎";
+        ? [NSString stringWithFormat:PTL(@"● 已连接 · %@ · 等待操作 · Terminal 是唯一执行引擎", @"● Connected · %@ · ready · Terminal is the sole execution engine"),
+            _selectedSession.title ?: PTL(@"当前会话", @"Current conversation")]
+        : PTL(@"○ 只读 · 当前会话未绑定 · Terminal 是唯一执行引擎", @"○ Read only · conversation not bound · Terminal is the sole execution engine");
     [self updateFloatingComposerState];
 }
 
@@ -3242,11 +3401,12 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _floatingImageButton.enabled = ready;
     if (ready) {
         _floatingComposerLabel.stringValue = [NSString stringWithFormat:
-            @"发送给：%@ · 可粘贴图片 · ↩ 发送，⌘↩ 换行", session.title ?: @"悬浮会话"];
+            PTL(@"发送给：%@ · 可粘贴图片 · ↩ 发送，⌘↩ 换行", @"To: %@ · image paste · ↩ send, ⌘↩ newline"),
+            session.title ?: PTL(@"悬浮会话", @"Floating conversation")];
     } else if (_agentState.sendInFlight && [_bridge.sessionID isEqual:_floatingSessionID]) {
-        _floatingComposerLabel.stringValue = @"正在写入 Terminal…";
+        _floatingComposerLabel.stringValue = PTL(@"正在写入 Terminal…", @"Writing to Terminal…");
     } else {
-        _floatingComposerLabel.stringValue = @"未同步此会话 · 请先在主窗口同步后发送";
+        _floatingComposerLabel.stringValue = PTL(@"未同步此会话 · 请先在主窗口同步后发送", @"Conversation not synced · sync it in the main window before sending");
     }
 }
 
@@ -3381,8 +3541,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     }
     _gitDirectoryPicker.enabled = _gitDirectoryPaths.count > 0;
     _removeGitDirectoryButton.enabled = _gitDirectoryPaths.count > 0;
+    _gitPublishButton.enabled = _gitDirectoryPaths.count > 0 && !_gitActionInFlight;
     if (_gitDirectoryPaths.count == 0) {
-        [_gitDirectoryPicker addItemWithTitle:@"尚未发现目录"];
+        [_gitDirectoryPicker addItemWithTitle:PTL(@"尚未发现目录", @"No directory found")];
         _gitObservedDirectory = nil;
         return;
     }
@@ -3447,9 +3608,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     if (path.length == 0) return;
     _gitObservedDirectory = [path copy];
     _gitDirectoryManuallySelected = YES;
-    _statusLabel.stringValue = @"已切换 PrettyTerm 的 Git 观察目录；Claude Code 目录未改变";
-    _bottomStatusLabel.stringValue = @"Git 观察目录已切换 · Claude Code 如需访问，请执行 /add-dir";
-    if (_gitDiffExpanded) [self refreshGitDiff:nil];
+    _statusLabel.stringValue = PTL(@"已切换 PrettyTerm 的 Git 观察目录；Claude Code 目录未改变", @"PrettyTerm's Git directory changed; Claude Code's directory did not");
+    _bottomStatusLabel.stringValue = PTL(@"Git 观察目录已切换 · Claude Code 如需访问，请执行 /add-dir", @"Git observation changed · run /add-dir if Claude Code needs access");
+    if (_gitDiffExpanded && !_gitReviewShowsTranscriptEdits) [self refreshGitDiff:nil];
 }
 
 - (void)addManualGitDirectory:(id)sender {
@@ -3461,7 +3622,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     BOOL valid = path.length > 0 && [path hasPrefix:@"/"] &&
         [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory] && isDirectory;
     if (!valid) {
-        _statusLabel.stringValue = @"请输入存在的绝对文件夹路径";
+        _statusLabel.stringValue = PTL(@"请输入存在的绝对文件夹路径", @"Enter an existing absolute folder path");
         return;
     }
     if (!_gitDirectoryPaths) _gitDirectoryPaths = [NSMutableArray array];
@@ -3472,9 +3633,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     [NSUserDefaults.standardUserDefaults setObject:_gitDirectoryPaths forKey:@"PTGitObservedDirectories"];
     [self reloadGitDirectoryPickerSelecting:path];
     _gitDirectoryInput.stringValue = @"";
-    _statusLabel.stringValue = @"已添加 Git 观察目录；这不会改变 Claude Code 的目录";
-    _bottomStatusLabel.stringValue = [NSString stringWithFormat:@"如需 Claude 访问，请在 Claude Code 执行 /add-dir %@", path];
-    if (_gitDiffExpanded) [self refreshGitDiff:nil];
+    _statusLabel.stringValue = PTL(@"已添加 Git 观察目录；这不会改变 Claude Code 的目录", @"Git observation directory added; Claude Code's directory is unchanged");
+    _bottomStatusLabel.stringValue = [NSString stringWithFormat:PTL(@"如需 Claude 访问，请在 Claude Code 执行 /add-dir %@", @"To give Claude access, run /add-dir %@ in Claude Code"), path];
+    if (_gitDiffExpanded && !_gitReviewShowsTranscriptEdits) [self refreshGitDiff:nil];
 }
 
 - (void)removeSelectedGitDirectory:(id)sender {
@@ -3501,32 +3662,264 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _gitDirectoryManuallySelected = fallback.length > 0;
     [self reloadGitDirectoryPickerSelecting:fallback];
 
-    if (_gitDirectoryPaths.count == 0) {
+    if (_gitDirectoryPaths.count == 0 && !_gitReviewShowsTranscriptEdits) {
         _gitDiffGeneration++;
         [self replaceGitReviewDocument:[self gitReviewDocumentForSnapshot:@{
-            @"error": @"尚未选择 Git 观察目录。"
+            @"error": PTL(@"尚未选择 Git 观察目录。", @"No Git observation directory is selected.")
         }] animated:_gitDiffExpanded];
         _gitDiffRefreshButton.enabled = NO;
-    } else if (_gitDiffExpanded) {
+    } else if (_gitDiffExpanded && !_gitReviewShowsTranscriptEdits) {
         [self refreshGitDiff:nil];
     }
     _statusLabel.stringValue = [NSString stringWithFormat:
-        @"已从 PrettyTerm 记忆中删除 %@", path.lastPathComponent ?: path];
-    _bottomStatusLabel.stringValue =
-        @"重新打开相关对话或手动添加即可恢复 · Claude Code 目录未改变";
+        PTL(@"已从 PrettyTerm 记忆中删除 %@", @"Removed %@ from PrettyTerm memory"), path.lastPathComponent ?: path];
+    _bottomStatusLabel.stringValue = PTL(
+        @"重新打开相关对话或手动添加即可恢复 · Claude Code 目录未改变",
+        @"Reopen the related conversation or add it manually to restore it · Claude Code is unchanged");
+}
+
+- (void)buildGitActionPopoverIfNeeded {
+    if (_gitActionPopover) return;
+    _gitActionPopover = [[NSPopover alloc] init];
+    _gitActionPopover.behavior = NSPopoverBehaviorTransient;
+    _gitActionPopover.contentSize = NSMakeSize(360, 300);
+
+    NSViewController *controller = [[NSViewController alloc] init];
+    PTAppearanceSurfaceView *surface = [[PTAppearanceSurfaceView alloc]
+        initWithFrame:NSMakeRect(0, 0, 360, 300)];
+    surface.surfaceStyle = PTAppearanceSurfaceStyleCard;
+    controller.view = surface;
+    _gitActionPopover.contentViewController = controller;
+
+    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 10;
+    [surface addSubview:stack];
+
+    _gitActionBranchLabel = [self label:PTL(@"⌘ 读取当前分支…", @"⌘ Reading current branch…") size:13
+        weight:NSFontWeightSemibold color:NSColor.labelColor];
+    [stack addArrangedSubview:_gitActionBranchLabel];
+
+    _gitCommitMessageField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    _gitCommitMessageField.translatesAutoresizingMaskIntoConstraints = NO;
+    _gitCommitMessageField.placeholderString = PTL(@"提交信息（必须手动填写）", @"Commit message (manual entry required)");
+    _gitCommitMessageField.font = [NSFont systemFontOfSize:12 weight:NSFontWeightRegular];
+    _gitCommitMessageField.delegate = self;
+    [stack addArrangedSubview:_gitCommitMessageField];
+
+    _gitIncludeUnstagedButton = [NSButton checkboxWithTitle:@""
+        target:nil action:nil];
+    _gitIncludeUnstagedButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _gitIncludeUnstagedButton.state = NSControlStateValueOn;
+    _gitIncludeUnstagedButton.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
+    _gitIncludeUnstagedButton.contentTintColor = PTWarmAccentColor();
+    NSStackView *unstagedRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    unstagedRow.translatesAutoresizingMaskIntoConstraints = NO;
+    unstagedRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    unstagedRow.alignment = NSLayoutAttributeCenterY;
+    unstagedRow.spacing = 5;
+    NSTextField *unstagedLabel = [self label:PTL(@"包含未暂存的更改", @"Include unstaged changes") size:11.5
+        weight:NSFontWeightMedium color:NSColor.labelColor];
+    [unstagedRow addArrangedSubview:_gitIncludeUnstagedButton];
+    [unstagedRow addArrangedSubview:unstagedLabel];
+    [stack addArrangedSubview:unstagedRow];
+
+    NSBox *separator = [[NSBox alloc] initWithFrame:NSZeroRect];
+    separator.translatesAutoresizingMaskIntoConstraints = NO;
+    separator.boxType = NSBoxSeparator;
+    [stack addArrangedSubview:separator];
+
+    _gitCommitButton = [NSButton buttonWithTitle:PTL(@"提交", @"Commit") target:self action:@selector(commitGitChanges:)];
+    _gitCommitAndPushButton = [NSButton buttonWithTitle:PTL(@"提交并推送", @"Commit and Push")
+        target:self action:@selector(commitAndPushGitChanges:)];
+    _gitPushButton = [NSButton buttonWithTitle:PTL(@"推送", @"Push") target:self action:@selector(pushGitChanges:)];
+    for (NSButton *button in @[_gitCommitButton, _gitCommitAndPushButton, _gitPushButton]) {
+        button.translatesAutoresizingMaskIntoConstraints = NO;
+        button.bezelStyle = NSBezelStyleRounded;
+        button.alignment = NSTextAlignmentLeft;
+        button.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+        button.contentTintColor = PTWarmAccentColor();
+        [stack addArrangedSubview:button];
+        [button.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+    }
+    _gitCommitButton.toolTip = PTL(@"只提交暂存区；勾选后会先暂存仓库内全部改动", @"Commit staged changes only; when checked, all repository changes are staged first");
+    _gitCommitAndPushButton.toolTip = PTL(@"提交成功后再执行 git push", @"Run git push after a successful commit");
+    _gitPushButton.toolTip = PTL(@"只推送已有提交，不会自动创建提交", @"Push existing commits only; never creates a commit automatically");
+
+    NSStackView *statusRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    statusRow.translatesAutoresizingMaskIntoConstraints = NO;
+    statusRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    statusRow.alignment = NSLayoutAttributeCenterY;
+    statusRow.spacing = 7;
+    _gitActionProgress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    _gitActionProgress.translatesAutoresizingMaskIntoConstraints = NO;
+    _gitActionProgress.style = NSProgressIndicatorStyleSpinning;
+    _gitActionProgress.controlSize = NSControlSizeSmall;
+    _gitActionProgress.displayedWhenStopped = NO;
+    _gitActionProgress.hidden = YES;
+    _gitActionStatusLabel = [self label:PTL(@"提交信息不会自动生成", @"Commit messages are never generated automatically") size:10
+        weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    _gitActionStatusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [statusRow addArrangedSubview:_gitActionProgress];
+    [statusRow addArrangedSubview:_gitActionStatusLabel];
+    [stack addArrangedSubview:statusRow];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:surface.topAnchor constant:18],
+        [stack.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:18],
+        [stack.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-18],
+        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:surface.bottomAnchor constant:-14],
+        [_gitCommitMessageField.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+        [separator.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+        [_gitActionProgress.widthAnchor constraintEqualToConstant:14],
+        [_gitActionProgress.heightAnchor constraintEqualToConstant:14],
+        [_gitActionStatusLabel.widthAnchor constraintLessThanOrEqualToConstant:300]
+    ]];
+}
+
+- (void)updateGitActionControls {
+    NSString *message = [_gitCommitMessageField.stringValue
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    BOOL canCommit = !_gitActionInFlight && _gitObservedDirectory.length > 0 && message.length > 0;
+    _gitCommitButton.enabled = canCommit;
+    _gitCommitAndPushButton.enabled = canCommit;
+    _gitPushButton.enabled = !_gitActionInFlight && _gitObservedDirectory.length > 0;
+    _gitCommitMessageField.enabled = !_gitActionInFlight;
+    _gitIncludeUnstagedButton.enabled = !_gitActionInFlight;
+    _gitPublishButton.enabled = !_gitActionInFlight && _gitObservedDirectory.length > 0;
+}
+
+- (void)controlTextDidChange:(NSNotification *)notification {
+    if (notification.object == _gitCommitMessageField) [self updateGitActionControls];
+}
+
+- (void)showGitActions:(id)sender {
+    if (_gitObservedDirectory.length == 0) {
+        _statusLabel.stringValue = PTL(@"请先选择 Git 观察目录", @"Select a Git observation directory first");
+        return;
+    }
+    [self buildGitActionPopoverIfNeeded];
+    _gitActionStatusLabel.stringValue = PTL(@"提交信息不会自动生成", @"Commit messages are never generated automatically");
+    [self updateGitActionControls];
+    [_gitActionPopover showRelativeToRect:[sender bounds]
+                                   ofView:sender
+                            preferredEdge:NSRectEdgeMaxY];
+    [_gitCommitMessageField.window makeFirstResponder:_gitCommitMessageField];
+
+    NSString *directory = [_gitObservedDirectory copy];
+    _gitActionBranchLabel.stringValue = PTL(@"⌘ 读取当前分支…", @"⌘ Reading current branch…");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int status = 0;
+        NSString *branch = [[PTRunGit(directory, @[@"branch", @"--show-current"], &status)
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![directory isEqual:self->_gitObservedDirectory]) return;
+            self->_gitActionBranchLabel.stringValue = status == 0 && branch.length > 0
+                ? [NSString stringWithFormat:@"⌘  %@", branch]
+                : @"⌘  detached HEAD";
+        });
+    });
+}
+
+- (void)performGitCommit:(BOOL)commit push:(BOOL)push {
+    if (_gitActionInFlight || _gitObservedDirectory.length == 0) return;
+    NSString *message = [_gitCommitMessageField.stringValue
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (commit && message.length == 0) {
+        _gitActionStatusLabel.stringValue = PTL(@"请手动填写提交信息", @"Enter a commit message manually");
+        NSBeep();
+        return;
+    }
+
+    NSString *directory = [_gitObservedDirectory copy];
+    BOOL includeUnstaged = _gitIncludeUnstagedButton.state == NSControlStateValueOn;
+    _gitActionInFlight = YES;
+    _gitActionStatusLabel.stringValue = commit
+        ? PTL(@"正在提交…", @"Committing…") : PTL(@"正在推送…", @"Pushing…");
+    _gitActionProgress.hidden = NO;
+    [_gitActionProgress startAnimation:nil];
+    [self updateGitActionControls];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int status = 0;
+        NSString *root = [[PTRunGit(directory, @[@"rev-parse", @"--show-toplevel"], &status)
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
+        NSMutableArray<NSString *> *outputs = [NSMutableArray array];
+        if (status != 0 && root.length) [outputs addObject:root];
+        if (status == 0 && commit && includeUnstaged) {
+            NSString *output = PTRunGit(root, @[@"add", @"-A", @"--", @"."], &status);
+            if (output.length) [outputs addObject:output];
+        }
+        if (status == 0 && commit) {
+            NSString *output = PTRunGit(root, @[@"commit", @"-m", message], &status);
+            if (output.length) [outputs addObject:output];
+        }
+        if (status == 0 && push) {
+            NSString *output = PTRunGit(root, @[@"push"], &status);
+            if (output.length) [outputs addObject:output];
+        }
+        NSString *combined = [[outputs componentsJoinedByString:@"\n"]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (combined.length > 360) {
+            NSRange tailRange = [combined rangeOfComposedCharacterSequencesForRange:
+                NSMakeRange(combined.length - 360, 360)];
+            combined = [[combined substringWithRange:tailRange]
+                stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        }
+        NSString *success = commit && push
+            ? PTL(@"提交并推送完成", @"Commit and push completed")
+            : (commit ? PTL(@"提交完成", @"Commit completed") : PTL(@"推送完成", @"Push completed"));
+        NSString *result = status == 0 ? success
+            : (combined.length ? combined : PTL(@"Git 操作失败", @"Git operation failed"));
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_gitActionInFlight = NO;
+            [self->_gitActionProgress stopAnimation:nil];
+            self->_gitActionProgress.hidden = YES;
+            self->_gitActionStatusLabel.stringValue = result;
+            self->_gitActionStatusLabel.toolTip = combined;
+            if (status == 0 && commit) self->_gitCommitMessageField.stringValue = @"";
+            [self updateGitActionControls];
+            self->_statusLabel.stringValue = result;
+            self->_bottomStatusLabel.stringValue = result;
+            if (self->_gitDiffExpanded && !self->_gitReviewShowsTranscriptEdits) {
+                [self refreshGitDiff:nil];
+            }
+        });
+    });
+}
+
+- (void)commitGitChanges:(id)sender {
+    (void)sender;
+    [self performGitCommit:YES push:NO];
+}
+
+- (void)commitAndPushGitChanges:(id)sender {
+    (void)sender;
+    [self performGitCommit:YES push:YES];
+}
+
+- (void)pushGitChanges:(id)sender {
+    (void)sender;
+    [self performGitCommit:NO push:YES];
 }
 
 - (void)toggleGitDiff:(id)sender {
     (void)sender;
     if (!_gitDiffExpanded && _gitObservedDirectory.length == 0) {
-        _statusLabel.stringValue = @"请先选择或添加 Git 观察目录";
+        _statusLabel.stringValue = PTL(@"请先选择或添加 Git 观察目录", @"Select or add a Git observation directory first");
         return;
     }
     _gitDiffExpanded = !_gitDiffExpanded;
     NSUInteger animationGeneration = ++_gitDiffAnimationGeneration;
     BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    _gitDiffToggleButton.title = _gitDiffExpanded ? @"收起 Git 审阅  ‹" : @"展开 Git 审阅  ›";
+    _gitDiffToggleButton.title = _gitDiffExpanded
+        ? PTL(@"收起 Git 审阅  ‹", @"Collapse Git Review  ‹")
+        : PTL(@"展开 Git 审阅  ›", @"Expand Git Review  ›");
     if (_gitDiffExpanded) {
+        _gitReviewShowsTranscriptEdits = NO;
+        _transcriptEditReviewEvents = nil;
         _gitDiffScroll.hidden = NO;
         _gitDiffRefreshButton.hidden = NO;
         _gitDiffScroll.alphaValue = reduceMotion ? 1.0 : 0.0;
@@ -3540,6 +3933,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         }
         [self refreshGitDiff:nil];
     } else {
+        _gitReviewShowsTranscriptEdits = NO;
+        _transcriptEditReviewEvents = nil;
         _gitDiffGeneration++;
         [_gitDiffProgress stopAnimation:nil];
         _gitDiffProgress.hidden = YES;
@@ -3560,6 +3955,43 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
             }];
         }
     }
+}
+
+- (NSAttributedString *)transcriptEditReviewDocumentForEvents:
+    (NSArray<NSDictionary *> *)events {
+    __block NSAttributedString *document = nil;
+    [_gitDiffTextView.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        document = PTTranscriptEditReviewAttributedString(events ?: @[]);
+    }];
+    return document ?: [[NSAttributedString alloc] initWithString:@""];
+}
+
+- (void)showTranscriptEditReviewWithEvents:(NSArray<NSDictionary *> *)events {
+    _gitDiffGeneration++;
+    [_gitDiffProgress stopAnimation:nil];
+    _gitDiffProgress.hidden = YES;
+    _gitDiffRefreshButton.hidden = YES;
+    _gitReviewShowsTranscriptEdits = YES;
+    _transcriptEditReviewEvents = [events copy];
+    _gitDiffToggleButton.title = PTL(@"收起本轮审阅  ‹", @"Collapse Turn Review  ‹");
+
+    if (!_gitDiffExpanded) {
+        _gitDiffExpanded = YES;
+        ++_gitDiffAnimationGeneration;
+        BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+        _gitDiffScroll.hidden = NO;
+        _gitDiffScroll.alphaValue = reduceMotion ? 1.0 : 0.0;
+        _inspectorWidthBeforeGitDiff = MAX(210.0, NSWidth(_inspectorView.frame));
+        [self resizeInspectorToWidth:660.0];
+        if (!reduceMotion) {
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+                context.duration = 0.20;
+                self->_gitDiffScroll.animator.alphaValue = 1.0;
+            } completionHandler:nil];
+        }
+    }
+    [self replaceGitReviewDocument:[self transcriptEditReviewDocumentForEvents:events]
+                          animated:YES];
 }
 
 - (NSAttributedString *)gitReviewDocumentForSnapshot:
@@ -3597,6 +4029,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     (void)sender;
     NSString *directory = [_gitObservedDirectory copy];
     if (directory.length == 0) return;
+    _gitReviewShowsTranscriptEdits = NO;
+    _transcriptEditReviewEvents = nil;
+    _gitDiffToggleButton.title = PTL(@"收起 Git 审阅  ‹", @"Collapse Git Review  ‹");
     NSUInteger generation = ++_gitDiffGeneration;
     _gitDiffRefreshButton.enabled = NO;
     _gitDiffProgress.hidden = NO;
@@ -3640,7 +4075,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
                 [view removeFromSuperview];
             }
             _changedFileButtonsByPath = @{};
-            NSTextField *empty = [self label:@"本轮没有 Edit / Write 改动" size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
+            NSTextField *empty = [self label:PTL(@"本轮没有 Edit / Write 改动", @"No Edit / Write changes in this turn") size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
             [_changedFilesStack addArrangedSubview:empty];
         } else {
             // 路径相同的按钮永不因 added/removed 数字变化而拆除；只更新其内容。
@@ -3699,7 +4134,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
             [view removeFromSuperview];
         }
         if (tasks.count == 0) {
-            NSTextField *empty = [self label:@"当前会话没有任务" size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
+            NSTextField *empty = [self label:PTL(@"当前会话没有任务", @"No tasks in this conversation") size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
             [_tasksStack addArrangedSubview:empty];
         } else {
             for (NSDictionary *task in tasks) {
@@ -3727,7 +4162,59 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 
 - (void)toggleInspector:(id)sender {
     _inspectorView.hidden = !_inspectorView.hidden;
-    _inspectorToggleButton.title = _inspectorView.hidden ? @"显示检查器" : @"检查器";
+    _inspectorToggleButton.title = _inspectorView.hidden
+        ? PTL(@"显示", @"Show") : PTL(@"检查器", @"Inspect");
+}
+
+- (NSArray<NSDictionary *> *)transcriptEditEventsForSession:(PTSessionInfo *)session
+                                                   turnIndex:(NSUInteger)turnIndex {
+    NSMutableArray<NSDictionary *> *edits = [NSMutableArray array];
+    NSInteger currentTurn = -1;
+    for (NSDictionary *event in session.assistantMessages ?: @[]) {
+        BOOL isUser = [event[@"role"] isEqual:@"user"];
+        if (isUser) {
+            currentTurn++;
+            continue;
+        }
+        if (currentTurn < 0) currentTurn = 0;
+        if ((NSUInteger)currentTurn == turnIndex && [event[@"kind"] isEqual:@"diff"]) {
+            [edits addObject:event];
+        }
+    }
+    return edits;
+}
+
+- (void)openTranscriptEditReviewForSessionID:(NSString *)sessionID
+                                    turnIndex:(NSUInteger)turnIndex {
+    if (sessionID.length == 0) return;
+    if (![_selectedSession.sessionID isEqual:sessionID]) {
+        NSInteger matchingRow = NSNotFound;
+        for (NSInteger index = 0; index < (NSInteger)_sessions.count; index++) {
+            if ([_sessions[index].sessionID isEqual:sessionID]) {
+                matchingRow = index;
+                break;
+            }
+        }
+        if (matchingRow == NSNotFound) return;
+        [_sessionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:matchingRow]
+                     byExtendingSelection:NO];
+        _selectedSession = _sessions[matchingRow];
+        [self showSelectedSession];
+    }
+
+    NSArray<NSDictionary *> *events = [self transcriptEditEventsForSession:_selectedSession
+                                                                  turnIndex:turnIndex];
+    if (events.count == 0) {
+        _statusLabel.stringValue = PTL(@"这个回合没有可审阅的 Edit / Write 记录", @"This turn has no recorded Edit / Write changes to review");
+        return;
+    }
+
+    _inspectorView.hidden = NO;
+    _inspectorToggleButton.title = PTL(@"检查器", @"Inspect");
+    [_window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self showTranscriptEditReviewWithEvents:events];
+    _statusLabel.stringValue = PTL(@"正在显示本轮已记录的本地修改 · 未执行 git diff", @"Showing recorded local changes for this turn · git diff was not run");
 }
 
 - (void)revealChangedFile:(NSButton *)sender {
@@ -3737,12 +4224,12 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         [path hasPrefix:@"/"] &&
         [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&directory];
     if (!exists || directory) {
-        _statusLabel.stringValue = @"文件已移动或不存在，无法在 Finder 中显示";
-        _bottomStatusLabel.stringValue = [NSString stringWithFormat:@"⚠ Finder 定位失败 · %@", path.lastPathComponent ?: @"未知文件"];
+        _statusLabel.stringValue = PTL(@"文件已移动或不存在，无法在 Finder 中显示", @"The file moved or no longer exists, so Finder cannot reveal it");
+        _bottomStatusLabel.stringValue = [NSString stringWithFormat:PTL(@"⚠ Finder 定位失败 · %@", @"⚠ Finder reveal failed · %@"), path.lastPathComponent ?: PTL(@"未知文件", @"Unknown file")];
         return;
     }
     [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
-    _statusLabel.stringValue = [NSString stringWithFormat:@"已在 Finder 中显示 %@", path.lastPathComponent];
+    _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"已在 Finder 中显示 %@", @"Revealed %@ in Finder"), path.lastPathComponent];
 }
 
 - (void)updateContextAndModelForSession:(PTSessionInfo *)session {
@@ -3771,8 +4258,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     }
     [_modelPicker selectItemAtIndex:selectedIndex];
     _modelPicker.itemArray.firstObject.title = session.model.length
-        ? [NSString stringWithFormat:@"当前 · %@", session.model]
-        : @"当前模型";
+        ? [NSString stringWithFormat:PTL(@"当前 · %@", @"Current · %@"), session.model]
+        : PTL(@"当前模型", @"Current model");
 }
 
 - (void)connectStoreAndBridge {
@@ -3789,7 +4276,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
             [self->_bridge.sessionID isEqual:self->_selectedSession.sessionID]) {
             self->_selectedSession.model = model;
             [self updateContextAndModelForSession:self->_selectedSession];
-            self->_statusLabel.stringValue = [NSString stringWithFormat:@"检测到模型切换：%@", model];
+            self->_statusLabel.stringValue = [NSString stringWithFormat:PTL(@"检测到模型切换：%@", @"Model switch detected: %@"), model];
         }
     };
     _bridge.statusChanged = ^(NSString *status) {
@@ -3805,7 +4292,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         PTAppDelegate *self = weakSelf;
         if (!self) return;
         if ([chunk containsString:@"Remote Control"] && [chunk containsString:@"http"]) {
-            self->_statusLabel.stringValue = @"官方 Remote Control 已启用";
+            self->_statusLabel.stringValue = PTL(@"官方 Remote Control 已启用", @"Official Remote Control is enabled");
         }
     };
     [_store startWatchingGlobalSettings];
@@ -3858,18 +4345,19 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     [self updateFloatingControls];
     _manualRefreshSessionID = nil;
     if (!_bridge.running) {
-        _statusLabel.stringValue = [NSString stringWithFormat:@"已发现 %lu 个本地会话", (unsigned long)sessions.count];
+        _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"已发现 %lu 个本地会话", @"Found %lu local conversations"), (unsigned long)sessions.count];
     }
 }
 
 - (void)showSelectedSession {
     if (!_selectedSession) return;
     [self watchSelectedSessionTranscript];
-    _conversationTitle.stringValue = _selectedSession.title ?: @"未命名会话";
+    _conversationTitle.stringValue = _selectedSession.title ?: PTL(@"未命名会话", @"Untitled conversation");
     NSString *folder = _selectedSession.cwd.lastPathComponent.length ? _selectedSession.cwd.lastPathComponent : _selectedSession.cwd;
     NSString *model = _selectedSession.model.length ? _selectedSession.model : @"Claude";
-    _conversationDetail.stringValue = [NSString stringWithFormat:@"%@ · %@ · %lu 条消息",
-        folder.length ? folder : @"未知目录", model, (unsigned long)_selectedSession.assistantMessages.count];
+    _conversationDetail.stringValue = [NSString stringWithFormat:PTL(@"%@ · %@ · %lu 条消息", @"%@ · %@ · %lu messages"),
+        folder.length ? folder : PTL(@"未知目录", @"Unknown directory"), model,
+        (unsigned long)_selectedSession.assistantMessages.count];
     _connectButton.enabled = YES;
     [self updateContextAndModelForSession:_selectedSession];
     [self updateInspectorForSession:_selectedSession];
@@ -3923,6 +4411,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         @"title": session.title ?: @"未命名会话",
         @"cwd": session.cwd ?: @"",
         @"model": session.model ?: @"Claude",
+        @"interfaceLanguage": PTInterfaceLanguageCode(),
         @"messages": session.assistantMessages ?: @[]
     };
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
@@ -3956,7 +4445,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
             self->_renderedSessionID = nil;
             self->_renderedMessageCount = 0;
             self->_renderedModifiedAt = nil;
-            self->_statusLabel.stringValue = @"显示更新失败，正在重新同步完整会话…";
+            self->_statusLabel.stringValue = PTL(@"显示更新失败，正在重新同步完整会话…", @"Display update failed; resyncing the full conversation…");
         } else {
             self->_renderedSessionID = session.sessionID;
             self->_renderedMessageCount = messageCount;
@@ -4009,15 +4498,15 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSString *path = session.filePath ?: @"";
     BOOL exists = path.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:path];
 
-    NSMenuItem *reveal = [menu addItemWithTitle:@"在 Finder 中显示"
+    NSMenuItem *reveal = [menu addItemWithTitle:PTL(@"在 Finder 中显示", @"Reveal in Finder")
                                          action:@selector(revealSessionTranscript:)
                                   keyEquivalent:@""];
     reveal.target = self;
     reveal.representedObject = path;
     reveal.enabled = exists;
-    reveal.toolTip = exists ? path : @"transcript 文件已不存在";
+    reveal.toolTip = exists ? path : PTL(@"transcript 文件已不存在", @"Transcript file no longer exists");
 
-    NSMenuItem *copyPath = [menu addItemWithTitle:@"拷贝 transcript 路径"
+    NSMenuItem *copyPath = [menu addItemWithTitle:PTL(@"拷贝 transcript 路径", @"Copy transcript path")
                                            action:@selector(copySessionTranscriptPath:)
                                     keyEquivalent:@""];
     copyPath.target = self;
@@ -4030,7 +4519,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         ? sender.representedObject : nil;
     if (path.length == 0) return;
     if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
-        _statusLabel.stringValue = @"transcript 文件已不存在";
+        _statusLabel.stringValue = PTL(@"transcript 文件已不存在", @"Transcript file no longer exists");
         return;
     }
     [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
@@ -4043,7 +4532,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
     [pasteboard clearContents];
     [pasteboard setString:path forType:NSPasteboardTypeString];
-    _statusLabel.stringValue = @"已拷贝 transcript 路径";
+    _statusLabel.stringValue = PTL(@"已拷贝 transcript 路径", @"Transcript path copied");
 }
 
 // 三个地方（bridge 状态变化 / 切换选中会话 / 点击接入按钮）都会想改按钮文案，
@@ -4051,11 +4540,12 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 // 统一到这一个方法里、按同一套优先级算，其它地方只管调用它。
 - (void)updateConnectButtonTitle {
     if (_connecting) {
-        _connectButton.title = @"正在同步…";
+        _connectButton.title = PTL(@"正在同步…", @"Syncing…");
         return;
     }
     BOOL sameConnection = _bridge.running && [_bridge.sessionID isEqual:_selectedSession.sessionID];
-    _connectButton.title = sameConnection ? @"已同步" : @"同步 Terminal";
+    _connectButton.title = sameConnection
+        ? PTL(@"已同步", @"Synced") : PTL(@"同步 Terminal", @"Sync");
     [self refreshAgentStateAndControls];
 }
 
@@ -4077,6 +4567,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    NSString *languageScript = [NSString stringWithFormat:
+        @"window.setPrettyTermLanguage && window.setPrettyTermLanguage('%@'); null;",
+        PTInterfaceLanguageCode()];
+    [webView evaluateJavaScript:languageScript completionHandler:nil];
     if (webView == _floatingConversationView) {
         _floatingWebReady = YES;
         [self refreshFloatingConversation];
@@ -4089,9 +4583,23 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
     (void)userContentController;
-    if (![message.name isEqualToString:@"quoteSelection"] ||
-        ![message.body isKindOfClass:NSDictionary.class]) return;
+    if (![message.body isKindOfClass:NSDictionary.class]) return;
     NSDictionary *body = message.body;
+    if ([message.name isEqualToString:@"openTranscriptEditReview"]) {
+        NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class]
+            ? body[@"sessionId"] : @"";
+        NSNumber *turnIndexValue = [body[@"turnIndex"] isKindOfClass:NSNumber.class]
+            ? body[@"turnIndex"] : nil;
+        NSString *expectedSessionID = message.webView == _conversationView
+            ? _selectedSession.sessionID
+            : (message.webView == _floatingConversationView ? _floatingSessionID : nil);
+        if (sessionID.length > 0 && turnIndexValue && [sessionID isEqual:expectedSessionID]) {
+            [self openTranscriptEditReviewForSessionID:sessionID
+                                             turnIndex:turnIndexValue.unsignedIntegerValue];
+        }
+        return;
+    }
+    if (![message.name isEqualToString:@"quoteSelection"]) return;
     NSString *text = [body[@"text"] isKindOfClass:NSString.class] ? body[@"text"] : nil;
     NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class] ? body[@"sessionId"] : nil;
     NSString *quote = PTMarkdownQuote(text);

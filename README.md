@@ -12,12 +12,14 @@ PrettyTerm is a lightweight native macOS companion for Claude Code sessions runn
 - Exact Terminal binding using TTY, process, and Claude session metadata checks.
 - Markdown rendering for headings, lists, quotes, links, code blocks, and tables.
 - Bundled MathJax rendering for inline and display LaTeX.
-- Expandable thinking, tool, error, and line-by-line diff events.
-- Inspector for connection state, context usage, plan limits, estimated API-equivalent cost, changed files, tasks, and an expandable native Git review.
+- Expandable thinking, tool, error, and line-by-line diff events; per-file diffs start collapsed.
+- Codex-style edited-file summaries at the end of each turn, with one-click access to that turn's recorded `Edit` / `Write` review without running Git.
+- Inspector for connection state, context usage, plan limits, estimated API-equivalent cost, changed files, tasks, an expandable native Git review, and explicit Git publishing actions.
 - Remembered Git observation directories discovered from the selected Claude Code transcript, plus manually added directories.
 - Always-on-top floating conversation window.
 - Text and image composition shared by the main and floating windows.
-- Light and dark appearance support.
+- Warm beige and deep-orange light and dark appearances designed to reduce glare.
+- Built-in Simplified Chinese and English interface selection, persisted locally across launches.
 
 ## Requirements
 
@@ -70,27 +72,33 @@ Create the versioned DMG and `SHA256SUMS.txt` with:
 
 ## How It Works
 
-PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders a read-only conversation snapshot in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. Sending remains anchored to Apple Terminal: PrettyTerm validates the selected Claude PID, TTY, exact process name, and session before writing to the bound tab.
+PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders a read-only conversation snapshot in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. When the inspector changes width, PrettyTerm preserves a character-level reading anchor so text reflow does not jump the conversation to another passage. Sending remains anchored to Apple Terminal: PrettyTerm validates the selected Claude PID, TTY, exact process name, and session before writing to the bound tab.
 
 PrettyTerm does not replace Claude Code or run a separate agent service. Claude.ai Remote Control is intentionally disabled.
 
 ## Git Inspector and Directory Scope
 
-The inspector can widen on demand to show the selected repository's local Git status and diff. PrettyTerm supports two sources for Git observation directories:
+The inspector can widen on demand to show the selected repository's local Git status and diff. This explicit Git review reads the current working tree. Separately, a turn containing `Edit` or `Write` events ends with an edited-files summary; clicking **Review** opens the exact before/after content recorded in that turn. Turn review does not run `git diff`, does not require a repository, and is not affected by the selected Git observation directory. Individual transcript diffs remain available inside the conversation and start collapsed. PrettyTerm supports two sources for Git observation directories:
 
 - **Observed directories:** PrettyTerm collects absolute `cwd` values found in the selected Claude Code transcript and remembers them locally for later selection. This reflects directories recorded while Claude Code works, including paths seen after Claude Code has used an added directory.
 - **Manual directories:** Enter an absolute folder path in the inspector to add it directly to PrettyTerm's remembered Git directory list.
 
 The selected remembered directory can be deleted from the inspector. Deletion only removes PrettyTerm's saved observation entry: it remains hidden while the current conversation stays open, and can be restored immediately by manual entry or rediscovered after reopening a conversation whose transcript records that directory.
 
-Both controls only change where PrettyTerm runs its read-only Git probes. They do not change Claude Code's working directory, grant Claude Code access to a folder, send terminal input, or execute a Claude Code command. To let Claude Code access another folder, run `/add-dir /absolute/path` inside Claude Code itself. PrettyTerm can then remember transcript directories that Claude Code records while working.
+The directory controls only change where PrettyTerm runs Git operations. They do not change Claude Code's working directory, grant Claude Code access to a folder, send terminal input, or execute a Claude Code command. To let Claude Code access another folder, run `/add-dir /absolute/path` inside Claude Code itself. PrettyTerm can then remember transcript directories that Claude Code records while working.
 
 The Git review presents branch and file summaries, old/new line numbers, colored addition and deletion rows, collapsed unchanged ranges, binary-file notices, and status-only entries for untracked files. Raw Git protocol headers are not shown. Expanding, collapsing, refreshing, and replacing review content use motion-aware transitions; macOS Reduce Motion is respected. Large Git output is still truncated locally to keep the interface responsive.
+
+The **Commit or Push** panel offers **Commit**, **Commit and Push**, and **Push**. PrettyTerm never generates a commit message: commit actions stay disabled until the user enters one manually. The optional **Include unstaged changes** checkbox runs `git add -A` for the selected repository before committing; when unchecked, only the existing index is committed. Push never creates a commit. Git is launched directly with argument arrays rather than through a shell. These are explicit write/network operations and can run repository-configured Git hooks.
+
+## Interface Language
+
+Use the language selector in the title bar to choose **中文** or **English**. The preference is saved locally and applies to the native window, conversation chrome, turn review, Git review, menus, and macOS permission descriptions. Switching language rebuilds only the presentation layer: the selected Claude session, unsent draft, pending image attachments, Terminal binding, and remembered Git directories remain intact.
 
 ## Privacy and Network Access
 
 - Conversation transcripts are read from the local machine.
-- PrettyTerm does not upload transcript contents to its own server.
+- PrettyTerm does not upload transcript contents to its own server. An explicit Git push sends repository commits only to that repository's configured remote.
 - The plan-usage panel reads the `Claude Code-credentials` item through macOS Security APIs under PrettyTerm's own code identity. It does not invoke `/usr/bin/security` or print the credential.
 - The access token is sent only as authorization for Anthropic's authenticated Claude usage endpoint to display the current 5-hour and 7-day limits.
 - The conversation WebView blocks network connections with Content Security Policy; bundled MathJax cannot dynamically load `require` or `autoload` extensions.

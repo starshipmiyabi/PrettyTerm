@@ -1,4 +1,5 @@
 #import "PTUsageMetrics.h"
+#import "PTLocalization.h"
 #import <math.h>
 
 typedef struct {
@@ -93,21 +94,21 @@ NSDate *PTDateFromClaudeAPIString(NSString *value) {
 }
 
 NSString *PTResetDescription(NSDate *resetDate, NSDate *now) {
-    if (!resetDate) return @"重置时间未知";
+    if (!resetDate) return PTL(@"重置时间未知", @"Reset time unknown");
     NSTimeInterval remaining = [resetDate timeIntervalSinceDate:now ?: NSDate.date];
-    if (remaining <= 0) return @"即将重置";
+    if (remaining <= 0) return PTL(@"即将重置", @"Resetting soon");
     NSUInteger minutes = (NSUInteger)ceil(remaining / 60.0);
-    if (minutes < 60) return [NSString stringWithFormat:@"%lu 分钟后重置", (unsigned long)minutes];
+    if (minutes < 60) return [NSString stringWithFormat:PTL(@"%lu 分钟后重置", @"Resets in %lu min"), (unsigned long)minutes];
     NSUInteger hours = minutes / 60;
     NSUInteger restMinutes = minutes % 60;
     if (hours < 24) {
         return restMinutes > 0
-            ? [NSString stringWithFormat:@"%lu 小时 %lu 分后重置", (unsigned long)hours, (unsigned long)restMinutes]
-            : [NSString stringWithFormat:@"%lu 小时后重置", (unsigned long)hours];
+            ? [NSString stringWithFormat:PTL(@"%lu 小时 %lu 分后重置", @"Resets in %lu h %lu min"), (unsigned long)hours, (unsigned long)restMinutes]
+            : [NSString stringWithFormat:PTL(@"%lu 小时后重置", @"Resets in %lu h"), (unsigned long)hours];
     }
     NSUInteger days = hours / 24;
     NSUInteger restHours = hours % 24;
     return restHours > 0
-        ? [NSString stringWithFormat:@"%lu 天 %lu 小时后重置", (unsigned long)days, (unsigned long)restHours]
-        : [NSString stringWithFormat:@"%lu 天后重置", (unsigned long)days];
+        ? [NSString stringWithFormat:PTL(@"%lu 天 %lu 小时后重置", @"Resets in %lu d %lu h"), (unsigned long)days, (unsigned long)restHours]
+        : [NSString stringWithFormat:PTL(@"%lu 天后重置", @"Resets in %lu d"), (unsigned long)days];
 }

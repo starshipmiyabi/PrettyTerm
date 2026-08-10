@@ -33,6 +33,11 @@ cp "$project_dir/Resources/PrettyTerm.icns" "$resources_dir/PrettyTerm.icns"
 if [[ -f "$project_dir/Resources/app.js" ]]; then
   cp "$project_dir/Resources/app.js" "$resources_dir/app.js"
 fi
+for localization in zh-Hans.lproj en.lproj; do
+  if [[ -d "$project_dir/Resources/$localization" ]]; then
+    ditto "$project_dir/Resources/$localization" "$resources_dir/$localization"
+  fi
+done
 
 # 正式发布时传入 Developer ID Application 身份：
 # PRETTYTERM_SIGNING_IDENTITY="Developer ID Application: ..." ./build-app.command

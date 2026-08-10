@@ -99,6 +99,41 @@ test('quote bridge is installed for both webviews and routes by webview plus ses
   assert.match(source, /insertText:[\s\S]*replacementRange:/);
 });
 
+test('edited-turn summaries bridge both webviews to transcript-local review without Git', () => {
+  const registrations = source.match(/addScriptMessageHandler:self name:@"openTranscriptEditReview"/g) || [];
+  assert.equal(registrations.length, 2);
+  const method = source.match(
+    /- \(void\)openTranscriptEditReviewForSessionID:[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(method, /transcriptEditEventsForSession:/);
+  assert.match(method, /showTranscriptEditReviewWithEvents:/);
+  assert.doesNotMatch(method, /refreshGitDiff|PTRunGit|PTGitReviewSnapshotForDirectory/);
+  assert.match(source, /PTTranscriptEditReviewAttributedString/);
+});
+
+test('conversation viewport preserves a character anchor while inspector width reflows text', () => {
+  const renderer = fs.readFileSync(
+    path.resolve(__dirname, '../Resources/app.js'),
+    'utf8'
+  );
+  assert.match(renderer, /caretRangeFromPoint/);
+  assert.match(renderer, /function captureViewportAnchor\(/);
+  assert.match(renderer, /function restoreViewportAnchor\(/);
+  assert.match(renderer, /addEventListener\('resize'/);
+  assert.match(renderer, /scrollBy\(0, top - anchor\.top\)/);
+});
+
+test('Git publishing requires a manually entered commit message and never shells it', () => {
+  assert.match(source, /placeholderString = PTL\(@"提交信息（必须手动填写）", @"Commit message \(manual entry required\)"\)/);
+  assert.match(source, /message\.length > 0/);
+  assert.match(source, /@\[@"commit", @"-m", message\]/);
+  assert.match(source, /@\[@"push"\]/);
+  assert.match(source, /GIT_TERMINAL_PROMPT/);
+  assert.match(source, /commitAndPushGitChanges:/);
+  assert.match(source, /PTL\(@"包含未暂存的更改", @"Include unstaged changes"\)/);
+  assert.doesNotMatch(source, /git commit[^\n]*\$|git push[^\n]*\$/);
+});
+
 test('both composers are taller and keep slightly wider side margins', () => {
   assert.match(source, /_composerHeightConstraint\s*=\s*\[composerBar\.heightAnchor constraintEqualToConstant:116\]/);
   assert.match(source, /_floatingComposerHeightConstraint\s*=\s*\[composerBar\.heightAnchor constraintEqualToConstant:110\]/);
@@ -122,7 +157,7 @@ test('production sending keeps both single-line and multiline messages on the sa
 test('Claude.ai Remote Control is hard-disabled', () => {
   assert.doesNotMatch(source, /sendToTerminal:@"\/remote-control/);
   assert.match(source, /_remoteButton\.enabled = NO/);
-  assert.match(source, /buttonWithTitle:@"RC 已禁用" target:nil action:nil/);
+  assert.match(source, /buttonWithTitle:PTL\(@"RC禁用", @"RC Off"\) target:nil action:nil/);
 });
 
 test('the top-left app identity shows the running bundle version and build', () => {
@@ -130,6 +165,19 @@ test('the top-left app identity shows the running bundle version and build', () 
   assert.match(source, /bundleInfo\[@"CFBundleVersion"\]/);
   assert.match(source, /visibleAppVersion = \[NSString stringWithFormat:@"%@ · v%@ \(%@\)"/);
   assert.match(source, /\[self label:visibleAppVersion size:17/);
+});
+
+test('interface language picker persists Chinese or English and rebuilds without dropping drafts', () => {
+  const method = source.match(
+    /- \(void\)changeInterfaceLanguage:[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(source, /PTInterfaceLanguageDefaultsKey/);
+  assert.match(source, /addItemWithTitle:@"中文"/);
+  assert.match(source, /addItemWithTitle:@"English"/);
+  assert.match(method, /NSString \*draft = _composerTextView\.string/);
+  assert.match(method, /\[self buildWindow\]/);
+  assert.match(method, /_composerTextView\.string = draft/);
+  assert.match(source, /@"interfaceLanguage": PTInterfaceLanguageCode\(\)/);
 });
 
 test('changed-file buttons accept the first click after Finder deactivates the app', () => {

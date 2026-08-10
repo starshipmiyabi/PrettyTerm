@@ -15,12 +15,34 @@ static void PTCallOneObject(id object, SEL selector, id argument) {
     ((void (*)(id, SEL, id))objc_msgSend)(object, selector, argument);
 }
 
+static void PTCallObjectAndUnsigned(id object, SEL selector, id argument, NSUInteger value) {
+    ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(object, selector, argument, value);
+}
+
 static void PTPumpRunLoop(NSTimeInterval duration) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:duration];
     while ([deadline timeIntervalSinceNow] > 0) {
         [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode
                               beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
     }
+}
+
+static NSString *PTRunTestGit(NSString *directory, NSArray<NSString *> *arguments) {
+    NSTask *task = [[NSTask alloc] init];
+    NSMutableArray<NSString *> *all = [NSMutableArray arrayWithObjects:@"-C", directory, nil];
+    [all addObjectsFromArray:arguments];
+    NSPipe *pipe = [NSPipe pipe];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/git"];
+    task.arguments = all;
+    task.standardOutput = pipe;
+    task.standardError = pipe;
+    PTAssert([task launchAndReturnError:nil], @"test Git command must launch");
+    NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+    [task waitUntilExit];
+    PTAssert(task.terminationStatus == 0,
+        [NSString stringWithFormat:@"test Git command failed: %@",
+            [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]]);
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
 }
 
 static id PTCreateWithObject(Class classObject, SEL selector, id argument) {
@@ -59,6 +81,7 @@ static void PTAssertButtonHitTest(NSWindow *window, NSButton *button, NSString *
 int main(void) {
     @autoreleasepool {
         (void)NSApplication.sharedApplication;
+        [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
         id delegate = [[NSClassFromString(@"PTAppDelegate") alloc] init];
         PTAssert(delegate != nil, @"PTAppDelegate must be loadable");
         PTCallNoArgument(delegate, NSSelectorFromString(@"buildWindow"));
@@ -104,6 +127,7 @@ int main(void) {
         id session = [[NSClassFromString(@"PTSessionInfo") alloc] init];
         [session setValue:@0 forKey:@"contextUsed"];
         [session setValue:@200000 forKey:@"contextWindow"];
+        [session setValue:@"session-local-review" forKey:@"sessionID"];
         [session setValue:@[@"/tmp"] forKey:@"accessedDirectories"];
         [session setValue:@"/tmp" forKey:@"cwd"];
         [session setValue:@[@{
@@ -113,6 +137,17 @@ int main(void) {
             @"removed": @0
         }] forKey:@"changedFiles"];
         [session setValue:@[] forKey:@"tasks"];
+        [session setValue:@[
+            @{@"kind": @"user", @"text": @"change it"},
+            @{
+                @"kind": @"diff",
+                @"toolName": @"Edit",
+                @"filePath": @"/tmp/TranscriptOnly.m",
+                @"oldText": @"before local",
+                @"newText": @"after local"
+            }
+        ] forKey:@"assistantMessages"];
+        [delegate setValue:session forKey:@"selectedSession"];
         PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
 
         PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
@@ -140,6 +175,78 @@ int main(void) {
         PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
         PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
             @"reopening a related conversation must rediscover its deleted Git directory");
+
+        PTCallNoArgument(delegate, NSSelectorFromString(@"buildGitActionPopoverIfNeeded"));
+        NSTextField *commitMessage = [delegate valueForKey:@"gitCommitMessageField"];
+        NSButton *commitButton = [delegate valueForKey:@"gitCommitButton"];
+        NSButton *commitAndPushButton = [delegate valueForKey:@"gitCommitAndPushButton"];
+        NSButton *pushButton = [delegate valueForKey:@"gitPushButton"];
+        PTAssert(commitMessage != nil && commitButton != nil && commitAndPushButton != nil && pushButton != nil,
+            @"Git actions must expose manual commit, commit-and-push, and push controls");
+        commitMessage.stringValue = @"";
+        PTCallNoArgument(delegate, NSSelectorFromString(@"updateGitActionControls"));
+        PTAssert(!commitButton.enabled && !commitAndPushButton.enabled && pushButton.enabled,
+            @"commit actions must remain unavailable until the user types a message");
+        commitMessage.stringValue = @"Manual test message";
+        PTCallNoArgument(delegate, NSSelectorFromString(@"updateGitActionControls"));
+        PTAssert(commitButton.enabled && commitAndPushButton.enabled,
+            @"a manually entered commit message must enable commit actions");
+
+        NSString *gitFixture = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"prettyterm-git-action-%@", NSUUID.UUID.UUIDString]];
+        PTAssert([NSFileManager.defaultManager createDirectoryAtPath:gitFixture
+            withIntermediateDirectories:YES attributes:nil error:nil],
+            @"temporary Git fixture must be created");
+        PTRunTestGit(gitFixture, @[@"init", @"-q"]);
+        PTRunTestGit(gitFixture, @[@"config", @"user.name", @"PrettyTerm Tests"]);
+        PTRunTestGit(gitFixture, @[@"config", @"user.email", @"tests@prettyterm.invalid"]);
+        NSString *fixtureFile = [gitFixture stringByAppendingPathComponent:@"Review.txt"];
+        PTAssert([@"before\n" writeToFile:fixtureFile atomically:YES
+                                  encoding:NSUTF8StringEncoding error:nil],
+            @"initial fixture file must be written");
+        PTRunTestGit(gitFixture, @[@"add", @"Review.txt"]);
+        PTRunTestGit(gitFixture, @[@"commit", @"-q", @"-m", @"Initial"]);
+        PTAssert([@"after\n" writeToFile:fixtureFile atomically:YES
+                                 encoding:NSUTF8StringEncoding error:nil],
+            @"changed fixture file must be written");
+        [delegate setValue:gitFixture forKey:@"gitObservedDirectory"];
+        commitMessage.stringValue = @"Manual integration commit";
+        PTCallNoArgument(delegate, NSSelectorFromString(@"updateGitActionControls"));
+        PTCallOneObject(delegate, NSSelectorFromString(@"commitGitChanges:"), nil);
+        NSDate *commitDeadline = [NSDate dateWithTimeIntervalSinceNow:8.0];
+        while ([[delegate valueForKey:@"gitActionInFlight"] boolValue] &&
+               commitDeadline.timeIntervalSinceNow > 0) {
+            PTPumpRunLoop(0.02);
+        }
+        PTAssert(![[delegate valueForKey:@"gitActionInFlight"] boolValue],
+            @"manual commit must finish without blocking the app");
+        NSString *latestSubject = [PTRunTestGit(gitFixture, @[@"log", @"-1", @"--pretty=%s"])
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        PTAssert([latestSubject isEqual:@"Manual integration commit"],
+            @"Git must receive exactly the user-entered commit message");
+        [NSFileManager.defaultManager removeItemAtPath:gitFixture error:nil];
+        [delegate setValue:@"/tmp" forKey:@"gitObservedDirectory"];
+
+        PTCallObjectAndUnsigned(delegate,
+            NSSelectorFromString(@"openTranscriptEditReviewForSessionID:turnIndex:"),
+            @"session-local-review", 0);
+        [window.contentView layoutSubtreeIfNeeded];
+        PTPumpRunLoop(0.12);
+        PTAssert(!gitDiffScroll.hidden,
+            @"the per-turn review must open the inspector document");
+        PTAssert([gitDiffTextView.string containsString:@"本轮本地修改"] &&
+                 [gitDiffTextView.string containsString:@"before local"] &&
+                 [gitDiffTextView.string containsString:@"after local"] &&
+                 [gitDiffTextView.string containsString:@"未执行 git diff"],
+            @"the per-turn review must show transcript Edit content without probing Git");
+        PTAssert(![gitDiffTextView.string containsString:@"Git 审阅不可用"] &&
+                 [[delegate valueForKey:@"gitReviewShowsTranscriptEdits"] boolValue],
+            @"a non-repository Git observation directory must not affect local turn review");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleGitDiff:"), nil);
+        [window.contentView layoutSubtreeIfNeeded];
+        PTPumpRunLoop(0.18);
+        PTAssert(gitDiffScroll.hidden,
+            @"the local turn review must collapse through the shared review control");
 
         CGFloat compactInspectorWidth = NSWidth(inspector.frame);
         PTCallOneObject(delegate, NSSelectorFromString(@"toggleGitDiff:"), nil);
@@ -210,6 +317,25 @@ int main(void) {
             PTAssertButtonHitTest(window, button,
                 [NSString stringWithFormat:@"move/resize pass %lu", (unsigned long)++index]);
         }
+
+        NSTextView *composer = [delegate valueForKey:@"composerTextView"];
+        NSPopUpButton *languagePicker = [delegate valueForKey:@"languagePicker"];
+        composer.string = @"unsent draft survives language switch";
+        [languagePicker selectItemAtIndex:1];
+        PTCallOneObject(delegate, NSSelectorFromString(@"changeInterfaceLanguage:"), languagePicker);
+        NSWindow *englishWindow = [delegate valueForKey:@"window"];
+        NSTextView *englishComposer = [delegate valueForKey:@"composerTextView"];
+        NSButton *englishSend = [delegate valueForKey:@"sendButton"];
+        PTAssert(englishWindow != window &&
+                 [englishComposer.string isEqual:@"unsent draft survives language switch"],
+            @"switching interface language must rebuild presentation without dropping the draft");
+        PTAssert([englishSend.title isEqual:@"Send ↗"],
+            @"English mode must localize native controls");
+        NSPopUpButton *englishPicker = [delegate valueForKey:@"languagePicker"];
+        [englishPicker selectItemAtIndex:0];
+        PTCallOneObject(delegate, NSSelectorFromString(@"changeInterfaceLanguage:"), englishPicker);
+        PTAssert([[[delegate valueForKey:@"sendButton"] title] isEqual:@"发送 ↗"],
+            @"Chinese mode must remain selectable after switching to English");
         NSLog(@"PTWindowInteractionTests passed");
     }
     return 0;

@@ -15,6 +15,7 @@ static void PTAssertNear(double actual, double expected, NSString *message) {
 
 int main(void) {
     @autoreleasepool {
+        [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
         NSDateComponents *components = [[NSDateComponents alloc] init];
         components.calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
         components.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
@@ -45,6 +46,13 @@ int main(void) {
         PTAssert(!supported, @"Unknown model must be marked unsupported");
         PTAssert([PTDateFromClaudeAPIString(@"2026-08-09T04:59:59.763485+00:00") isKindOfClass:NSDate.class],
                  @"Claude fractional reset timestamps should parse");
+        NSDate *reset = [date dateByAddingTimeInterval:90 * 60];
+        PTAssert([PTResetDescription(reset, date) containsString:@"小时"],
+            @"Chinese reset description must remain available");
+        [NSUserDefaults.standardUserDefaults setObject:@"en" forKey:@"PTInterfaceLanguage"];
+        PTAssert([PTResetDescription(reset, date) containsString:@"Resets in"],
+            @"English reset description must be available");
+        [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
         NSLog(@"PTUsageMetricsTests passed");
     }
     return 0;

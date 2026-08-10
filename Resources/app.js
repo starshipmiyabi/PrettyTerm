@@ -5,6 +5,7 @@
     scope.PrettyTermRenderer = api;
     scope.setClaudeSession = api.setClaudeSession;
     scope.appendClaudeMessages = api.appendClaudeMessages;
+    scope.setPrettyTermLanguage = api.setPrettyTermLanguage;
   }
 })(typeof window !== 'undefined' ? window : globalThis, function (scope) {
   'use strict';
@@ -12,10 +13,61 @@
   const state = {
     session: null,
     renderedCount: 0,
-    pendingQuote: null
+    pendingQuote: null,
+    language: 'zh-Hans',
+    viewportAnchor: null,
+    viewportCaptureFrame: 0,
+    viewportRestoreFrame: 0,
+    restoringViewport: false,
+    viewportResizePending: false
   };
 
   const MAX_QUOTE_LENGTH = 20000;
+
+  const strings = {
+    'zh-Hans': {
+      quote: '引用选中内容', expandInput: '展开输入', lines: '行', codeChange: '代码改动',
+      showMoreFiles: '再显示 {count} 个文件', editedFiles: '已编辑 {count} 个文件',
+      review: '审阅', thinking: '思考过程', tool: '工具调用', error: '错误',
+      empty: '这个会话还没有可显示的事件。', loading: '正在读取 Claude 的会话事件…'
+    },
+    en: {
+      quote: 'Quote selection', expandInput: 'Expand input', lines: 'lines', codeChange: 'Code change',
+      showMoreFiles: 'Show {count} more files', editedFiles: 'Edited {count} files',
+      review: 'Review', thinking: 'Thinking', tool: 'Tool call', error: 'Error',
+      empty: 'This conversation has no events to display yet.', loading: 'Reading Claude conversation events…'
+    }
+  };
+
+  function t(key, replacements) {
+    let value = (strings[state.language] || strings['zh-Hans'])[key] || key;
+    Object.entries(replacements || {}).forEach(([name, replacement]) => {
+      value = value.replace(`{${name}}`, String(replacement));
+    });
+    return value;
+  }
+
+  function applyDocumentLanguage() {
+    if (!scope || !scope.document) return;
+    if (scope.document.documentElement) {
+      scope.document.documentElement.lang = state.language === 'en' ? 'en' : 'zh-Hans';
+    }
+    const quoteButton = scope.document.querySelector('#quote-menu button');
+    if (quoteButton) quoteButton.innerHTML = `<span aria-hidden="true">↩</span>${escapeHTML(t('quote'))}`;
+    const loading = scope.document.querySelector('[data-i18n="loading"]');
+    if (loading) loading.textContent = t('loading');
+  }
+
+  function setPrettyTermLanguage(language) {
+    state.language = String(language || '').toLowerCase().startsWith('en') ? 'en' : 'zh-Hans';
+    if (state.session) state.session.interfaceLanguage = state.language;
+    applyDocumentLanguage();
+    if (state.session) {
+      const root = rootElement();
+      if (root) root.innerHTML = renderSession(state.session);
+    }
+    return state.language;
+  }
 
   function escapeHTML(value) {
     return String(value == null ? '' : value)
@@ -82,7 +134,7 @@
     const button = scope.document.createElement('button');
     button.type = 'button';
     button.setAttribute('role', 'menuitem');
-    button.innerHTML = '<span aria-hidden="true">↩</span>引用选中内容';
+    button.innerHTML = `<span aria-hidden="true">↩</span>${escapeHTML(t('quote'))}`;
     button.addEventListener('click', () => {
       const bridge = scope.webkit && scope.webkit.messageHandlers &&
         scope.webkit.messageHandlers.quoteSelection;
@@ -381,11 +433,11 @@
   function longContent(html, text) {
     const lineCount = String(text || '').split('\n').length;
     if (lineCount <= 20) return html;
-    return `<details class="long-content"><summary>展开输入 · ${lineCount} 行</summary><div class="long-content-body">${html}</div></details>`;
+    return `<details class="long-content"><summary>${escapeHTML(t('expandInput'))} · ${lineCount} ${escapeHTML(t('lines'))}</summary><div class="long-content-body">${html}</div></details>`;
   }
 
   function renderDiff(message) {
-    const path = cleanTranscriptText(message.filePath || message.path || '代码改动');
+    const path = cleanTranscriptText(message.filePath || message.path || t('codeChange'));
     const lines = diffLines(message.oldText, message.newText);
     const added = lines.filter(line => line.type === 'add').length;
     const removed = lines.filter(line => line.type === 'remove').length;
@@ -393,44 +445,135 @@
       const mark = line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' ';
       return `<div class="diff-line ${line.type}"><span class="diff-mark">${mark}</span><code>${escapeHTML(line.text)}</code></div>`;
     }).join('');
-    return `<details class="event diff-event" open><summary><span class="event-icon">Δ</span><span>${escapeHTML(message.toolName || 'Edit')}</span><code class="event-path">${escapeHTML(path)}</code><span class="diff-stats"><b>+${added}</b><i>−${removed}</i></span></summary><div class="diff-view">${body}</div></details>`;
+    return `<details class="event diff-event"><summary><span class="event-icon">Δ</span><span>${escapeHTML(message.toolName || 'Edit')}</span><code class="event-path">${escapeHTML(path)}</code><span class="diff-stats"><b>+${added}</b><i>−${removed}</i></span></summary><div class="diff-view">${body}</div></details>`;
+  }
+
+  function changedFileSummary(messages) {
+    const files = new Map();
+    (Array.isArray(messages) ? messages : []).forEach(message => {
+      if (eventKind(message || {}) !== 'diff') return;
+      const path = cleanTranscriptText(message.filePath || message.path || t('codeChange'));
+      const lines = diffLines(message.oldText, message.newText);
+      const added = lines.filter(line => line.type === 'add').length;
+      const removed = lines.filter(line => line.type === 'remove').length;
+      const existing = files.get(path) || { path, added: 0, removed: 0 };
+      existing.added += added;
+      existing.removed += removed;
+      files.set(path, existing);
+    });
+    return Array.from(files.values()).sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  function renderTurnEditSummary(messages, session, turnIndex) {
+    const files = changedFileSummary(messages);
+    if (!files.length) return '';
+    const added = files.reduce((sum, file) => sum + file.added, 0);
+    const removed = files.reduce((sum, file) => sum + file.removed, 0);
+    const fileRow = file => `<div class="edit-file"><code title="${escapeHTML(file.path)}">${escapeHTML(file.path.split('/').pop() || file.path)}</code><span><b>+${file.added}</b><i>−${file.removed}</i></span></div>`;
+    const first = files.slice(0, 3).map(fileRow).join('');
+    const remaining = files.slice(3);
+    const more = remaining.length
+      ? `<details class="edit-more"><summary>${escapeHTML(t('showMoreFiles', { count: remaining.length }))}</summary>${remaining.map(fileRow).join('')}</details>`
+      : '';
+    const sessionId = String(session && (session.sessionId || session.id) || '');
+    return `<section class="edit-summary" data-edit-summary><button type="button" class="open-local-review" data-session-id="${escapeHTML(sessionId)}" data-turn-index="${Number.isInteger(turnIndex) ? turnIndex : 0}"><span class="edit-summary-icon" aria-hidden="true">▣</span><span class="edit-summary-title"><strong>${escapeHTML(t('editedFiles', { count: files.length }))}</strong><span class="edit-total"><b>+${added}</b><i>−${removed}</i></span></span><span class="edit-review-label">${escapeHTML(t('review'))}</span></button><div class="edit-files">${first}${more}</div></section>`;
+  }
+
+  function messageTurns(messages) {
+    const turns = [];
+    let current = null;
+    (Array.isArray(messages) ? messages : []).forEach(message => {
+      if (eventKind(message) === 'user') {
+        current = [];
+        turns.push(current);
+      } else {
+        if (!current) {
+          current = [];
+          turns.push(current);
+        }
+        current.push(message);
+      }
+    });
+    return turns;
+  }
+
+  function refreshTurnEditSummaries(root, session) {
+    if (!root) return;
+    const turns = messageTurns(session && session.messages);
+    const nodes = Array.from(root.querySelectorAll('section.turn'));
+    nodes.forEach((turn, index) => {
+      const existing = turn.querySelector(':scope > [data-edit-summary]');
+      const html = renderTurnEditSummary(turns[index] || [], session, index);
+      if (!html) {
+        if (existing) existing.remove();
+        return;
+      }
+      const template = scope.document.createElement('template');
+      template.innerHTML = html;
+      const replacement = template.content.firstElementChild;
+      if (existing) existing.replaceWith(replacement);
+      else turn.appendChild(replacement);
+    });
+  }
+
+  function installGitReviewBridge() {
+    if (!scope || !scope.document) return;
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      const button = target && typeof target.closest === 'function'
+        ? target.closest('.open-local-review') : null;
+      if (!button) return;
+      const bridge = scope.webkit && scope.webkit.messageHandlers &&
+        scope.webkit.messageHandlers.openTranscriptEditReview;
+      if (!bridge || typeof bridge.postMessage !== 'function') return;
+      bridge.postMessage({
+        sessionId: button.dataset.sessionId || '',
+        turnIndex: Number(button.dataset.turnIndex || 0)
+      });
+    });
   }
 
   function renderEvent(message, session) {
     message = message || {};
     const kind = eventKind(message);
     const text = eventText(message);
+    const messageKey = escapeHTML(message.messageKey || '');
+    const anchorAttribute = ` data-message-key="${messageKey}"`;
     if (kind === 'diff') return renderDiff(message);
     if (kind === 'thinking') {
-      return `<details class="event thinking-event"><summary><span class="event-icon">◌</span>思考过程</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
+      return `<details class="event thinking-event"${anchorAttribute}><summary><span class="event-icon">◌</span>${escapeHTML(t('thinking'))}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
     }
     if (kind === 'tool') {
-      const name = cleanTranscriptText(message.toolName || message.name || '工具调用');
-      return `<details class="event tool-event"><summary><span class="event-icon">›_</span>${escapeHTML(name)}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
+      const name = cleanTranscriptText(message.toolName || message.name || t('tool'));
+      return `<details class="event tool-event"${anchorAttribute}><summary><span class="event-icon">›_</span>${escapeHTML(name)}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
     }
     if (kind === 'error') {
-      const name = cleanTranscriptText(message.title || message.toolName || '错误');
-      return `<details class="event error-event" open><summary><span class="event-icon">!</span>${escapeHTML(name)}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
+      const name = cleanTranscriptText(message.title || message.toolName || t('error'));
+      return `<details class="event error-event" open${anchorAttribute}><summary><span class="event-icon">!</span>${escapeHTML(name)}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
     }
     if (kind === 'user') {
-      return `<div class="turn-prompt">${longContent(renderMarkdown(text), text)}</div>`;
+      return `<div class="turn-prompt"${anchorAttribute}>${longContent(renderMarkdown(text), text)}</div>`;
     }
     const model = cleanTranscriptText(message.model || (session && session.model) || 'Claude');
     const content = renderMarkdown(text);
-    return `<div class="assistant-text" data-model="${escapeHTML(model)}">${content}</div>`;
+    return `<div class="assistant-text" data-model="${escapeHTML(model)}"${anchorAttribute}>${content}</div>`;
   }
 
   function renderSession(session) {
     session = session || {};
+    if (session.interfaceLanguage) {
+      state.language = String(session.interfaceLanguage).toLowerCase().startsWith('en') ? 'en' : 'zh-Hans';
+    }
+    applyDocumentLanguage();
     const messages = Array.isArray(session.messages) ? session.messages : [];
     if (!messages.length) {
-      return '<div class="empty">这个会话还没有可显示的事件。</div>';
+      return `<div class="empty">${escapeHTML(t('empty'))}</div>`;
     }
     const turns = [];
     let current = null;
     const flush = () => {
       if (!current) return;
-      turns.push(`<section class="turn">${current.prompt}<div class="turn-events">${current.events.join('')}</div></section>`);
+      turns.push(`<section class="turn">${current.prompt}<div class="turn-events">${current.events.join('')}</div>${renderTurnEditSummary(current.messages, session, turns.length)}</section>`);
     };
 
     messages.forEach(message => {
@@ -438,11 +581,13 @@
         flush();
         current = {
           prompt: `<header class="turn-header"><span class="turn-label">TURN</span>${renderEvent(message, session)}</header>`,
-          events: []
+          events: [],
+          messages: []
         };
       } else {
-        if (!current) current = { prompt: '<header class="turn-header"><span class="turn-label">TURN</span></header>', events: [] };
+        if (!current) current = { prompt: '<header class="turn-header"><span class="turn-label">TURN</span></header>', events: [], messages: [] };
         current.events.push(renderEvent(message, session));
+        current.messages.push(message);
       }
     });
     flush();
@@ -456,6 +601,139 @@
   function nearBottom() {
     if (!scope || !scope.document) return true;
     return scope.document.body.scrollHeight - scope.scrollY - scope.innerHeight < 120;
+  }
+
+  function viewportRangeAtPoint(x, y) {
+    if (!scope || !scope.document) return null;
+    if (typeof scope.document.caretRangeFromPoint === 'function') {
+      return scope.document.caretRangeFromPoint(x, y);
+    }
+    if (typeof scope.document.caretPositionFromPoint === 'function') {
+      const position = scope.document.caretPositionFromPoint(x, y);
+      if (!position) return null;
+      const range = scope.document.createRange();
+      range.setStart(position.offsetNode, position.offset);
+      range.collapse(true);
+      return range;
+    }
+    return null;
+  }
+
+  function measurableRange(node, offset) {
+    if (!node || !node.isConnected || !scope || !scope.document) return null;
+    const range = scope.document.createRange();
+    try {
+      if (node.nodeType === 3 && node.length > 0) {
+        const safeOffset = Math.max(0, Math.min(Number(offset) || 0, node.length));
+        const start = safeOffset < node.length ? safeOffset : Math.max(0, safeOffset - 1);
+        range.setStart(node, start);
+        range.setEnd(node, Math.min(node.length, start + 1));
+      } else {
+        range.selectNode(node.nodeType === 1 ? node : node.parentElement);
+      }
+    } catch (_) {
+      return null;
+    }
+    return range;
+  }
+
+  function captureViewportAnchor() {
+    if (!scope || !scope.document || state.restoringViewport) return null;
+    if (nearBottom()) {
+      state.viewportAnchor = { followBottom: true };
+      return state.viewportAnchor;
+    }
+    const root = rootElement();
+    const rootRect = root && root.getBoundingClientRect ? root.getBoundingClientRect() : null;
+    const x = rootRect
+      ? Math.max(8, Math.min(scope.innerWidth - 8, rootRect.left + Math.min(48, rootRect.width / 3)))
+      : Math.max(8, Math.min(scope.innerWidth - 8, 32));
+    const samplePoints = [8, 24, 48, Math.min(scope.innerHeight - 8, 96)];
+    for (const y of samplePoints) {
+      const range = viewportRangeAtPoint(x, y);
+      if (!range || !range.startContainer) continue;
+      const measurable = measurableRange(range.startContainer, range.startOffset);
+      const rect = measurable && measurable.getBoundingClientRect();
+      if (!rect || !Number.isFinite(rect.top)) continue;
+      state.viewportAnchor = {
+        followBottom: false,
+        node: range.startContainer,
+        offset: range.startOffset,
+        top: rect.top
+      };
+      return state.viewportAnchor;
+    }
+    const element = scope.document.elementFromPoint(x, Math.min(scope.innerHeight - 8, 24));
+    const block = element && typeof element.closest === 'function'
+      ? element.closest('[data-message-key], .edit-summary, section.turn') : null;
+    if (block) {
+      state.viewportAnchor = {
+        followBottom: false,
+        element: block,
+        top: block.getBoundingClientRect().top
+      };
+    }
+    return state.viewportAnchor;
+  }
+
+  function restoreViewportAnchor() {
+    if (!scope || !scope.document || !state.viewportAnchor) return false;
+    const anchor = state.viewportAnchor;
+    state.restoringViewport = true;
+    if (anchor.followBottom) {
+      scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: 'auto' });
+    } else {
+      let top = null;
+      const range = measurableRange(anchor.node, anchor.offset);
+      const rect = range && range.getBoundingClientRect();
+      if (rect && Number.isFinite(rect.top)) top = rect.top;
+      else if (anchor.element && anchor.element.isConnected) {
+        top = anchor.element.getBoundingClientRect().top;
+      }
+      if (Number.isFinite(top)) scope.scrollBy(0, top - anchor.top);
+    }
+    const finish = () => {
+      state.restoringViewport = false;
+      state.viewportResizePending = false;
+      captureViewportAnchor();
+    };
+    if (typeof scope.requestAnimationFrame === 'function') scope.requestAnimationFrame(finish);
+    else finish();
+    return true;
+  }
+
+  function installStableViewport() {
+    if (!scope || !scope.document || typeof scope.addEventListener !== 'function') return;
+    const scheduleCapture = () => {
+      if (state.restoringViewport || state.viewportResizePending) return;
+      if (state.viewportCaptureFrame && typeof scope.cancelAnimationFrame === 'function') {
+        scope.cancelAnimationFrame(state.viewportCaptureFrame);
+      }
+      const capture = () => {
+        state.viewportCaptureFrame = 0;
+        captureViewportAnchor();
+      };
+      state.viewportCaptureFrame = typeof scope.requestAnimationFrame === 'function'
+        ? scope.requestAnimationFrame(capture) : (capture(), 0);
+    };
+    scope.addEventListener('scroll', scheduleCapture, { passive: true });
+    scope.addEventListener('resize', () => {
+      state.viewportResizePending = true;
+      if (state.viewportCaptureFrame && typeof scope.cancelAnimationFrame === 'function') {
+        scope.cancelAnimationFrame(state.viewportCaptureFrame);
+        state.viewportCaptureFrame = 0;
+      }
+      if (state.viewportRestoreFrame && typeof scope.cancelAnimationFrame === 'function') {
+        scope.cancelAnimationFrame(state.viewportRestoreFrame);
+      }
+      const restore = () => {
+        state.viewportRestoreFrame = 0;
+        restoreViewportAnchor();
+      };
+      state.viewportRestoreFrame = typeof scope.requestAnimationFrame === 'function'
+        ? scope.requestAnimationFrame(restore) : (restore(), 0);
+    });
+    scheduleCapture();
   }
 
   async function typeset(targets) {
@@ -480,6 +758,7 @@
     if (shouldFollow && typeof scope.scrollTo === 'function') {
       scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: 'auto' });
     }
+    captureViewportAnchor();
     return root.innerHTML;
   }
 
@@ -522,24 +801,33 @@
       const events = turn.querySelector('.turn-events');
       appendHTML(events, renderEvent(message, state.session));
     });
+    refreshTurnEditSummaries(root, state.session);
     await typeset(addedNodes);
     if (shouldFollow && typeof scope.scrollTo === 'function') {
       const reduce = scope.matchMedia && scope.matchMedia('(prefers-reduced-motion: reduce)').matches;
       scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: reduce ? 'auto' : 'smooth' });
     }
+    captureViewportAnchor();
     return root.innerHTML;
   }
 
   installQuoteMenu();
+  installGitReviewBridge();
+  installStableViewport();
 
   return {
     cleanTranscriptText,
     inlineMarkup,
     renderMarkdown,
     diffLines,
+    changedFileSummary,
+    renderTurnEditSummary,
+    captureViewportAnchor,
+    restoreViewportAnchor,
     renderEvent,
     renderSession,
     quotePayloadFromSelection,
+    setPrettyTermLanguage,
     setClaudeSession,
     appendClaudeMessages
   };

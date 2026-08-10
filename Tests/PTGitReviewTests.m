@@ -10,6 +10,7 @@ static void PTAssert(BOOL condition, NSString *message) {
 int main(void) {
     @autoreleasepool {
         (void)NSApplication.sharedApplication;
+        [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
         NSDictionary *snapshot = @{
             @"root": @"/tmp/PrettyTerm",
             @"directory": @"/tmp/PrettyTerm",
@@ -70,6 +71,63 @@ int main(void) {
         PTAssert([failure.string containsString:@"Git 审阅不可用"] &&
                  [failure.string containsString:@"这里不是 Git 仓库"],
             @"Git failures must render as a review error state");
+
+        NSArray<NSDictionary *> *transcriptEdits = @[
+            @{
+                @"kind": @"diff",
+                @"toolName": @"Edit",
+                @"filePath": @"/tmp/Sources/LocalReview.m",
+                @"oldText": @"old line\nkept",
+                @"newText": @"new line\nkept"
+            },
+            @{
+                @"kind": @"diff",
+                @"toolName": @"Write",
+                @"filePath": @"/tmp/Notes.txt",
+                @"oldText": @"",
+                @"newText": @"created locally"
+            }
+        ];
+        NSAttributedString *localReview =
+            PTTranscriptEditReviewAttributedString(transcriptEdits);
+        NSString *localText = localReview.string;
+        PTAssert([localText containsString:@"本轮本地修改"] &&
+                 [localText containsString:@"未执行 git diff"],
+            @"transcript review must identify its local source and Git-free boundary");
+        PTAssert([localText containsString:@"LocalReview.m"] &&
+                 [localText containsString:@"Notes.txt"] &&
+                 [localText containsString:@"old line"] &&
+                 [localText containsString:@"new line"] &&
+                 [localText containsString:@"created locally"],
+            @"transcript review must render the exact recorded Edit and Write content");
+        PTAssert(![localText containsString:@"Git 审阅不可用"] &&
+                 ![localText containsString:@"这里不是 Git 仓库"],
+            @"transcript review must never inherit Git repository errors");
+        NSRange localAdded = [localText rangeOfString:@"+ new line"];
+        NSRange localRemoved = [localText rangeOfString:@"− old line"];
+        PTAssert(localAdded.location != NSNotFound && localRemoved.location != NSNotFound,
+            @"transcript review must expose recorded additions and removals");
+        PTAssert([localReview attribute:NSBackgroundColorAttributeName atIndex:localAdded.location
+            effectiveRange:nil] != nil &&
+                 [localReview attribute:NSBackgroundColorAttributeName atIndex:localRemoved.location
+            effectiveRange:nil] != nil,
+            @"transcript additions and removals must keep review highlighting");
+
+        [NSUserDefaults.standardUserDefaults setObject:@"en" forKey:@"PTInterfaceLanguage"];
+        NSString *englishLocal = PTTranscriptEditReviewAttributedString(transcriptEdits).string;
+        NSString *englishGit = PTGitReviewAttributedString(@{
+            @"root": @"/tmp/PrettyTerm",
+            @"directory": @"/tmp/PrettyTerm",
+            @"branch": @"main",
+            @"status": @"",
+            @"diff": @""
+        }).string;
+        PTAssert([englishLocal containsString:@"Local Changes This Turn"] &&
+                 [englishLocal containsString:@"git diff was not run"],
+            @"English mode must localize transcript review without changing recorded content");
+        PTAssert([englishGit containsString:@"Working tree is clean"],
+            @"English mode must localize native Git review states");
+        [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
         NSLog(@"PTGitReviewTests passed");
     }
     return 0;

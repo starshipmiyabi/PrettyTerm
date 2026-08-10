@@ -1,0 +1,2 @@
+"NSAppleEventsUsageDescription" = "Allows PrettyTerm Beta to send messages and model-switch commands to the Terminal Claude Code conversation you selected.";
+"NSAccessibilityUsageDescription" = "PrettyTerm Beta experimental local input capability; the current sending path does not request this permission.";

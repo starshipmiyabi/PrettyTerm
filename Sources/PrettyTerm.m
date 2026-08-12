@@ -1,8 +1,6 @@
 #import <Cocoa/Cocoa.h>
-#import <ApplicationServices/ApplicationServices.h>
 #import <WebKit/WebKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#import <Security/Security.h>
 #import <signal.h>
 #import "PTAgentState.h"
 #import "PTGitReview.h"
@@ -10,30 +8,6 @@
 #import "PTUsageMetrics.h"
 
 static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments);
-
-static NSData *PTClaudeCredentialData(NSError **error) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: @"Claude Code-credentials",
-        (__bridge id)kSecAttrAccount: NSUserName(),
-        (__bridge id)kSecReturnData: @YES,
-        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
-    };
-    CFTypeRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (status != errSecSuccess) {
-        if (error) {
-            NSString *description = CFBridgingRelease(SecCopyErrorMessageString(status, NULL))
-                ?: [NSString stringWithFormat:@"Keychain 状态 %d", (int)status];
-            *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status
-                userInfo:@{NSLocalizedDescriptionKey: description}];
-        }
-        if (result) CFRelease(result);
-        return nil;
-    }
-    id value = CFBridgingRelease(result);
-    return [value isKindOfClass:NSData.class] ? value : nil;
-}
 
 static NSColor *PTColor(CGFloat red, CGFloat green, CGFloat blue) {
     return [NSColor colorWithSRGBRed:red green:green blue:blue alpha:1.0];
@@ -189,6 +163,135 @@ static NSString *PTTextFromMessageContent(id content) {
     return [parts componentsJoinedByString:@"\n"];
 }
 
+static NSString *PTAddedWorkingDirectoryFromText(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || text.length == 0) return nil;
+    static NSRegularExpression *ansiExpression;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        ansiExpression = [NSRegularExpression regularExpressionWithPattern:@"\\x1B\\[[0-?]*[ -/]*[@-~]"
+                                                                    options:0
+                                                                      error:nil];
+    });
+    NSString *plain = [ansiExpression stringByReplacingMatchesInString:text
+        options:0 range:NSMakeRange(0, text.length) withTemplate:@""];
+    NSRange prefix = [plain rangeOfString:@"Added "];
+    if (prefix.location == NSNotFound) return nil;
+    NSUInteger start = NSMaxRange(prefix);
+    NSRange suffix = [plain rangeOfString:@" as a working directory for this session"
+                                  options:0
+                                    range:NSMakeRange(start, plain.length - start)];
+    if (suffix.location == NSNotFound || suffix.location <= start) return nil;
+    NSString *path = [[plain substringWithRange:NSMakeRange(start, suffix.location - start)]
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    path = path.stringByExpandingTildeInPath.stringByStandardizingPath;
+    return [path hasPrefix:@"/"] ? path : nil;
+}
+
+static void PTRememberObservedPath(NSString *rawPath,
+                                   NSMutableOrderedSet<NSString *> *directories) {
+    if (![rawPath isKindOfClass:NSString.class] || rawPath.length == 0) return;
+    NSString *path = [rawPath stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    while (path.length > 1 && [@"\"'`,;)]" containsString:[path substringFromIndex:path.length - 1]]) {
+        path = [path substringToIndex:path.length - 1];
+    }
+    path = [[path stringByReplacingOccurrencesOfString:@"\\ " withString:@" "]
+        stringByExpandingTildeInPath].stringByStandardizingPath;
+    if (![path hasPrefix:@"/"]) return;
+    if ([path rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:
+        @"*?[]<>|"]].location != NSNotFound) return;
+
+    BOOL isDirectory = NO;
+    BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory];
+    NSString *directory = nil;
+    if (exists) {
+        directory = isDirectory ? path : path.stringByDeletingLastPathComponent;
+    } else if (path.pathExtension.length > 0) {
+        NSString *parent = path.stringByDeletingLastPathComponent;
+        BOOL parentIsDirectory = NO;
+        if ([NSFileManager.defaultManager fileExistsAtPath:parent isDirectory:&parentIsDirectory] &&
+            parentIsDirectory) {
+            directory = parent;
+        }
+    }
+    if (directory.length > 1) [directories addObject:directory.stringByStandardizingPath];
+}
+
+static BOOL PTStoredDirectoryPathIsValid(NSString *path) {
+    if (![path isKindOfClass:NSString.class] || ![path hasPrefix:@"/"] || path.length <= 1) {
+        return NO;
+    }
+    if ([path hasPrefix:@"/c/Users/"]) return NO;
+    if ([path rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:
+        @"*?[]<>|;\r\n"]].location != NSNotFound) return NO;
+    BOOL isDirectory = NO;
+    BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory];
+    return (exists && isDirectory) || [path hasPrefix:@"/Volumes/"];
+}
+
+static BOOL PTTranscriptKeyNamesPath(NSString *key) {
+    NSString *lower = key.lowercaseString ?: @"";
+    return [lower isEqual:@"cwd"] || [lower isEqual:@"path"] ||
+        [lower hasSuffix:@"path"] || [lower hasSuffix:@"_path"] ||
+        [lower hasSuffix:@"directory"] || [lower hasSuffix:@"_dir"] ||
+        [lower isEqual:@"dir"];
+}
+
+static void PTCollectAbsolutePathsFromCommand(NSString *command,
+                                              NSMutableOrderedSet<NSString *> *directories) {
+    if (![command isKindOfClass:NSString.class] || command.length == 0) return;
+    NSCharacterSet *terminators = [NSCharacterSet characterSetWithCharactersInString:
+        @" \t\r\n\"'`|;&<>(){}[]"];
+    for (NSUInteger index = 0; index < command.length; index++) {
+        if ([command characterAtIndex:index] != '/') continue;
+        unichar previous = index > 0 ? [command characterAtIndex:index - 1] : 0;
+        BOOL beginsArgument = index == 0 || [[NSCharacterSet whitespaceAndNewlineCharacterSet]
+            characterIsMember:previous] || [@"\"'=:(" containsString:[NSString stringWithCharacters:&previous length:1]];
+        if (!beginsArgument) continue;
+
+        unichar quote = (previous == '\'' || previous == '"') ? previous : 0;
+        NSUInteger end = index;
+        while (end < command.length) {
+            unichar character = [command characterAtIndex:end];
+            if (end > index && ((quote && character == quote) ||
+                (!quote && [terminators characterIsMember:character]))) break;
+            end++;
+        }
+        if (end > index) {
+            PTRememberObservedPath([command substringWithRange:NSMakeRange(index, end - index)],
+                directories);
+            index = end;
+        }
+    }
+}
+
+static void PTCollectTranscriptDirectories(id value,
+                                           NSString *key,
+                                           NSMutableOrderedSet<NSString *> *directories) {
+    if ([value isKindOfClass:NSString.class]) {
+        if ([key.lowercaseString isEqual:@"command"]) {
+            PTCollectAbsolutePathsFromCommand(value, directories);
+        } else if (PTTranscriptKeyNamesPath(key)) {
+            PTRememberObservedPath(value, directories);
+        }
+        return;
+    }
+    if ([value isKindOfClass:NSArray.class]) {
+        for (id item in (NSArray *)value) {
+            PTCollectTranscriptDirectories(item, key, directories);
+        }
+        return;
+    }
+    if (![value isKindOfClass:NSDictionary.class]) return;
+    [(NSDictionary *)value enumerateKeysAndObjectsUsingBlock:^(id nestedKey, id nestedValue, BOOL *stop) {
+        (void)stop;
+        NSString *name = [nestedKey isKindOfClass:NSString.class] ? nestedKey : @"";
+        // file-history-snapshot stores accessed file paths as dictionary keys.
+        if ([name hasPrefix:@"/"]) PTRememberObservedPath(name, directories);
+        PTCollectTranscriptDirectories(nestedValue, name, directories);
+    }];
+}
+
 @interface PTSessionInfo : NSObject
 @property(nonatomic, copy) NSString *sessionID;
 @property(nonatomic, copy) NSString *title;
@@ -297,6 +400,10 @@ static PTSessionInfo *PTParseSessionData(
         NSDictionary *object = [NSJSONSerialization JSONObjectWithData:lineData options:0 error:nil];
         if (![object isKindOfClass:NSDictionary.class]) continue;
 
+        // Remember every structured directory the Agent actually touches: cwd values,
+        // Read/Edit/Write paths, Bash absolute arguments, tool results, and file snapshots.
+        PTCollectTranscriptDirectories(object, nil, accessedDirectories);
+
         NSString *type = object[@"type"];
         NSString *objectSessionID = object[@"sessionId"];
         if ([objectSessionID isKindOfClass:NSString.class] && objectSessionID.length > 0) {
@@ -348,6 +455,8 @@ static PTSessionInfo *PTParseSessionData(
                 }
             }
             NSString *text = PTTextFromMessageContent(message[@"content"]);
+            NSString *addedDirectory = PTAddedWorkingDirectoryFromText(text);
+            if (addedDirectory.length > 0) [accessedDirectories addObject:addedDirectory];
             BOOL isMeta = [object[@"isMeta"] boolValue];
             if (firstPrompt.length == 0 && text.length > 0 && !isMeta) {
                 firstPrompt = text;
@@ -539,6 +648,8 @@ static PTSessionInfo *PTParseSessionAppending(
 @property(nonatomic, copy) void (^sessionsChanged)(NSArray<PTSessionInfo *> *sessions);
 @property(nonatomic, copy) void (^globalModelChanged)(NSString *model);
 - (void)refresh;
+- (void)refreshChangedPath:(NSString *)filePath
+                completion:(void (^)(PTSessionInfo * _Nullable session))completion;
 - (void)refreshForcingPath:(NSString *)filePath
                 completion:(void (^)(PTSessionInfo * _Nullable session))completion;
 - (void)startWatchingGlobalSettings;
@@ -679,6 +790,48 @@ static PTSessionInfo *PTParseSessionAppending(
     });
 }
 
+- (void)refreshChangedPath:(NSString *)filePath
+                completion:(void (^)(PTSessionInfo * _Nullable session))completion {
+    if (filePath.length == 0) {
+        if (completion) completion(nil);
+        return;
+    }
+    dispatch_async(_queue, ^{
+        NSURL *url = [NSURL fileURLWithPath:filePath];
+        NSNumber *regular = nil;
+        NSDate *modified = nil;
+        NSNumber *size = nil;
+        [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+        [url getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
+        [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+
+        NSDictionary *cached = self->_cache[filePath];
+        NSUInteger previousParsedSize = [cached[@"parsedSize"] unsignedIntegerValue];
+        NSUInteger parsedSize = 0;
+        PTSessionInfo *session = nil;
+        if (regular.boolValue) {
+            BOOL canAppend = cached[@"session"] && size.unsignedIntegerValue >= previousParsedSize;
+            session = canAppend
+                ? PTParseSessionAppending(filePath, modified ?: NSDate.distantPast,
+                    previousParsedSize, cached[@"session"], &parsedSize)
+                : PTParseSession(filePath, modified ?: NSDate.distantPast, &parsedSize);
+        }
+        if (session) {
+            self->_cache[filePath] = @{
+                @"modified": modified ?: NSDate.distantPast,
+                @"size": size ?: @0,
+                @"parsedSize": @(parsedSize),
+                @"session": session
+            };
+        } else {
+            [self->_cache removeObjectForKey:filePath];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(session);
+        });
+    });
+}
+
 - (void)refreshForcingPath:(NSString *)filePath
                 completion:(void (^)(PTSessionInfo * _Nullable session))completion {
     if (filePath.length == 0) {
@@ -739,6 +892,18 @@ static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments) {
     NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
     [task waitUntilExit];
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+}
+
+static NSString *PTClaudeExecutablePath(void) {
+    NSArray<NSString *> *candidates = @[
+        [NSHomeDirectory() stringByAppendingPathComponent:@".local/bin/claude"],
+        @"/opt/homebrew/bin/claude",
+        @"/usr/local/bin/claude"
+    ];
+    for (NSString *path in candidates) {
+        if ([NSFileManager.defaultManager isExecutableFileAtPath:path]) return path;
+    }
+    return nil;
 }
 
 static NSString *PTRunGit(NSString *directory, NSArray<NSString *> *arguments, int *exitStatus) {
@@ -880,38 +1045,6 @@ static BOOL PTWriteImageToPasteboard(NSImage *image, NSPasteboard *pasteboard) {
     return [pasteboard setData:png forType:NSPasteboardTypePNG];
 }
 
-// NSPasteboard 的数据提供回调就是“目标应用已经实际请求这份数据”的确认信号。
-// 它比固定 sleep 后恢复剪贴板可靠：Terminal 没读到就不会误报发送成功。
-@interface PTPasteboardLease : NSObject <NSPasteboardItemDataProvider>
-@property(atomic, readonly) BOOL served;
-- (instancetype)initWithText:(NSString *)text;
-@end
-
-@implementation PTPasteboardLease {
-    NSString *_text;
-    BOOL _served;
-}
-
-- (instancetype)initWithText:(NSString *)text {
-    self = [super init];
-    if (self) _text = [text copy] ?: @"";
-    return self;
-}
-
-- (BOOL)served {
-    @synchronized (self) { return _served; }
-}
-
-- (void)pasteboard:(NSPasteboard *)pasteboard
-              item:(NSPasteboardItem *)item
-provideDataForType:(NSPasteboardType)type {
-    (void)pasteboard;
-    if (![type isEqual:NSPasteboardTypeString]) return;
-    [item setString:_text forType:type];
-    @synchronized (self) { _served = YES; }
-}
-@end
-
 static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
     while (!condition() && deadline.timeIntervalSinceNow > 0) {
@@ -920,26 +1053,6 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:nextPass];
     }
     return condition();
-}
-
-static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags flags) {
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
-    CGEventRef down = CGEventCreateKeyboardEvent(source, keyCode, true);
-    CGEventRef up = CGEventCreateKeyboardEvent(source, keyCode, false);
-    if (!source || !down || !up) {
-        if (down) CFRelease(down);
-        if (up) CFRelease(up);
-        if (source) CFRelease(source);
-        return NO;
-    }
-    if (down) CGEventSetFlags(down, flags);
-    if (up) CGEventSetFlags(up, flags);
-    if (down) CGEventPostToPid(processID, down);
-    if (up) CGEventPostToPid(processID, up);
-    if (down) CFRelease(down);
-    if (up) CFRelease(up);
-    if (source) CFRelease(source);
-    return YES;
 }
 
 @implementation PTClaudeBridge {
@@ -1109,9 +1222,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
 
 - (BOOL)sendReturnToTerminal {
     if (_terminalTTY.length == 0) return NO;
-    // 空字符串会被 AppleEvent 桥接成 Null descriptor，Terminal 实际没有
-    // 可写数据。显式传入 CR 后，Terminal 自身再附加一枚 CR；marker 已
-    // 确认闭合，因此第一枚负责提交，第二枚落在空输入上并被 Claude 忽略。
+    // 实机字节探针确认：空 do script 由 Terminal 自动附加且只附加一个 CR；
+    // 显式传入 CR 反而会得到两个。正文落地后用这个独立单回车兜住提交。
     NSString *source = PTTerminalAutomationScript(
         _terminalTTY, _terminalPID, @"", PTTerminalAutomationActionSubmitReturn);
     NSDictionary *error = nil;
@@ -1146,112 +1258,6 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSLog(@"PrettyTerm multiline paste: markerBefore=%ld markerAfter=%ld acknowledged=%@",
         (long)markerBefore, (long)markerAfter, pasteAcknowledged ? @"YES" : @"NO");
     return [self sendReturnToTerminal];
-}
-
-// 以下是早期的辅助功能粘贴实验，生产发送路径不再调用。当前多行发送只使用
-// Terminal AppleEvent，并以 Claude 的可见 paste marker 作为提交确认点。
-- (BOOL)prepareBoundTerminalTabForKeyboardInput {
-    if (_terminalTTY.length == 0) return NO;
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "repeat with theWindow in windows\n"
-         "repeat with theTab in tabs of theWindow\n"
-         "if (tty of theTab) is \"%@\" then\n"
-         "set isSafe to false\n"
-         "set processNames to processes of theTab\n"
-         "repeat with p in processNames\n"
-         "set processName to (contents of p) as text\n"
-         "if processName is \"claude\" then set isSafe to true\n"
-         "end repeat\n"
-         "if isSafe is false then return \"unsafe\"\n"
-         "set selected tab of theWindow to theTab\n"
-         "set frontmost of theWindow to true\n"
-         "return \"ok\"\n"
-         "end if\n"
-         "end repeat\n"
-         "end repeat\n"
-         "return \"missing\"\n"
-         "end tell",
-         PTAppleScriptString(_terminalTTY)];
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    NSString *outcome = result.stringValue;
-    if ([outcome isEqual:@"ok"]) return YES;
-    if ([outcome isEqual:@"unsafe"]) _running = NO;
-    if (self.statusChanged) {
-        NSNumber *number = error[NSAppleScriptErrorNumber];
-        self.statusChanged(number.integerValue == -1743
-            ? @"请在系统设置中允许 PrettyTerm 控制 Terminal"
-            : [NSString stringWithFormat:@"Terminal 多行输入准备失败（%@）：%@",
-                number ?: @0,
-                error[NSAppleScriptErrorMessage] ?: (outcome.length ? outcome : @"标签页不可用")]);
-    }
-    return NO;
-}
-
-- (BOOL)pasteAndSubmitMultilineMessage:(NSString *)message {
-    if (!_running || message.length == 0 || ![self prepareBoundTerminalTabForKeyboardInput]) {
-        return NO;
-    }
-    NSArray<NSRunningApplication *> *terminalApps =
-        [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.Terminal"];
-    pid_t terminalProcessID = terminalApps.firstObject.processIdentifier;
-    if (terminalProcessID <= 0) {
-        if (self.statusChanged) self.statusChanged(@"Terminal 进程不可用，已取消多行发送");
-        return NO;
-    }
-    if (!AXIsProcessTrusted()) {
-        AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{
-            (__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES
-        });
-        if (self.statusChanged) {
-            self.statusChanged(@"请在系统设置的辅助功能中允许 PrettyTerm，然后重试多行发送");
-        }
-        return NO;
-    }
-
-    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-    NSArray<NSDictionary<NSString *, NSData *> *> *snapshot = PTSnapshotPasteboard(pasteboard);
-    NSString *pasteText = PTNormalizedTerminalPasteText(message);
-    PTPasteboardLease *lease = [[PTPasteboardLease alloc] initWithText:pasteText];
-    NSPasteboardItem *leaseItem = [[NSPasteboardItem alloc] init];
-    [leaseItem setDataProvider:lease forTypes:@[NSPasteboardTypeString]];
-    [pasteboard clearContents];
-    if (![pasteboard writeObjects:@[leaseItem]]) {
-        PTRestorePasteboard(pasteboard, snapshot);
-        if (self.statusChanged) self.statusChanged(@"无法准备多行消息剪贴板，内容未发送");
-        return NO;
-    }
-
-    // Cmd-V 和 Return 都定向投递给 Terminal 进程。目标 tab 已按 TTY 精确选中；
-    // 中间留出 Claude Code 收纳 bracketed paste 的时间，且全程只有一个 Return。
-    BOOL pasteEventPosted = PTPostKeyToProcess(terminalProcessID, 9, kCGEventFlagMaskCommand);
-    BOOL pasteConsumed = pasteEventPosted && PTRunLoopUntil(1.0, ^BOOL{
-        return lease.served;
-    });
-    if (!pasteConsumed) {
-        PTRestorePasteboard(pasteboard, snapshot);
-        [NSApp activateIgnoringOtherApps:YES];
-        if (self.statusChanged) {
-            self.statusChanged(@"Terminal 未确认读取多行消息，已取消提交并保留输入");
-        }
-        return NO;
-    }
-    // 数据提供回调已经证明 Terminal 取走正文；再给 Claude Code 一个短暂窗口
-    // 完成 bracketed-paste 收纳。这里不再承担“猜测是否已粘贴”的职责。
-    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
-    // 粘贴与提交之间 Claude 若刚好退出，Return 会落到 shell。重新做一遍
-    // TTY + processNames 安全检查；失败就只恢复剪贴板，不发送提交键。
-    BOOL stillSafe = _terminalPID > 0 && kill(_terminalPID, 0) == 0 &&
-        [self prepareBoundTerminalTabForKeyboardInput];
-    BOOL submitted = stillSafe && PTPostKeyToProcess(terminalProcessID, 36, 0);
-    PTRestorePasteboard(pasteboard, snapshot);
-    [NSApp activateIgnoringOtherApps:YES];
-    if (!submitted && self.statusChanged && _running) {
-        self.statusChanged(@"多行消息未能安全提交，内容已保留，请重试");
-    }
-    return submitted;
 }
 
 // connectToSession 内部要跑 AppleScript + ps + lsof，慢的时候能到几秒；
@@ -1381,7 +1387,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         [message rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound;
     BOOL sent = isMultiline
         ? [self sendMultilineMessage:message]
-        : [self sendToTerminal:PTNormalizedTerminalPasteText(message)];
+        : ([self sendToTerminal:PTNormalizedTerminalPasteText(message)] &&
+           [self sendReturnToTerminal]);
     if (sent) {
         if (self.statusChanged) self.statusChanged(@"已写入 Terminal，等待 Claude 回复…");
         return YES;
@@ -1566,6 +1573,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         (event.keyCode == 9 ||
          [event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"v"]);
     if (commandPaste) {
+        // performKeyEquivalent: 会沿整个视图树探测；若不核对 firstResponder，
+        // 即使老师正在检查器路径框里粘贴，消息编辑器也会抢先吞掉 ⌘V。
+        if (self.window.firstResponder != self) return NO;
         [self paste:self];
         return YES;
     }
@@ -1652,6 +1662,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSButton *_floatingButton;
     NSMenuItem *_floatingMenuItem;
     NSButton *_remoteButton;
+    NSButton *_compactButton;
     NSButton *_sendButton;
     NSButton *_refreshButton;
     NSTimer *_refreshTimer;
@@ -1715,7 +1726,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSScrollView *_gitDiffScroll;
     NSTextView *_gitDiffTextView;
     NSMutableArray<NSString *> *_gitDirectoryPaths;
-    NSMutableSet<NSString *> *_gitDirectoriesSuppressedUntilSessionChange;
+    NSMutableSet<NSString *> *_suppressedGitDirectoryPaths;
     NSString *_gitObservedDirectory;
     BOOL _gitDiffExpanded;
     BOOL _gitReviewShowsTranscriptEdits;
@@ -1752,6 +1763,9 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _floatingPendingImages = [NSMutableArray array];
     _temporaryImagePaths = [NSMutableSet set];
     _gitDirectoryPaths = [NSMutableArray array];
+    NSArray *suppressedDirectories = [NSUserDefaults.standardUserDefaults
+        arrayForKey:@"PTGitSuppressedDirectories"];
+    _suppressedGitDirectoryPaths = [NSMutableSet setWithArray:suppressedDirectories ?: @[]];
     [self buildMainMenu];
     [self buildWindow];
     [self connectStoreAndBridge];
@@ -1762,14 +1776,14 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     [_store refresh];
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(refreshSessions:) userInfo:nil repeats:YES];
     [self refreshClaudeUsage:nil];
-    _usageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 target:self selector:@selector(refreshClaudeUsage:) userInfo:nil repeats:YES];
+    _usageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:300.0 target:self selector:@selector(refreshClaudeUsage:) userInfo:nil repeats:YES];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
-    if (!_planUsageFetchedAt || [[NSDate date] timeIntervalSinceDate:_planUsageFetchedAt] > 30.0) {
+    if (!_planUsageFetchedAt || [[NSDate date] timeIntervalSinceDate:_planUsageFetchedAt] > 120.0) {
         [self refreshClaudeUsage:nil];
     }
 }
@@ -2498,6 +2512,14 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _remoteButton.toolTip = PTL(@"Claude.ai Remote Control 已禁用", @"Claude.ai Remote Control is disabled");
     [header addSubview:_remoteButton];
 
+    _compactButton = [NSButton buttonWithTitle:@"Compact" target:self action:@selector(compactConversation:)];
+    _compactButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _compactButton.bezelStyle = NSBezelStyleRounded;
+    _compactButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
+    _compactButton.enabled = NO;
+    _compactButton.toolTip = PTL(@"向当前 Terminal 会话发送 /compact", @"Send /compact to the current Terminal conversation");
+    [header addSubview:_compactButton];
+
     _inspectorToggleButton = [NSButton buttonWithTitle:PTL(@"检查器", @"Inspect") target:self action:@selector(toggleInspector:)];
     _inspectorToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
     _inspectorToggleButton.bezelStyle = NSBezelStyleRounded;
@@ -2628,7 +2650,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         [_conversationDetail.topAnchor constraintEqualToAnchor:_conversationTitle.bottomAnchor constant:2],
         [_connectButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-14],
         [_connectButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_floatingButton.trailingAnchor constraintEqualToAnchor:_connectButton.leadingAnchor constant:-8],
+        [_compactButton.trailingAnchor constraintEqualToAnchor:_connectButton.leadingAnchor constant:-8],
+        [_compactButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+        [_compactButton.widthAnchor constraintEqualToConstant:68],
+        [_floatingButton.trailingAnchor constraintEqualToAnchor:_compactButton.leadingAnchor constant:-8],
         [_floatingButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
         [_floatingButton.widthAnchor constraintEqualToConstant:34],
         [_floatingButton.heightAnchor constraintEqualToConstant:28],
@@ -3373,6 +3398,7 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _imageButton.enabled = ready;
     _remoteButton.enabled = NO;
     _modelPicker.enabled = ready;
+    _compactButton.enabled = ready;
 
     NSString *ttyState = _bridge.running
         ? PTL(@"Terminal 已验证", @"Terminal verified")
@@ -3431,7 +3457,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         NSString *fiveReset = PTResetDescription(_fiveHourResetAt, NSDate.date);
         NSString *sevenReset = PTResetDescription(_sevenDayResetAt, NSDate.date);
         _quotaLabel.toolTip = [NSString stringWithFormat:
-            @"5 小时：%.0f%%，%@\n7 天：%.0f%%，%@\n每 60 秒更新",
+            PTL(@"5 小时：%.0f%%，%@\n7 天：%.0f%%，%@\n由 Claude Code 每 5 分钟更新",
+                @"5 hours: %.0f%%, %@\n7 days: %.0f%%, %@\nUpdated by Claude Code every 5 minutes"),
             _fiveHourPercent, fiveReset, _sevenDayPercent, sevenReset];
         _inspectorQuotaLabel.stringValue = [NSString stringWithFormat:
             @"5 小时 %.0f%% · %@\n7 天 %.0f%% · %@",
@@ -3488,45 +3515,19 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _usageFetchInFlight = YES;
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSError *keychainError = nil;
-        NSData *credentialData = PTClaudeCredentialData(&keychainError);
-        NSDictionary *credentials = credentialData
-            ? [NSJSONSerialization JSONObjectWithData:credentialData options:0 error:nil] : nil;
-        NSDictionary *oauth = [credentials[@"claudeAiOauth"] isKindOfClass:NSDictionary.class]
-            ? credentials[@"claudeAiOauth"] : nil;
-        NSString *token = [oauth[@"accessToken"] isKindOfClass:NSString.class]
-            ? oauth[@"accessToken"] : @"";
-        if (token.length == 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf finishClaudeUsageWithPayload:nil error:keychainError.localizedDescription
-                    ?: @"未读取到 Claude Code 登录凭据"];
-            });
-            return;
-        }
-
-        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
-            [NSURL URLWithString:@"https://api.anthropic.com/api/oauth/usage"]];
-        request.HTTPMethod = @"GET";
-        request.timeoutInterval = 15.0;
-        [request setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
-        [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-        [request setValue:@"oauth-2025-04-20" forHTTPHeaderField:@"anthropic-beta"];
-        [request setValue:@"claude-code/2.1.226" forHTTPHeaderField:@"User-Agent"];
-        [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:
-          ^(NSData *data, NSURLResponse *response, NSError *networkError) {
-            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class]
-                ? (NSHTTPURLResponse *)response : nil;
-            NSDictionary *payload = data
-                ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-            NSString *message = nil;
-            if (networkError) message = @"额度服务暂时不可达";
-            else if (http.statusCode == 401 || http.statusCode == 403) message = @"Claude 凭据需刷新";
-            else if (http.statusCode != 200) message = [NSString stringWithFormat:@"额度服务返回 %ld", (long)http.statusCode];
-            else if (![payload isKindOfClass:NSDictionary.class]) message = @"额度响应格式异常";
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf finishClaudeUsageWithPayload:payload error:message];
-            });
-        }] resume];
+        NSString *claudePath = PTClaudeExecutablePath();
+        NSString *output = claudePath.length ? PTRunTool(claudePath, @[
+            @"-p", @"/usage",
+            @"--max-budget-usd", @"0.000001",
+            @"--output-format", @"json",
+            @"--no-session-persistence"
+        ]) : @"";
+        NSDictionary *payload = PTClaudePlanUsageFromCommandOutput(output, NSDate.date);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf finishClaudeUsageWithPayload:payload error:payload
+                ? nil
+                : PTL(@"Claude Code 未返回额度", @"Claude Code did not return plan usage")];
+        });
     });
 }
 
@@ -3557,17 +3558,17 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
     for (NSString *path in session.accessedDirectories ?: @[]) {
         if ([path isKindOfClass:NSString.class] && [path hasPrefix:@"/"] &&
-            ![_gitDirectoriesSuppressedUntilSessionChange containsObject:path]) {
+            ![_suppressedGitDirectoryPaths containsObject:path]) {
             [paths addObject:path];
         }
     }
     if (session.cwd.length > 0 && [session.cwd hasPrefix:@"/"] &&
-        ![_gitDirectoriesSuppressedUntilSessionChange containsObject:session.cwd]) {
+        ![_suppressedGitDirectoryPaths containsObject:session.cwd]) {
         [paths addObject:session.cwd];
     }
     NSArray *stored = [NSUserDefaults.standardUserDefaults arrayForKey:@"PTGitObservedDirectories"];
     for (id value in stored ?: @[]) {
-        if ([value isKindOfClass:NSString.class] && [value hasPrefix:@"/"]) [paths addObject:value];
+        if (PTStoredDirectoryPathIsValid(value)) [paths addObject:value];
     }
     NSArray<NSString *> *nextPaths = paths.array;
     NSString *preferred = _gitObservedDirectory;
@@ -3581,10 +3582,6 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     } else if (!_gitObservedDirectory.length && nextPaths.count > 0) {
         [self reloadGitDirectoryPickerSelecting:preferred];
     }
-}
-
-- (void)allowRediscoveryOfGitDirectoriesForNewSession {
-    [_gitDirectoriesSuppressedUntilSessionChange removeAllObjects];
 }
 
 - (void)resizeInspectorToWidth:(CGFloat)requestedWidth {
@@ -3626,7 +3623,10 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         return;
     }
     if (!_gitDirectoryPaths) _gitDirectoryPaths = [NSMutableArray array];
-    [_gitDirectoriesSuppressedUntilSessionChange removeObject:path];
+    [_suppressedGitDirectoryPaths removeObject:path];
+    [NSUserDefaults.standardUserDefaults setObject:
+        [_suppressedGitDirectoryPaths.allObjects sortedArrayUsingSelector:@selector(compare:)]
+        forKey:@"PTGitSuppressedDirectories"];
     if (![_gitDirectoryPaths containsObject:path]) [_gitDirectoryPaths insertObject:path atIndex:0];
     _gitObservedDirectory = [path copy];
     _gitDirectoryManuallySelected = YES;
@@ -3645,10 +3645,13 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSUInteger removedIndex = [_gitDirectoryPaths indexOfObject:path];
     if (path.length == 0 || removedIndex == NSNotFound) return;
 
-    if (!_gitDirectoriesSuppressedUntilSessionChange) {
-        _gitDirectoriesSuppressedUntilSessionChange = [NSMutableSet set];
+    if (!_suppressedGitDirectoryPaths) {
+        _suppressedGitDirectoryPaths = [NSMutableSet set];
     }
-    [_gitDirectoriesSuppressedUntilSessionChange addObject:path];
+    [_suppressedGitDirectoryPaths addObject:path];
+    [NSUserDefaults.standardUserDefaults setObject:
+        [_suppressedGitDirectoryPaths.allObjects sortedArrayUsingSelector:@selector(compare:)]
+        forKey:@"PTGitSuppressedDirectories"];
     [_gitDirectoryPaths removeObjectAtIndex:removedIndex];
     [NSUserDefaults.standardUserDefaults setObject:_gitDirectoryPaths
         forKey:@"PTGitObservedDirectories"];
@@ -3674,8 +3677,8 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     _statusLabel.stringValue = [NSString stringWithFormat:
         PTL(@"已从 PrettyTerm 记忆中删除 %@", @"Removed %@ from PrettyTerm memory"), path.lastPathComponent ?: path];
     _bottomStatusLabel.stringValue = PTL(
-        @"重新打开相关对话或手动添加即可恢复 · Claude Code 目录未改变",
-        @"Reopen the related conversation or add it manually to restore it · Claude Code is unchanged");
+        @"已持续排除此目录 · 仅手动重新添加可恢复 · Claude Code 目录未改变",
+        @"Directory stays excluded · add it manually to restore · Claude Code is unchanged");
 }
 
 - (void)buildGitActionPopoverIfNeeded {
@@ -4378,7 +4381,26 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         dispatch_async(dispatch_get_main_queue(), ^{
             PTAppDelegate *self = weakSelf;
             if (!self || ![self->_watchedTranscriptPath isEqual:path]) return;
-            [self->_store refresh];
+            NSString *expectedSessionID = [self->_selectedSession.sessionID copy];
+            [self->_store refreshChangedPath:path completion:^(PTSessionInfo *session) {
+                PTAppDelegate *self = weakSelf;
+                if (!self || !session || ![self->_watchedTranscriptPath isEqual:path]) return;
+                if (expectedSessionID.length > 0 &&
+                    ![session.sessionID isEqual:expectedSessionID]) return;
+
+                NSMutableArray<PTSessionInfo *> *updated =
+                    [self->_sessions mutableCopy] ?: [NSMutableArray array];
+                NSUInteger index = [updated indexOfObjectPassingTest:
+                    ^BOOL(PTSessionInfo *candidate, NSUInteger itemIndex, BOOL *stop) {
+                        (void)itemIndex;
+                        (void)stop;
+                        return [candidate.sessionID isEqual:session.sessionID] ||
+                            [candidate.filePath isEqual:path];
+                    }];
+                if (index == NSNotFound) [updated addObject:session];
+                else updated[index] = session;
+                [self applySessions:updated];
+            }];
         });
     }];
 }
@@ -4553,7 +4575,6 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
     NSInteger row = _sessionTable.selectedRow;
     if (row < 0 || row >= (NSInteger)_sessions.count) return;
     BOOL changed = ![_selectedSession.sessionID isEqual:_sessions[row].sessionID];
-    if (changed) [self allowRediscoveryOfGitDirectoriesForNewSession];
     _selectedSession = _sessions[row];
     [self showSelectedSession];
     [self updateConnectButtonTitle];
@@ -4740,6 +4761,21 @@ static BOOL PTPostKeyToProcess(pid_t processID, CGKeyCode keyCode, CGEventFlags 
         });
         [self clearFloatingPendingImagesAfterSuccessfulSend];
     } failureResponder:_floatingComposerTextView];
+}
+
+- (void)compactConversation:(id)sender {
+    (void)sender;
+    if (!_agentState.commandsEnabled) {
+        _statusLabel.stringValue = PTL(@"请先同步当前 Terminal 会话", @"Sync the current Terminal conversation first");
+        [self refreshAgentStateAndControls];
+        return;
+    }
+    [self sendOutgoingMessage:@"/compact"
+                       images:@[]
+                 forSessionID:_selectedSession.sessionID
+                      success:^{
+        self->_statusLabel.stringValue = PTL(@"已向 Terminal 发送 /compact", @"Sent /compact to Terminal");
+    } failureResponder:nil];
 }
 
 - (void)enableRemoteControl:(id)sender {

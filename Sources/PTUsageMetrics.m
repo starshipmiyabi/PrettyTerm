@@ -112,3 +112,65 @@ NSString *PTResetDescription(NSDate *resetDate, NSDate *now) {
         ? [NSString stringWithFormat:PTL(@"%lu 天 %lu 小时后重置", @"Resets in %lu d %lu h"), (unsigned long)days, (unsigned long)restHours]
         : [NSString stringWithFormat:PTL(@"%lu 天后重置", @"Resets in %lu d"), (unsigned long)days];
 }
+
+static NSDate *PTDateFromClaudeUsageResetText(NSString *text, NSDate *now) {
+    NSString *value = [text stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSRange timezoneSuffix = [value rangeOfString:@" (" options:NSBackwardsSearch];
+    if (timezoneSuffix.location != NSNotFound) {
+        value = [value substringToIndex:timezoneSuffix.location];
+    }
+
+    NSCalendar *calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
+    calendar.timeZone = NSTimeZone.localTimeZone;
+    NSInteger year = [calendar component:NSCalendarUnitYear fromDate:now ?: NSDate.date];
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    formatter.timeZone = calendar.timeZone;
+    formatter.dateFormat = @"MMM d 'at' h:mma yyyy";
+    NSDate *date = [formatter dateFromString:
+        [NSString stringWithFormat:@"%@ %ld", value, (long)year]];
+    if (date && [date timeIntervalSinceDate:now ?: NSDate.date] < -3600.0) {
+        date = [calendar dateByAddingUnit:NSCalendarUnitYear value:1 toDate:date options:0];
+    }
+    return date;
+}
+
+static NSDictionary *PTClaudeUsageWindow(NSString *text, NSString *pattern, NSDate *now) {
+    NSRegularExpression *expression = [NSRegularExpression
+        regularExpressionWithPattern:pattern
+                             options:NSRegularExpressionCaseInsensitive
+                               error:nil];
+    NSTextCheckingResult *match = [expression firstMatchInString:text
+        options:0 range:NSMakeRange(0, text.length)];
+    if (!match || match.numberOfRanges < 3) return nil;
+    NSString *percentText = [text substringWithRange:[match rangeAtIndex:1]];
+    NSString *resetText = [text substringWithRange:[match rangeAtIndex:2]];
+    double percent = MIN(100.0, MAX(0.0, percentText.doubleValue));
+    NSDate *resetDate = PTDateFromClaudeUsageResetText(resetText, now);
+    NSMutableDictionary *window = [@{ @"utilization": @(percent) } mutableCopy];
+    if (resetDate) {
+        NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+        window[@"resets_at"] = [formatter stringFromDate:resetDate];
+    }
+    return window;
+}
+
+NSDictionary *PTClaudePlanUsageFromCommandOutput(NSString *output, NSDate *now) {
+    if (![output isKindOfClass:NSString.class] || output.length == 0) return nil;
+    NSData *data = [output dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *envelope = data
+        ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if (![envelope isKindOfClass:NSDictionary.class] || [envelope[@"is_error"] boolValue]) {
+        return nil;
+    }
+    NSString *result = [envelope[@"result"] isKindOfClass:NSString.class]
+        ? envelope[@"result"] : @"";
+    NSDictionary *session = PTClaudeUsageWindow(result,
+        @"Current session:\\s*([0-9]+(?:\\.[0-9]+)?)% used[^\\n]*?resets\\s+([^\\n]+)", now);
+    NSDictionary *week = PTClaudeUsageWindow(result,
+        @"Current week(?: \\(all models\\))?:\\s*([0-9]+(?:\\.[0-9]+)?)% used[^\\n]*?resets\\s+([^\\n]+)", now);
+    if (!session || !week) return nil;
+    return @{ @"five_hour": session, @"seven_day": week };
+}

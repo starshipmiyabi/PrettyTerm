@@ -14,4 +14,11 @@ FOUNDATION_EXPORT NSDate * _Nullable PTDateFromClaudeAPIString(NSString *value);
 FOUNDATION_EXPORT NSString *PTResetDescription(NSDate * _Nullable resetDate,
                                                NSDate *now);
 
+/// Parses the zero-turn JSON result produced by `claude -p /usage`.
+/// PrettyTerm delegates authentication and token refresh to the installed Claude Code binary.
+FOUNDATION_EXPORT NSDictionary * _Nullable PTClaudePlanUsageFromCommandOutput(
+    NSString *output,
+    NSDate *now
+);
+
 NS_ASSUME_NONNULL_END

@@ -53,6 +53,30 @@ int main(void) {
         PTAssert([PTResetDescription(reset, date) containsString:@"Resets in"],
             @"English reset description must be available");
         [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
+        NSDictionary *usageEnvelope = @{
+            @"is_error": @NO,
+            @"num_turns": @0,
+            @"total_cost_usd": @0,
+            @"result": @"You are currently using your subscription\n\nCurrent session: 23% used · resets Aug 11 at 12:49pm (Asia/Shanghai)\nCurrent week (all models): 12% used · resets Aug 16 at 12:59am (Asia/Shanghai)"
+        };
+        NSData *usageJSON = [NSJSONSerialization dataWithJSONObject:usageEnvelope options:0 error:nil];
+        NSString *usageOutput = [[NSString alloc] initWithData:usageJSON encoding:NSUTF8StringEncoding];
+        NSDateComponents *usageNowParts = [[NSDateComponents alloc] init];
+        usageNowParts.calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
+        usageNowParts.timeZone = NSTimeZone.localTimeZone;
+        usageNowParts.year = 2026;
+        usageNowParts.month = 8;
+        usageNowParts.day = 11;
+        usageNowParts.hour = 10;
+        NSDictionary *planUsage = PTClaudePlanUsageFromCommandOutput(usageOutput, usageNowParts.date);
+        PTAssertNear([planUsage[@"five_hour"][@"utilization"] doubleValue], 23.0,
+            @"Claude Code /usage session percentage should parse");
+        PTAssertNear([planUsage[@"seven_day"][@"utilization"] doubleValue], 12.0,
+            @"Claude Code /usage weekly percentage should parse");
+        PTAssert(PTDateFromClaudeAPIString(planUsage[@"five_hour"][@"resets_at"]) != nil,
+            @"Claude Code /usage reset time should parse into the existing display model");
+        PTAssert(PTClaudePlanUsageFromCommandOutput(@"{}", usageNowParts.date) == nil,
+            @"malformed Claude Code /usage output must not invent quota values");
         NSLog(@"PTUsageMetricsTests passed");
     }
     return 0;

@@ -205,7 +205,9 @@ NSString *PTTerminalAutomationScript(
                 PTAppleScriptEmbeddedText(message)];
             break;
         case PTTerminalAutomationActionSubmitReturn:
-            writeCommand = @"do script (ASCII character 13) in theTab";
+            // Terminal 会自动在每次 do script 后附加一个 CR。传入空字符串正好
+            // 只产生这一个提交回车；显式传入 CR 会变成两个连续回车。
+            writeCommand = @"do script \"\" in theTab";
             break;
         case PTTerminalAutomationActionPasteImage:
             writeCommand = @"do script (ASCII character 22) in theTab";

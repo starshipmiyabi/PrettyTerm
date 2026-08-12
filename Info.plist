@@ -24,11 +24,11 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.8.6</string>
+    <string>0.8.8</string>
     <key>CFBundleVersion</key>
-    <string>24</string>
+    <string>26</string>
     <key>CFBundleGetInfoString</key>
-    <string>PrettyTerm Beta 0.8.6 (24)</string>
+    <string>PrettyTerm Beta 0.8.8 (26)</string>
     <key>PTReleaseChannel</key>
     <string>beta</string>
     <key>LSMinimumSystemVersion</key>
@@ -37,8 +37,6 @@
     <true/>
     <key>NSAppleEventsUsageDescription</key>
     <string>用于让 PrettyTerm Beta 向老师选中的 Terminal Claude Code 会话发送消息和模型切换命令。</string>
-    <key>NSAccessibilityUsageDescription</key>
-    <string>PrettyTerm Beta 的实验性本地输入能力；当前发送路径不会请求此权限。</string>
     <key>NSHumanReadableCopyright</key>
     <string>PrettyTerm Beta</string>
 </dict>

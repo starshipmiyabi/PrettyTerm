@@ -19,7 +19,6 @@ clang \
   -framework AppKit \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
-  -framework Security \
   "$project_dir/Sources/PTAgentState.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \

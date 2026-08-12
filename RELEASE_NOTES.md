@@ -1,3 +1,58 @@
+# PrettyTerm Beta 0.8.8 (Build 26)
+
+This beta adds one-click context compaction and makes Terminal submission resilient when long or visually wrapped text is interpreted as pasted input.
+
+## Download
+
+Download `PrettyTerm-Beta-0.8.8-build26-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+
+## Reliable Terminal Submission
+
+- Delivers one additional independent Return after every text command, including single-line, multiline, model-switch, and Compact commands.
+- Uses an empty Terminal `do script` for the independent submit action, producing exactly one CR instead of the two CR bytes caused by explicitly supplying carriage return.
+- Keeps the extra submit signal separate from visual text wrapping; AppKit wrapping never mutates the underlying message string.
+- Adds regression coverage for the exact single-Return automation path and for every command remaining on the verified Terminal bridge.
+
+## Compact Command
+
+- Adds a **Compact** button to the selected conversation toolbar.
+- Sends the exact `/compact` command only after the current Claude Code conversation has been verified and bound to its Terminal TTY and process.
+- Disables the command while the selected conversation is not synchronized or another send is in flight.
+
+## Validation
+
+The release passed raw Terminal byte-transport probes, renderer, appearance, Terminal-safety, text submission, Compact command, transcript-increment, Git review, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+
+---
+
+# PrettyTerm Beta 0.8.7 (Build 25)
+
+This hotfix repairs Claude Code `/add-dir` discovery and inspector path pasting, and removes PrettyTerm-originated credential and Accessibility authorization prompts.
+
+## Download
+
+Download `PrettyTerm-Beta-0.8.7-build25-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+
+## Directory Discovery and Pasting
+
+- Watches the selected conversation's JSONL file and incrementally parses that file immediately when Claude Code 2.1.226 writes its ANSI-colored `<local-command-stdout>Added … as a working directory…</local-command-stdout>` success record; `/add-dir` no longer waits for a full projects-directory scan.
+- Limits remembered-directory input to three sources: successful `/add-dir`, manual entry, and directories Claude passively records while running through session `cwd`, Read/Edit/Write and tool-result paths, file-history snapshots, or Agent Bash absolute arguments.
+- Keeps discovery passive and stores user deletions as persistent exclusions; switching or reopening a conversation cannot resurrect a removed directory, while manual re-entry explicitly restores it.
+- Prevents the conversation composer from intercepting Command-V while the inspector path field owns keyboard focus.
+- Adds native parser and AppKit focus-chain regressions covering the exact failures.
+
+## Direct Access Without Extra Authorization Prompts
+
+- Removes PrettyTerm's direct Keychain credential read and the obsolete Accessibility-based input experiment, including its usage-description key and linked frameworks.
+- Reads local transcripts and directories directly as a non-sandboxed application.
+- Delegates plan usage to Claude Code's own zero-turn `/usage` command, which returned `num_turns: 0` and `total_cost_usd: 0` during validation.
+
+## Validation
+
+The release passed ANSI `/add-dir` parsing, focused path-paste routing, zero-turn plan-usage parsing, renderer, appearance, Terminal-safety, transcript-increment, Git review, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, and strict code-signature checks.
+
+---
+
 # PrettyTerm Beta 0.8.6 (Build 24)
 
 This beta completes the review workflow with a warm eye-comfort palette, transcript-accurate per-turn edit review, stable resizing, explicit commit and push controls, and selectable Chinese or English UI.

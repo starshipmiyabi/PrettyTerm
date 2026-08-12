@@ -45,11 +45,6 @@ static NSString *PTRunTestGit(NSString *directory, NSArray<NSString *> *argument
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
 }
 
-static id PTCreateWithObject(Class classObject, SEL selector, id argument) {
-    id allocated = ((id (*)(id, SEL))objc_msgSend)(classObject, @selector(alloc));
-    return ((id (*)(id, SEL, id))objc_msgSend)(allocated, selector, argument);
-}
-
 static BOOL PTViewIsOrDescendsFromView(NSView *view, NSView *ancestor) {
     for (NSView *candidate = view; candidate; candidate = candidate.superview) {
         if (candidate == ancestor) return YES;
@@ -82,6 +77,8 @@ int main(void) {
     @autoreleasepool {
         (void)NSApplication.sharedApplication;
         [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
+        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"PTGitObservedDirectories"];
+        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"PTGitSuppressedDirectories"];
         id delegate = [[NSClassFromString(@"PTAppDelegate") alloc] init];
         PTAssert(delegate != nil, @"PTAppDelegate must be loadable");
         PTCallNoArgument(delegate, NSSelectorFromString(@"buildWindow"));
@@ -97,11 +94,38 @@ int main(void) {
         NSScrollView *gitDiffScroll = [delegate valueForKey:@"gitDiffScroll"];
         NSTextView *gitDiffTextView = [delegate valueForKey:@"gitDiffTextView"];
         NSProgressIndicator *gitDiffProgress = [delegate valueForKey:@"gitDiffProgress"];
+        NSButton *compactButton = [delegate valueForKey:@"compactButton"];
         PTAssert(window != nil && changedFiles != nil && splitView != nil && inspector != nil &&
             gitDirectoryPicker != nil && removeGitDirectoryButton != nil &&
             gitDirectoryInput != nil && gitDirectoryHint != nil && gitDiffScroll != nil &&
-            gitDiffTextView != nil && gitDiffProgress != nil,
+            gitDiffTextView != nil && gitDiffProgress != nil && compactButton != nil,
             @"window, inspector, Git controls, and changed-files stack must exist");
+        PTAssert([compactButton.title isEqual:@"Compact"] &&
+                 compactButton.action == NSSelectorFromString(@"compactConversation:") &&
+                 !compactButton.enabled,
+            @"Compact must be a dedicated command button disabled before Terminal sync");
+
+        NSTextView *pasteComposer = [delegate valueForKey:@"composerTextView"];
+        PTAssert(pasteComposer != nil, @"main composer must exist for paste focus regression coverage");
+        pasteComposer.string = @"composer must stay unchanged";
+        gitDirectoryInput.stringValue = @"";
+        [window makeKeyAndOrderFront:nil];
+        PTAssert([window makeFirstResponder:gitDirectoryInput],
+            @"Git directory input must accept keyboard focus");
+        [NSPasteboard.generalPasteboard clearContents];
+        [NSPasteboard.generalPasteboard setString:@"/tmp" forType:NSPasteboardTypeString];
+        NSEvent *pasteEvent = [NSEvent keyEventWithType:NSEventTypeKeyDown
+            location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand timestamp:0
+            windowNumber:window.windowNumber context:nil characters:@"v"
+            charactersIgnoringModifiers:@"v" isARepeat:NO keyCode:9];
+        PTAssert(![pasteComposer performKeyEquivalent:pasteEvent],
+            @"an unfocused composer must not intercept Command-V from the Git path field");
+        PTAssert([pasteComposer.string isEqual:@"composer must stay unchanged"],
+            @"Git path paste must never leak into the message composer");
+        [(NSText *)window.firstResponder paste:nil];
+        PTAssert([gitDirectoryInput.stringValue isEqual:@"/tmp"],
+            @"the focused Git directory input must receive the pasted path exactly once");
+        pasteComposer.string = @"";
 
         [window.contentView layoutSubtreeIfNeeded];
         CGFloat splitWidth = NSWidth(splitView.bounds);
@@ -161,6 +185,9 @@ int main(void) {
         PTCallOneObject(delegate, NSSelectorFromString(@"removeSelectedGitDirectory:"), nil);
         PTAssert(!gitDirectoryPicker.enabled && !removeGitDirectoryButton.enabled,
             @"deleting the only remembered Git directory must empty and disable the picker row");
+        PTAssert([[NSUserDefaults.standardUserDefaults arrayForKey:@"PTGitSuppressedDirectories"]
+            containsObject:@"/tmp"],
+            @"deleting a directory must persist its exclusion across conversation reopen");
         PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
         PTAssert(!gitDirectoryPicker.enabled,
             @"polling the currently open transcript must not immediately restore a deleted directory");
@@ -169,12 +196,16 @@ int main(void) {
         PTCallOneObject(delegate, NSSelectorFromString(@"addManualGitDirectory:"), nil);
         PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
             @"manual entry must restore a deleted Git directory immediately");
+        PTAssert(![[NSUserDefaults.standardUserDefaults arrayForKey:@"PTGitSuppressedDirectories"]
+            containsObject:@"/tmp"],
+            @"manual re-add must explicitly clear the persistent exclusion");
 
         PTCallOneObject(delegate, NSSelectorFromString(@"removeSelectedGitDirectory:"), nil);
-        PTCallNoArgument(delegate, NSSelectorFromString(@"allowRediscoveryOfGitDirectoriesForNewSession"));
         PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
-        PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
-            @"reopening a related conversation must rediscover its deleted Git directory");
+        PTAssert(!gitDirectoryPicker.enabled,
+            @"reopening a related conversation must not resurrect a persistently deleted directory");
+        gitDirectoryInput.stringValue = @"/tmp";
+        PTCallOneObject(delegate, NSSelectorFromString(@"addManualGitDirectory:"), nil);
 
         PTCallNoArgument(delegate, NSSelectorFromString(@"buildGitActionPopoverIfNeeded"));
         NSTextField *commitMessage = [delegate valueForKey:@"gitCommitMessageField"];
@@ -292,19 +323,6 @@ int main(void) {
 
         PTAssertButtonHitTest(window, button, @"initial layout");
 
-        Class leaseClass = NSClassFromString(@"PTPasteboardLease");
-        id lease = PTCreateWithObject(leaseClass, NSSelectorFromString(@"initWithText:"), @"多行\n消息");
-        NSPasteboard *testPasteboard = [NSPasteboard pasteboardWithUniqueName];
-        NSPasteboardItem *testItem = [[NSPasteboardItem alloc] init];
-        [testItem setDataProvider:lease forTypes:@[NSPasteboardTypeString]];
-        PTAssert([testPasteboard writeObjects:@[testItem]], @"pasteboard lease must be writable");
-        PTAssert(![[lease valueForKey:@"served"] boolValue],
-            @"pasteboard lease must remain pending before a consumer requests text");
-        PTAssert([[testPasteboard stringForType:NSPasteboardTypeString] isEqual:@"多行\n消息"],
-            @"pasteboard lease must provide the complete multiline text");
-        PTAssert([[lease valueForKey:@"served"] boolValue],
-            @"pasteboard lease must acknowledge that a consumer requested the text");
-
         NSArray<NSValue *> *frames = @[
             [NSValue valueWithRect:NSMakeRect(80, 90, 1180, 760)],
             [NSValue valueWithRect:NSMakeRect(360, 240, 1040, 680)],
@@ -331,6 +349,10 @@ int main(void) {
             @"switching interface language must rebuild presentation without dropping the draft");
         PTAssert([englishSend.title isEqual:@"Send ↗"],
             @"English mode must localize native controls");
+        NSButton *englishCompact = [delegate valueForKey:@"compactButton"];
+        PTAssert([englishCompact.title isEqual:@"Compact"] &&
+                 [englishCompact.toolTip containsString:@"/compact"],
+            @"Compact must survive the localized presentation rebuild");
         NSPopUpButton *englishPicker = [delegate valueForKey:@"languagePicker"];
         [englishPicker selectItemAtIndex:0];
         PTCallOneObject(delegate, NSSelectorFromString(@"changeInterfaceLanguage:"), englishPicker);

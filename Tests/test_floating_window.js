@@ -144,20 +144,31 @@ test('both composers are taller and keep slightly wider side margins', () => {
 test('production sending keeps both single-line and multiline messages on the safe Terminal channel', () => {
   const sendMethod = source.match(/- \(BOOL\)sendMessage:\(NSString \*\)message \{[\s\S]*?\n\}/)?.[0] || '';
   assert.match(sendMethod, /\? \[self sendMultilineMessage:message\]/);
-  assert.match(sendMethod, /: \[self sendToTerminal:PTNormalizedTerminalPasteText\(message\)\]/);
+  assert.match(sendMethod, /\[self sendToTerminal:PTNormalizedTerminalPasteText\(message\)\][\s\S]*\[self sendReturnToTerminal\]/);
   assert.doesNotMatch(sendMethod, /pasteAndSubmitMultilineMessage/);
   assert.doesNotMatch(sendMethod, /AXIsProcessTrusted/);
   assert.match(source, /markerAfter >= 0 && markerAfter != markerBefore/);
-  assert.match(agentSource, /do script \(ASCII character 13\) in theTab/);
+  assert.match(agentSource, /do script \\\"\\\" in theTab/);
   assert.match(agentSource, /if processName is \\\"claude\\\" then set isSafe to true/);
   assert.doesNotMatch(agentSource, /contains \\\"laude\\\"/);
-  assert.doesNotMatch(agentSource, /do script \\\"\\\" in theTab/);
+  assert.doesNotMatch(agentSource, /do script \(ASCII character 13\) in theTab/);
 });
 
 test('Claude.ai Remote Control is hard-disabled', () => {
   assert.doesNotMatch(source, /sendToTerminal:@"\/remote-control/);
   assert.match(source, /_remoteButton\.enabled = NO/);
   assert.match(source, /buttonWithTitle:PTL\(@"RC禁用", @"RC Off"\) target:nil action:nil/);
+});
+
+test('the Compact control sends only the exact slash command through the safe bridge', () => {
+  assert.match(source, /buttonWithTitle:@"Compact" target:self action:@selector\(compactConversation:\)/);
+  assert.match(source, /_compactButton\.enabled = ready/);
+  const compactMethod = source.match(
+    /- \(void\)compactConversation:[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(compactMethod, /sendOutgoingMessage:@"\/compact"/);
+  assert.match(compactMethod, /forSessionID:_selectedSession\.sessionID/);
+  assert.doesNotMatch(compactMethod, /sendToTerminal:/);
 });
 
 test('the top-left app identity shows the running bundle version and build', () => {
@@ -197,8 +208,9 @@ test('Git diff observes remembered transcript directories without changing Claud
   assert.match(source, /不会改变 Claude Code/);
   assert.match(source, /Claude Code 执行 \/add-dir/);
   assert.match(source, /removeSelectedGitDirectory:/);
-  assert.match(source, /gitDirectoriesSuppressedUntilSessionChange/);
-  assert.match(source, /重新打开相关对话或手动添加即可恢复/);
+  assert.match(source, /PTGitSuppressedDirectories/);
+  assert.match(source, /仅手动重新添加可恢复/);
+  assert.doesNotMatch(source, /allowRediscoveryOfGitDirectoriesForNewSession/);
   assert.match(source, /replaceGitReviewDocument:/);
   assert.match(source, /NSAnimationContext runAnimationGroup/);
   assert.match(source, /NSProgressIndicatorStyleSpinning/);
@@ -211,9 +223,18 @@ test('active transcripts parse only appended JSONL bytes', () => {
   assert.match(source, /@"parsedSize"/);
 });
 
-test('Claude credentials are read by PrettyTerm instead of the security CLI', () => {
-  assert.match(source, /SecItemCopyMatching/);
-  assert.match(source, /kSecAttrService:\s*@"Claude Code-credentials"/);
-  assert.doesNotMatch(source, /find-generic-password/);
-  assert.doesNotMatch(source, /PTRunTool\(@"\/usr\/bin\/security"/);
+test('selected transcript writes reparse only that file for immediate add-dir discovery', () => {
+  const watchMethod = source.match(
+    /- \(void\)watchSelectedSessionTranscript[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(watchMethod, /refreshChangedPath:path/);
+  assert.match(watchMethod, /\[self applySessions:updated\]/);
+  assert.doesNotMatch(watchMethod, /\[self->_store refresh\]/);
+});
+
+test('plan usage delegates authentication to Claude Code without app authorization prompts', () => {
+  assert.doesNotMatch(source, /SecItemCopyMatching|AXIsProcessTrusted|kAXTrustedCheckOptionPrompt/);
+  assert.doesNotMatch(source, /api\/oauth\/usage|find-generic-password/);
+  assert.match(source, /@"-p", @"\/usage"/);
+  assert.match(source, /@"--no-session-persistence"/);
 });

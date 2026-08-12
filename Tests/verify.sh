@@ -45,7 +45,6 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework AppKit \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
-  -framework Security \
   "$project_dir/Sources/PTAgentState.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
@@ -62,10 +61,8 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -o "$project_dir/.build/PTWindowInteractionTests.o"
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework AppKit \
-  -framework ApplicationServices \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
-  -framework Security \
   "$project_dir/.build/PrettyTermForInteractionTests.o" \
   "$project_dir/.build/PTWindowInteractionTests.o" \
   "$project_dir/Sources/PTAgentState.m" \
@@ -116,8 +113,8 @@ done
 
 [[ "$(plutil -extract CFBundleIdentifier raw -o - "$contents_dir/Info.plist")" == "com.yuuka.prettyterm.beta" ]]
 [[ "$(plutil -extract CFBundleDisplayName raw -o - "$contents_dir/Info.plist")" == "PrettyTerm Beta" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.8.6" ]]
-[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "24" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.8.8" ]]
+[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "26" ]]
 [[ "$(plutil -extract PTReleaseChannel raw -o - "$contents_dir/Info.plist")" == "beta" ]]
 [[ "$(plutil -extract CFBundleDevelopmentRegion raw -o - "$contents_dir/Info.plist")" == "zh-Hans" ]]
 [[ "$(plutil -extract CFBundleIconFile raw -o - "$contents_dir/Info.plist")" == "PrettyTerm.icns" ]]

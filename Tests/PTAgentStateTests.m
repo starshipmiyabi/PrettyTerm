@@ -122,6 +122,12 @@ int main(void) {
                 [NSString stringWithFormat:@"Terminal automation action %@ must compile: %@",
                     actionValue, compileError ?: @{}]);
         }
+        NSString *singleReturnAutomation = PTTerminalAutomationScript(
+            @"/dev/ttys007", 4321, @"", PTTerminalAutomationActionSubmitReturn);
+        PTAssert([singleReturnAutomation containsString:@"do script \"\" in theTab"],
+            @"an independent submit must use Terminal's one automatically appended Return");
+        PTAssert(![singleReturnAutomation containsString:@"ASCII character 13"],
+            @"an independent submit must not duplicate Return by supplying another CR");
         PTAssert(PTLatestTerminalPasteMarker(@"before\n[Pasted text #2 +4 lines]\nafter") == 2,
             @"Terminal paste acknowledgement must read Claude's visible marker number");
         PTAssert(PTLatestTerminalPasteMarker(

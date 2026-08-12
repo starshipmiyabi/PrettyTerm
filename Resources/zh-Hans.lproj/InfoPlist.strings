@@ -1,2 +1,1 @@
 "NSAppleEventsUsageDescription" = "用于让 PrettyTerm Beta 向老师选中的 Terminal Claude Code 会话发送消息和模型切换命令。";
-"NSAccessibilityUsageDescription" = "PrettyTerm Beta 的实验性本地输入能力；当前发送路径不会请求此权限。";

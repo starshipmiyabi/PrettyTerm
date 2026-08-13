@@ -1,3 +1,39 @@
+# PrettyTerm Beta 0.9.1 (Build 27)
+
+This beta turns the inspector into a clearer live status surface, adds transcript-grounded context breakdowns, and gives visible feedback while Claude is preparing a response.
+
+## Download
+
+Download `PrettyTerm-Beta-0.9.1-build27-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+
+## Context Usage Details
+
+- Keeps the current context token count, percentage, and warm progress meter visible at all times.
+- Adds a Details disclosure that starts collapsed and expands System prompt, System tools, Memory files, Skills, Messages, Free space, and Autocompact buffer rows.
+- Passively parses Claude Code's real `/context` records from both ANSI local-command output and its Markdown metadata record; PrettyTerm does not invent category proportions.
+- Preserves Claude Code's category order and excludes deferred tools that are not loaded into the active context.
+
+## Waiting Feedback and Rendering Reliability
+
+- Shows a warm animated Terminal-to-Claude signal after Terminal accepts a message, then removes it when the first real assistant reply or tool event reaches the transcript.
+- Uses an evenly spaced Claude starburst, dark-mode styling, and a static Reduce Motion presentation.
+- Adds an explicit WebView session handshake before metadata-only incremental appends, falling back to a complete snapshot if WebKit has reloaded or lost session state.
+- Avoids repeatedly serializing the full conversation during normal incremental updates in both the main and floating windows.
+
+## Inspector and Usage Polish
+
+- Reworks plan limits into separate five-hour and seven-day meters and refreshes them once per minute.
+- Runs Claude Code `/usage` with a UTC environment, accepts exact-hour and minute reset formats, and displays only locale-neutral countdown durations in the interface.
+- Refuses incomplete plan-limit responses instead of presenting percentages without valid countdown data.
+- Adds expandable per-model API-equivalent cost rows with token-type detail and a red/green code-change summary.
+- Improves native Git review typography, file hierarchy, line markers, changed-line totals, and spacing while retaining the warm beige and deep-orange appearance.
+
+## Validation
+
+The release passed renderer, waiting-state, appearance, transcript-context parsing, context disclosure, viewport anchoring, incremental-render handshake, UTC plan-usage, Git review, AppKit interaction, Terminal-safety, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+
+---
+
 # PrettyTerm Beta 0.8.8 (Build 26)
 
 This beta adds one-click context compaction and makes Terminal submission resilient when long or visually wrapped text is interpreted as pasted input.

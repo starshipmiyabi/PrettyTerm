@@ -75,11 +75,31 @@ static NSDictionary<NSString *, NSString *> *PTGitReviewStatusEntry(NSString *li
     return @{ @"code": code, @"path": PTGitReviewCleanPath(path) };
 }
 
-static NSParagraphStyle *PTGitReviewParagraphStyle(void) {
+// 每种行类型给一套独立的排版参数：标题行大留白、文件头前后带呼吸感的
+// 间距（视觉上顶替了 NSTextView 画不出圆角卡片的短板）、正文行整体缩进
+// 一截，看起来像挂在文件头下面的嵌套内容，折叠提示行则收窄、斜体、居中收着。
+typedef struct {
+    CGFloat lineHeight;
+    CGFloat spacingBefore;
+    CGFloat spacingAfter;
+    CGFloat headIndent;
+} PTGitReviewParagraphSpec;
+
+static PTGitReviewParagraphSpec PTGitReviewTitleSpec(void) { return (PTGitReviewParagraphSpec){26, 0, 3, 0}; }
+static PTGitReviewParagraphSpec PTGitReviewSubtitleSpec(void) { return (PTGitReviewParagraphSpec){18, 0, 12, 0}; }
+static PTGitReviewParagraphSpec PTGitReviewHeaderSpec(void) { return (PTGitReviewParagraphSpec){24, 14, 5, 0}; }
+static PTGitReviewParagraphSpec PTGitReviewBodySpec(void) { return (PTGitReviewParagraphSpec){19, 0, 0, 10}; }
+static PTGitReviewParagraphSpec PTGitReviewFoldSpec(void) { return (PTGitReviewParagraphSpec){17, 3, 3, 10}; }
+
+static NSParagraphStyle *PTGitReviewParagraphStyleMake(PTGitReviewParagraphSpec spec) {
     NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
-    style.lineSpacing = 1.5;
-    style.minimumLineHeight = 18.0;
-    style.maximumLineHeight = 18.0;
+    style.lineSpacing = 2.0;
+    style.minimumLineHeight = spec.lineHeight;
+    style.maximumLineHeight = spec.lineHeight;
+    style.paragraphSpacingBefore = spec.spacingBefore;
+    style.paragraphSpacing = spec.spacingAfter;
+    style.headIndent = spec.headIndent;
+    style.firstLineHeadIndent = spec.headIndent;
     return style;
 }
 
@@ -99,11 +119,12 @@ static NSColor *PTGitReviewDynamicColor(
     }];
 }
 
-static NSDictionary *PTGitReviewAttributes(NSFont *font, NSColor *color, NSColor *background) {
+static NSDictionary *PTGitReviewAttributes(NSFont *font, NSColor *color, NSColor *background,
+                                            PTGitReviewParagraphSpec spec) {
     NSMutableDictionary *attributes = [@{
         NSFontAttributeName: font,
         NSForegroundColorAttributeName: color,
-        NSParagraphStyleAttributeName: PTGitReviewParagraphStyle()
+        NSParagraphStyleAttributeName: PTGitReviewParagraphStyleMake(spec)
     } mutableCopy];
     if (background) attributes[NSBackgroundColorAttributeName] = background;
     return attributes;
@@ -222,8 +243,11 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
     NSArray<NSDictionary *> *editEvents
 ) {
     NSFont *bodyFont = [NSFont monospacedSystemFontOfSize:10.8 weight:NSFontWeightRegular];
-    NSFont *headerFont = [NSFont systemFontOfSize:11.5 weight:NSFontWeightSemibold];
-    NSFont *titleFont = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
+    NSFont *markerFont = [NSFont monospacedSystemFontOfSize:10.8 weight:NSFontWeightBold];
+    NSFont *headerFont = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
+    NSFont *countFont = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightBold];
+    NSFont *titleFont = [NSFont systemFontOfSize:14 weight:NSFontWeightBold];
+    NSFont *titleCountFont = [NSFont monospacedDigitSystemFontOfSize:14 weight:NSFontWeightBold];
     NSColor *textColor = NSColor.labelColor;
     NSColor *mutedColor = NSColor.secondaryLabelColor;
     NSColor *addedColor = PTGitReviewDynamicColor(0.14, 0.43, 0.22, 0.49, 0.79, 0.55);
@@ -253,18 +277,22 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
     }
 
     NSMutableAttributedString *output = [[NSMutableAttributedString alloc] init];
-    PTGitReviewAppend(output,
-        [NSString stringWithFormat:PTL(@"本轮本地修改    +%lu  −%lu\n", @"Local Changes This Turn    +%lu  −%lu\n"),
-            (unsigned long)totalAdded, (unsigned long)totalRemoved],
-        PTGitReviewAttributes(titleFont, textColor, nil));
+    PTGitReviewAppend(output, PTL(@"本轮本地修改    ", @"Local Changes This Turn    "),
+        PTGitReviewAttributes(titleFont, textColor, nil, PTGitReviewTitleSpec()));
+    PTGitReviewAppend(output, [NSString stringWithFormat:@"+%lu", (unsigned long)totalAdded],
+        PTGitReviewAttributes(titleCountFont, addedColor, nil, PTGitReviewTitleSpec()));
+    PTGitReviewAppend(output, @"  ",
+        PTGitReviewAttributes(titleFont, textColor, nil, PTGitReviewTitleSpec()));
+    PTGitReviewAppend(output, [NSString stringWithFormat:@"−%lu\n", (unsigned long)totalRemoved],
+        PTGitReviewAttributes(titleCountFont, removedColor, nil, PTGitReviewTitleSpec()));
     PTGitReviewAppend(output,
         [NSString stringWithFormat:PTL(@"来自对话中已记录的 Edit / Write · %lu 个文件 · 未执行 git diff\n\n", @"Recorded Edit / Write events · %lu files · git diff was not run\n\n"),
             (unsigned long)pathOrder.count],
-        PTGitReviewAttributes([NSFont systemFontOfSize:10 weight:NSFontWeightRegular],
-            accentColor, nil));
+        PTGitReviewAttributes([NSFont systemFontOfSize:10 weight:NSFontWeightMedium],
+            accentColor, nil, PTGitReviewSubtitleSpec()));
     if (pathOrder.count == 0) {
         PTGitReviewAppend(output, PTL(@"这个回合没有可显示的本地修改。\n", @"This turn has no local changes to display.\n"),
-            PTGitReviewAttributes(headerFont, mutedColor, headerBackground));
+            PTGitReviewAttributes(headerFont, mutedColor, headerBackground, PTGitReviewHeaderSpec()));
         return output;
     }
 
@@ -278,10 +306,14 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
                 else if ([row[@"type"] isEqual:@"remove"]) fileRemoved++;
             }
         }
-        PTGitReviewAppend(output,
-            [NSString stringWithFormat:@"▾  %@    +%lu  −%lu\n", path,
-                (unsigned long)fileAdded, (unsigned long)fileRemoved],
-            PTGitReviewAttributes(headerFont, textColor, headerBackground));
+        PTGitReviewAppend(output, [NSString stringWithFormat:@"▾  %@    ", path],
+            PTGitReviewAttributes(headerFont, textColor, headerBackground, PTGitReviewHeaderSpec()));
+        PTGitReviewAppend(output, [NSString stringWithFormat:@"+%lu", (unsigned long)fileAdded],
+            PTGitReviewAttributes(countFont, addedColor, headerBackground, PTGitReviewHeaderSpec()));
+        PTGitReviewAppend(output, @"  ",
+            PTGitReviewAttributes(headerFont, textColor, headerBackground, PTGitReviewHeaderSpec()));
+        PTGitReviewAppend(output, [NSString stringWithFormat:@"−%lu\n", (unsigned long)fileRemoved],
+            PTGitReviewAttributes(countFont, removedColor, headerBackground, PTGitReviewHeaderSpec()));
 
         NSUInteger editIndex = 0;
         for (NSDictionary *event in events) {
@@ -291,7 +323,8 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
                 PTGitReviewAppend(output,
                     [NSString stringWithFormat:PTL(@"      变更 %lu · %@\n", @"      Change %lu · %@\n"),
                         (unsigned long)editIndex, toolName.length ? toolName : @"Edit"],
-                    PTGitReviewAttributes(bodyFont, mutedColor, foldBackground));
+                    PTGitReviewAttributes([NSFont systemFontOfSize:10 weight:NSFontWeightSemibold],
+                        accentColor, foldBackground, PTGitReviewFoldSpec()));
             }
             NSArray<NSDictionary *> *rows = PTTranscriptReviewDiffRows(event[@"oldText"], event[@"newText"]);
             NSUInteger limit = MIN((NSUInteger)5000, rows.count);
@@ -319,19 +352,20 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
                 NSString *rendered = [NSString stringWithFormat:@"%@ %@  %@ %@\n",
                     oldField, newField, marker, PTGitReviewString(row[@"text"])];
                 NSRange appended = PTGitReviewAppend(output, rendered,
-                    PTGitReviewAttributes(bodyFont, textColor, background));
+                    PTGitReviewAttributes(bodyFont, textColor, background, PTGitReviewBodySpec()));
                 [output addAttribute:NSForegroundColorAttributeName value:mutedColor
                     range:NSMakeRange(appended.location, MIN((NSUInteger)11, appended.length))];
                 if (appended.length > 13) {
-                    [output addAttribute:NSForegroundColorAttributeName value:markerColor
-                        range:NSMakeRange(appended.location + 13, 1)];
+                    NSRange markerRange = NSMakeRange(appended.location + 13, 1);
+                    [output addAttribute:NSForegroundColorAttributeName value:markerColor range:markerRange];
+                    [output addAttribute:NSFontAttributeName value:markerFont range:markerRange];
                 }
             }
             if (rows.count > limit) {
                 PTGitReviewAppend(output,
                     [NSString stringWithFormat:PTL(@"      ⋯  片段过大，剩余 %lu 行未显示\n", @"      ⋯  Segment too large; %lu remaining lines hidden\n"),
                         (unsigned long)(rows.count - limit)],
-                    PTGitReviewAttributes(bodyFont, mutedColor, foldBackground));
+                    PTGitReviewAttributes(bodyFont, mutedColor, foldBackground, PTGitReviewFoldSpec()));
             }
         }
         [output appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
@@ -342,7 +376,7 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
 NSAttributedString *PTGitReviewLoadingAttributedString(void) {
     NSDictionary *attributes = PTGitReviewAttributes(
         [NSFont systemFontOfSize:11 weight:NSFontWeightMedium],
-        NSColor.secondaryLabelColor, nil);
+        NSColor.secondaryLabelColor, nil, PTGitReviewSubtitleSpec());
     return [[NSAttributedString alloc] initWithString:PTL(@"正在整理 Git 改动…\n", @"Preparing Git changes…\n")
         attributes:attributes];
 }
@@ -357,8 +391,11 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
     NSString *diff = PTGitReviewString(snapshot[@"diff"]);
 
     NSFont *bodyFont = [NSFont monospacedSystemFontOfSize:10.8 weight:NSFontWeightRegular];
-    NSFont *headerFont = [NSFont systemFontOfSize:11.5 weight:NSFontWeightSemibold];
-    NSFont *titleFont = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
+    NSFont *markerFont = [NSFont monospacedSystemFontOfSize:10.8 weight:NSFontWeightBold];
+    NSFont *headerFont = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
+    NSFont *countFont = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightBold];
+    NSFont *titleFont = [NSFont systemFontOfSize:14 weight:NSFontWeightBold];
+    NSFont *titleCountFont = [NSFont monospacedDigitSystemFontOfSize:14 weight:NSFontWeightBold];
     NSColor *textColor = NSColor.labelColor;
     NSColor *mutedColor = NSColor.secondaryLabelColor;
     NSColor *addedColor = PTGitReviewDynamicColor(0.14, 0.43, 0.22, 0.49, 0.79, 0.55);
@@ -372,9 +409,9 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
     NSMutableAttributedString *output = [[NSMutableAttributedString alloc] init];
     if (error.length > 0) {
         PTGitReviewAppend(output, PTL(@"Git 审阅不可用\n", @"Git Review Unavailable\n"),
-            PTGitReviewAttributes(titleFont, accentColor, nil));
+            PTGitReviewAttributes(titleFont, accentColor, nil, PTGitReviewTitleSpec()));
         PTGitReviewAppend(output, [error stringByAppendingString:@"\n"],
-            PTGitReviewAttributes(bodyFont, textColor, nil));
+            PTGitReviewAttributes(bodyFont, textColor, nil, PTGitReviewSubtitleSpec()));
         return output;
     }
 
@@ -388,22 +425,26 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
     }
     NSString *branchFlow = branch.length > 0 ? branch : @"HEAD";
     if (upstream.length > 0) branchFlow = [NSString stringWithFormat:@"%@  →  %@", branchFlow, upstream];
-    PTGitReviewAppend(output,
-        [NSString stringWithFormat:PTL(@"分支  %@    +%lu  −%lu\n", @"Branch  %@    +%lu  −%lu\n"), branchFlow,
-            (unsigned long)added, (unsigned long)removed],
-        PTGitReviewAttributes(titleFont, textColor, nil));
+    PTGitReviewAppend(output, [NSString stringWithFormat:PTL(@"分支  %@    ", @"Branch  %@    "), branchFlow],
+        PTGitReviewAttributes(titleFont, textColor, nil, PTGitReviewTitleSpec()));
+    PTGitReviewAppend(output, [NSString stringWithFormat:@"+%lu", (unsigned long)added],
+        PTGitReviewAttributes(titleCountFont, addedColor, nil, PTGitReviewTitleSpec()));
+    PTGitReviewAppend(output, @"  ",
+        PTGitReviewAttributes(titleFont, textColor, nil, PTGitReviewTitleSpec()));
+    PTGitReviewAppend(output, [NSString stringWithFormat:@"−%lu\n", (unsigned long)removed],
+        PTGitReviewAttributes(titleCountFont, removedColor, nil, PTGitReviewTitleSpec()));
     NSString *repoName = root.lastPathComponent.length ? root.lastPathComponent : root;
     NSUInteger fileCount = MAX(files.count, statusLines.count);
     PTGitReviewAppend(output,
         [NSString stringWithFormat:PTL(@"%@ · %lu 个变更 · 观察 %@\n\n", @"%@ · %lu changes · observing %@\n\n"),
             repoName.length ? repoName : PTL(@"Git 仓库", @"Git repository"), (unsigned long)fileCount,
             directory.length ? directory : root],
-        PTGitReviewAttributes([NSFont systemFontOfSize:10 weight:NSFontWeightRegular],
-            mutedColor, nil));
+        PTGitReviewAttributes([NSFont systemFontOfSize:10 weight:NSFontWeightMedium],
+            mutedColor, nil, PTGitReviewSubtitleSpec()));
 
     if (files.count == 0 && statusLines.count == 0) {
         PTGitReviewAppend(output, PTL(@"✓ 工作树干净，没有需要审阅的改动。\n", @"✓ Working tree is clean; there are no changes to review.\n"),
-            PTGitReviewAttributes(headerFont, addedColor, headerBackground));
+            PTGitReviewAttributes(headerFont, addedColor, headerBackground, PTGitReviewHeaderSpec()));
         return output;
     }
 
@@ -411,13 +452,17 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
     for (NSDictionary *file in files) {
         NSString *path = PTGitReviewString(file[@"path"]);
         if (path.length) [renderedPaths addObject:path];
-        PTGitReviewAppend(output,
-            [NSString stringWithFormat:@"▾  %@    +%@  −%@\n", path,
-                file[@"added"] ?: @0, file[@"removed"] ?: @0],
-            PTGitReviewAttributes(headerFont, textColor, headerBackground));
+        PTGitReviewAppend(output, [NSString stringWithFormat:@"▾  %@    ", path],
+            PTGitReviewAttributes(headerFont, textColor, headerBackground, PTGitReviewHeaderSpec()));
+        PTGitReviewAppend(output, [NSString stringWithFormat:@"+%@", file[@"added"] ?: @0],
+            PTGitReviewAttributes(countFont, addedColor, headerBackground, PTGitReviewHeaderSpec()));
+        PTGitReviewAppend(output, @"  ",
+            PTGitReviewAttributes(headerFont, textColor, headerBackground, PTGitReviewHeaderSpec()));
+        PTGitReviewAppend(output, [NSString stringWithFormat:@"−%@\n", file[@"removed"] ?: @0],
+            PTGitReviewAttributes(countFont, removedColor, headerBackground, PTGitReviewHeaderSpec()));
         if ([file[@"binary"] boolValue]) {
             PTGitReviewAppend(output, PTL(@"      二进制文件已更改，无法显示逐行内容。\n\n", @"      Binary file changed; line-by-line content is unavailable.\n\n"),
-                PTGitReviewAttributes(bodyFont, mutedColor, nil));
+                PTGitReviewAttributes(bodyFont, mutedColor, nil, PTGitReviewFoldSpec()));
             continue;
         }
 
@@ -433,7 +478,7 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
                     if (unchanged > 0) {
                         PTGitReviewAppend(output,
                             [NSString stringWithFormat:PTL(@"      ⋯  %ld 行未修改\n", @"      ⋯  %ld unmodified lines\n"), (long)unchanged],
-                            PTGitReviewAttributes(bodyFont, mutedColor, foldBackground));
+                            PTGitReviewAttributes(bodyFont, mutedColor, foldBackground, PTGitReviewFoldSpec()));
                     }
                     oldLine = nextOld;
                     newLine = nextNew;
@@ -443,7 +488,7 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
             }
             if ([line hasPrefix:@"\\ No newline"]) {
                 PTGitReviewAppend(output, PTL(@"             ↳ 文件末尾没有换行符\n", @"             ↳ No newline at end of file\n"),
-                    PTGitReviewAttributes(bodyFont, mutedColor, nil));
+                    PTGitReviewAttributes(bodyFont, mutedColor, nil, PTGitReviewFoldSpec()));
                 continue;
             }
             if (!hasHunk || line.length == 0) continue;
@@ -472,12 +517,13 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
             NSString *rendered = [NSString stringWithFormat:@"%@ %@  %@ %@\n",
                 oldField, newField, marker, content];
             NSRange appended = PTGitReviewAppend(output, rendered,
-                PTGitReviewAttributes(bodyFont, textColor, background));
+                PTGitReviewAttributes(bodyFont, textColor, background, PTGitReviewBodySpec()));
             [output addAttribute:NSForegroundColorAttributeName value:mutedColor
                 range:NSMakeRange(appended.location, MIN((NSUInteger)11, appended.length))];
             if (appended.length > 13) {
-                [output addAttribute:NSForegroundColorAttributeName value:markerColor
-                    range:NSMakeRange(appended.location + 13, 1)];
+                NSRange markerRange = NSMakeRange(appended.location + 13, 1);
+                [output addAttribute:NSForegroundColorAttributeName value:markerColor range:markerRange];
+                [output addAttribute:NSFontAttributeName value:markerFont range:markerRange];
             }
         }
         [output appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
@@ -489,12 +535,12 @@ NSAttributedString *PTGitReviewAttributedString(NSDictionary<NSString *, NSStrin
         if (path.length == 0 || [renderedPaths containsObject:path]) continue;
         NSString *label = PTGitReviewStatusLabel(PTGitReviewString(entry[@"code"]));
         PTGitReviewAppend(output, [NSString stringWithFormat:@"▸  %@    %@\n", path, label],
-            PTGitReviewAttributes(headerFont, textColor, headerBackground));
+            PTGitReviewAttributes(headerFont, textColor, headerBackground, PTGitReviewHeaderSpec()));
         PTGitReviewAppend(output,
             [label isEqual:PTL(@"未跟踪", @"Untracked")]
                 ? PTL(@"      未跟踪文件尚未进入逐行 diff。\n\n", @"      Untracked file is not yet part of the line diff.\n\n")
                 : PTL(@"      当前状态没有可显示的逐行内容。\n\n", @"      This status has no line-level content to display.\n\n"),
-            PTGitReviewAttributes(bodyFont, mutedColor, nil));
+            PTGitReviewAttributes(bodyFont, mutedColor, nil, PTGitReviewFoldSpec()));
     }
     return output;
 }

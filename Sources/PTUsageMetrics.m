@@ -93,43 +93,57 @@ NSDate *PTDateFromClaudeAPIString(NSString *value) {
     return [formatter dateFromString:value];
 }
 
-NSString *PTResetDescription(NSDate *resetDate, NSDate *now) {
-    if (!resetDate) return PTL(@"重置时间未知", @"Reset time unknown");
-    NSTimeInterval remaining = [resetDate timeIntervalSinceDate:now ?: NSDate.date];
-    if (remaining <= 0) return PTL(@"即将重置", @"Resetting soon");
+NSString *PTCountdownDescription(NSDate *targetDate, NSDate *now) {
+    if (!targetDate) return @"—";
+    NSTimeInterval remaining = [targetDate timeIntervalSinceDate:now ?: NSDate.date];
+    if (remaining <= 0) return PTL(@"0 分钟", @"0 min");
     NSUInteger minutes = (NSUInteger)ceil(remaining / 60.0);
-    if (minutes < 60) return [NSString stringWithFormat:PTL(@"%lu 分钟后重置", @"Resets in %lu min"), (unsigned long)minutes];
+    if (minutes < 60) return [NSString stringWithFormat:PTL(@"%lu 分钟", @"%lu min"), (unsigned long)minutes];
     NSUInteger hours = minutes / 60;
     NSUInteger restMinutes = minutes % 60;
     if (hours < 24) {
         return restMinutes > 0
-            ? [NSString stringWithFormat:PTL(@"%lu 小时 %lu 分后重置", @"Resets in %lu h %lu min"), (unsigned long)hours, (unsigned long)restMinutes]
-            : [NSString stringWithFormat:PTL(@"%lu 小时后重置", @"Resets in %lu h"), (unsigned long)hours];
+            ? [NSString stringWithFormat:PTL(@"%lu 小时 %lu 分", @"%lu h %lu min"), (unsigned long)hours, (unsigned long)restMinutes]
+            : [NSString stringWithFormat:PTL(@"%lu 小时", @"%lu h"), (unsigned long)hours];
     }
     NSUInteger days = hours / 24;
     NSUInteger restHours = hours % 24;
     return restHours > 0
-        ? [NSString stringWithFormat:PTL(@"%lu 天 %lu 小时后重置", @"Resets in %lu d %lu h"), (unsigned long)days, (unsigned long)restHours]
-        : [NSString stringWithFormat:PTL(@"%lu 天后重置", @"Resets in %lu d"), (unsigned long)days];
+        ? [NSString stringWithFormat:PTL(@"%lu 天 %lu 小时", @"%lu d %lu h"), (unsigned long)days, (unsigned long)restHours]
+        : [NSString stringWithFormat:PTL(@"%lu 天", @"%lu d"), (unsigned long)days];
 }
 
 static NSDate *PTDateFromClaudeUsageResetText(NSString *text, NSDate *now) {
-    NSString *value = [text stringByTrimmingCharactersInSet:
-        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSString *value = [[text stringByReplacingOccurrencesOfString:@"\u00a0" withString:@" "]
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSTimeZone *resetTimeZone = nil;
     NSRange timezoneSuffix = [value rangeOfString:@" (" options:NSBackwardsSearch];
     if (timezoneSuffix.location != NSNotFound) {
+        NSRange timezoneRange = NSMakeRange(NSMaxRange(timezoneSuffix),
+            value.length - NSMaxRange(timezoneSuffix));
+        NSString *timezoneName = [value substringWithRange:timezoneRange];
+        if ([timezoneName hasSuffix:@")"]) {
+            timezoneName = [timezoneName substringToIndex:timezoneName.length - 1];
+            resetTimeZone = [NSTimeZone timeZoneWithName:timezoneName];
+        }
         value = [value substringToIndex:timezoneSuffix.location];
     }
 
     NSCalendar *calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
-    calendar.timeZone = NSTimeZone.localTimeZone;
+    calendar.timeZone = resetTimeZone ?: NSTimeZone.localTimeZone;
     NSInteger year = [calendar component:NSCalendarUnitYear fromDate:now ?: NSDate.date];
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     formatter.timeZone = calendar.timeZone;
-    formatter.dateFormat = @"MMM d 'at' h:mma yyyy";
-    NSDate *date = [formatter dateFromString:
-        [NSString stringWithFormat:@"%@ %ld", value, (long)year]];
+    NSString *datedValue = [NSString stringWithFormat:@"%@ %ld", value, (long)year];
+    NSDate *date = nil;
+    // Claude Code omits ":00" for exact-hour reset times (for example "1pm")
+    // but includes minutes for other windows (for example "12:49pm").
+    for (NSString *format in @[@"MMM d 'at' h:mma yyyy", @"MMM d 'at' ha yyyy"]) {
+        formatter.dateFormat = format;
+        date = [formatter dateFromString:datedValue];
+        if (date) break;
+    }
     if (date && [date timeIntervalSinceDate:now ?: NSDate.date] < -3600.0) {
         date = [calendar dateByAddingUnit:NSCalendarUnitYear value:1 toDate:date options:0];
     }
@@ -148,13 +162,13 @@ static NSDictionary *PTClaudeUsageWindow(NSString *text, NSString *pattern, NSDa
     NSString *resetText = [text substringWithRange:[match rangeAtIndex:2]];
     double percent = MIN(100.0, MAX(0.0, percentText.doubleValue));
     NSDate *resetDate = PTDateFromClaudeUsageResetText(resetText, now);
-    NSMutableDictionary *window = [@{ @"utilization": @(percent) } mutableCopy];
-    if (resetDate) {
-        NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
-        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
-        window[@"resets_at"] = [formatter stringFromDate:resetDate];
-    }
-    return window;
+    if (!resetDate) return nil;
+    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+    return @{
+        @"utilization": @(percent),
+        @"resets_at": [formatter stringFromDate:resetDate]
+    };
 }
 
 NSDictionary *PTClaudePlanUsageFromCommandOutput(NSString *output, NSDate *now) {

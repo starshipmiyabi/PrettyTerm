@@ -47,11 +47,17 @@ int main(void) {
         PTAssert([PTDateFromClaudeAPIString(@"2026-08-09T04:59:59.763485+00:00") isKindOfClass:NSDate.class],
                  @"Claude fractional reset timestamps should parse");
         NSDate *reset = [date dateByAddingTimeInterval:90 * 60];
-        PTAssert([PTResetDescription(reset, date) containsString:@"小时"],
-            @"Chinese reset description must remain available");
+        NSString *zhCountdown = PTCountdownDescription(reset, date);
+        PTAssert([zhCountdown isEqualToString:@"1 小时 30 分"],
+            @"Chinese quota time must be a countdown only");
+        PTAssert(![zhCountdown containsString:@"重置"],
+            @"Chinese quota countdown must not expose reset wording");
         [NSUserDefaults.standardUserDefaults setObject:@"en" forKey:@"PTInterfaceLanguage"];
-        PTAssert([PTResetDescription(reset, date) containsString:@"Resets in"],
-            @"English reset description must be available");
+        NSString *enCountdown = PTCountdownDescription(reset, date);
+        PTAssert([enCountdown isEqualToString:@"1 h 30 min"],
+            @"English quota time must be a countdown only");
+        PTAssert(![enCountdown.lowercaseString containsString:@"reset"],
+            @"English quota countdown must not expose reset wording");
         [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
         NSDictionary *usageEnvelope = @{
             @"is_error": @NO,
@@ -75,6 +81,23 @@ int main(void) {
             @"Claude Code /usage weekly percentage should parse");
         PTAssert(PTDateFromClaudeAPIString(planUsage[@"five_hour"][@"resets_at"]) != nil,
             @"Claude Code /usage reset time should parse into the existing display model");
+        NSDictionary *exactHourEnvelope = @{
+            @"is_error": @NO,
+            @"result": @"Current session: 0% used · resets Aug 13 at 5am (UTC)\nCurrent week (all models): 20% used · resets Aug 15 at 5pm (UTC)"
+        };
+        NSData *exactHourJSON = [NSJSONSerialization dataWithJSONObject:exactHourEnvelope options:0 error:nil];
+        NSString *exactHourOutput = [[NSString alloc] initWithData:exactHourJSON encoding:NSUTF8StringEncoding];
+        NSDictionary *exactHourUsage = PTClaudePlanUsageFromCommandOutput(exactHourOutput, usageNowParts.date);
+        PTAssert(PTDateFromClaudeAPIString(exactHourUsage[@"five_hour"][@"resets_at"]) != nil,
+            @"Claude Code exact-hour reset times without minutes should parse");
+        NSDictionary *missingResetEnvelope = @{
+            @"is_error": @NO,
+            @"result": @"Current session: 0% used\nCurrent week (all models): 20% used"
+        };
+        NSData *missingResetJSON = [NSJSONSerialization dataWithJSONObject:missingResetEnvelope options:0 error:nil];
+        NSString *missingResetOutput = [[NSString alloc] initWithData:missingResetJSON encoding:NSUTF8StringEncoding];
+        PTAssert(PTClaudePlanUsageFromCommandOutput(missingResetOutput, usageNowParts.date) == nil,
+            @"partial plan usage without reset times must not be presented as a successful read");
         PTAssert(PTClaudePlanUsageFromCommandOutput(@"{}", usageNowParts.date) == nil,
             @"malformed Claude Code /usage output must not invent quota values");
         NSLog(@"PTUsageMetricsTests passed");

@@ -5,7 +5,9 @@
     scope.PrettyTermRenderer = api;
     scope.setClaudeSession = api.setClaudeSession;
     scope.appendClaudeMessages = api.appendClaudeMessages;
+    scope.__ptSessionMatches = api.sessionMatches;
     scope.setPrettyTermLanguage = api.setPrettyTermLanguage;
+    scope.setClaudeWaiting = api.setClaudeWaiting;
   }
 })(typeof window !== 'undefined' ? window : globalThis, function (scope) {
   'use strict';
@@ -19,7 +21,8 @@
     viewportCaptureFrame: 0,
     viewportRestoreFrame: 0,
     restoringViewport: false,
-    viewportResizePending: false
+    viewportResizePending: false,
+    waiting: false
   };
 
   const MAX_QUOTE_LENGTH = 20000;
@@ -29,13 +32,15 @@
       quote: '引用选中内容', expandInput: '展开输入', lines: '行', codeChange: '代码改动',
       showMoreFiles: '再显示 {count} 个文件', editedFiles: '已编辑 {count} 个文件',
       review: '审阅', thinking: '思考过程', tool: '工具调用', error: '错误',
-      empty: '这个会话还没有可显示的事件。', loading: '正在读取 Claude 的会话事件…'
+      empty: '这个会话还没有可显示的事件。', loading: '正在读取 Claude 的会话事件…',
+      waitingTitle: 'Claude 正在组织思路', waitingDetail: 'Terminal 信号已送达，回复会在这里出现'
     },
     en: {
       quote: 'Quote selection', expandInput: 'Expand input', lines: 'lines', codeChange: 'Code change',
       showMoreFiles: 'Show {count} more files', editedFiles: 'Edited {count} files',
       review: 'Review', thinking: 'Thinking', tool: 'Tool call', error: 'Error',
-      empty: 'This conversation has no events to display yet.', loading: 'Reading Claude conversation events…'
+      empty: 'This conversation has no events to display yet.', loading: 'Reading Claude conversation events…',
+      waitingTitle: 'Claude is working through it', waitingDetail: 'Terminal signal delivered; the response will appear here'
     }
   };
 
@@ -559,6 +564,46 @@
     return `<div class="assistant-text" data-model="${escapeHTML(model)}"${anchorAttribute}>${content}</div>`;
   }
 
+  function renderClaudeWaiting() {
+    return `<div class="claude-waiting" role="status" aria-live="polite">
+      <div class="thought-route" aria-hidden="true">
+        <span class="route-terminal">›_</span><span class="route-line"></span>
+        <i class="thought-packet"></i><i class="thought-packet"></i><i class="thought-packet"></i>
+        <span class="route-core">
+          <svg class="claude-mark" viewBox="0 0 32 32" role="img" aria-label="Claude">
+            <path d="M3 16h26M4.74 9.5l22.52 13M9.5 4.74l13 22.52M16 3v26M22.5 4.74l-13 22.52M27.26 9.5l-22.52 13" />
+          </svg>
+        </span>
+      </div>
+      <div class="waiting-copy"><strong>${escapeHTML(t('waitingTitle'))}</strong><span>${escapeHTML(t('waitingDetail'))}</span></div>
+    </div>`;
+  }
+
+  function syncClaudeWaiting(root) {
+    if (!root) return '';
+    root.querySelectorAll('.claude-waiting').forEach(node => node.remove());
+    if (!state.waiting) return '';
+    const template = scope.document.createElement('template');
+    template.innerHTML = renderClaudeWaiting();
+    root.appendChild(template.content);
+    return renderClaudeWaiting();
+  }
+
+  function setClaudeWaiting(waiting) {
+    state.waiting = Boolean(waiting);
+    if (state.session) state.session.awaitingReply = state.waiting;
+    const root = rootElement();
+    if (!root) return state.waiting;
+    const shouldFollow = nearBottom();
+    syncClaudeWaiting(root);
+    if (shouldFollow && typeof scope.scrollTo === 'function') {
+      const reduce = scope.matchMedia && scope.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: reduce ? 'auto' : 'smooth' });
+    }
+    captureViewportAnchor();
+    return state.waiting;
+  }
+
   function renderSession(session) {
     session = session || {};
     if (session.interfaceLanguage) {
@@ -591,7 +636,7 @@
       }
     });
     flush();
-    return turns.join('');
+    return turns.join('') + (session.awaitingReply ? renderClaudeWaiting() : '');
   }
 
   function rootElement() {
@@ -750,6 +795,7 @@
     state.session = Object.assign({}, session, {
       messages: Array.isArray(session && session.messages) ? session.messages.slice() : []
     });
+    state.waiting = Boolean(state.session.awaitingReply);
     state.renderedCount = state.session.messages.length;
     if (!root) return renderSession(state.session);
     const shouldFollow = nearBottom();
@@ -762,22 +808,34 @@
     return root.innerHTML;
   }
 
+  // 原生侧在追加渲染时只发元数据（不含 messages），所以必须先同步确认这边
+  // 还持有同一个会话；不匹配就让原生改发完整快照，而不是拿空 messages 去渲染。
+  function sessionMatches(session) {
+    if (!state.session || !session) return false;
+    const mine = state.session.sessionId || '';
+    const theirs = session.sessionId || '';
+    return mine.length > 0 && mine === theirs;
+  }
+
   async function appendClaudeMessages(session, newMessages) {
     const incoming = Array.isArray(newMessages) ? newMessages : [];
-    const identity = value => value && (value.sessionId || value.title || '');
-    if (!state.session || identity(state.session) !== identity(session)) {
-      return setClaudeSession(session);
+    if (!sessionMatches(session)) {
+      // 只有携带 messages 的完整快照才能安全重建；否则交回原生重发。
+      if (session && Array.isArray(session.messages)) return setClaudeSession(session);
+      return null;
     }
     const metadata = Object.assign({}, session);
     delete metadata.messages;
     state.session = Object.assign({}, state.session, metadata, {
       messages: state.session.messages.concat(incoming)
     });
+    state.waiting = Boolean(state.session.awaitingReply);
     state.renderedCount = state.session.messages.length;
     const root = rootElement();
     if (!root || !incoming.length) return renderSession(state.session);
 
     const shouldFollow = nearBottom();
+    root.querySelectorAll('.claude-waiting').forEach(node => node.remove());
     const addedNodes = [];
     const appendHTML = (parent, html) => {
       const template = scope.document.createElement('template');
@@ -802,6 +860,7 @@
       appendHTML(events, renderEvent(message, state.session));
     });
     refreshTurnEditSummaries(root, state.session);
+    syncClaudeWaiting(root);
     await typeset(addedNodes);
     if (shouldFollow && typeof scope.scrollTo === 'function') {
       const reduce = scope.matchMedia && scope.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -827,8 +886,11 @@
     renderEvent,
     renderSession,
     quotePayloadFromSelection,
+    renderClaudeWaiting,
     setPrettyTermLanguage,
+    setClaudeWaiting,
     setClaudeSession,
-    appendClaudeMessages
+    appendClaudeMessages,
+    sessionMatches
   };
 });

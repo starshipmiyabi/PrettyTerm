@@ -106,6 +106,64 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 
 @end
 
+// 细长的圆角进度条：套餐额度、成本占比这类"一眼看出占比"的场合用它，
+// 不用每次都从一堆文字里心算百分比。fillLayer 宽度按 bounds 手算，
+// 不依赖 Auto Layout multiplier（multiplier 建好之后不能改，进度变化时得整条重建，麻烦）。
+@interface PTMeterView : NSView
+@property(nonatomic) CGFloat progress; // 0.0 – 1.0
+@property(nonatomic, strong) NSColor *fillColor;
+@end
+
+@implementation PTMeterView {
+    CALayer *_trackLayer;
+    CALayer *_fillLayer;
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) {
+        self.wantsLayer = YES;
+        _trackLayer = [CALayer layer];
+        _fillLayer = [CALayer layer];
+        [self.layer addSublayer:_trackLayer];
+        [self.layer addSublayer:_fillLayer];
+        _fillColor = NSColor.controlAccentColor;
+    }
+    return self;
+}
+
+- (void)setProgress:(CGFloat)progress {
+    _progress = MIN(1.0, MAX(0.0, progress));
+    [self setNeedsLayout:YES];
+}
+
+- (void)setFillColor:(NSColor *)fillColor {
+    _fillColor = fillColor;
+    [self setNeedsLayout:YES];
+}
+
+- (void)layout {
+    [super layout];
+    CGFloat height = self.bounds.size.height;
+    CGFloat radius = height / 2.0;
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        _trackLayer.backgroundColor = PTWarmChipColor().CGColor;
+        _fillLayer.backgroundColor = self.fillColor.CGColor;
+    }];
+    _trackLayer.frame = self.bounds;
+    _trackLayer.cornerRadius = radius;
+    CGFloat fillWidth = MAX(height, self.bounds.size.width * self.progress);
+    _fillLayer.frame = CGRectMake(0, 0, self.progress > 0 ? fillWidth : 0, height);
+    _fillLayer.cornerRadius = radius;
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self setNeedsLayout:YES];
+}
+
+@end
+
 static NSString *PTShortText(NSString *value, NSUInteger limit) {
     if (![value isKindOfClass:NSString.class]) return @"";
     // firstPrompt 有时是几十 KB 的粘贴内容；先粗截到一个安全上限，
@@ -131,6 +189,97 @@ static NSString *PTCompactTokenCount(NSUInteger tokens) {
     if (tokens >= 999500) return [NSString stringWithFormat:@"%.1fM", tokens / 1000000.0];
     if (tokens >= 1000) return [NSString stringWithFormat:@"%.0fK", tokens / 1000.0];
     return [NSString stringWithFormat:@"%lu", (unsigned long)tokens];
+}
+
+static NSUInteger PTTokenCountFromCompactString(NSString *value) {
+    NSString *trimmed = [value.lowercaseString
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0) return 0;
+    double multiplier = 1.0;
+    if ([trimmed hasSuffix:@"k"]) {
+        multiplier = 1000.0;
+        trimmed = [trimmed substringToIndex:trimmed.length - 1];
+    } else if ([trimmed hasSuffix:@"m"]) {
+        multiplier = 1000000.0;
+        trimmed = [trimmed substringToIndex:trimmed.length - 1];
+    }
+    return (NSUInteger)llround(trimmed.doubleValue * multiplier);
+}
+
+static NSString *PTContextCategoryKey(NSString *name) {
+    NSString *normalized = [[name stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    // /context 的 Markdown 辅助记录还会列出 deferred 工具；它们没有装入当前
+    // 上下文，官方状态图也不把它们算进占用，所以这里保持同一口径。
+    if ([normalized containsString:@"deferred"]) return nil;
+    NSDictionary<NSString *, NSString *> *keys = @{
+        @"system prompt": @"system_prompt",
+        @"system tools": @"system_tools",
+        @"memory files": @"memory_files",
+        @"skills": @"skills",
+        @"messages": @"messages",
+        @"free space": @"free_space",
+        @"autocompact buffer": @"autocompact_buffer"
+    };
+    return keys[normalized];
+}
+
+// Claude Code 会把 /context 的真实结果同时写成 ANSI local-command 输出和
+// isMeta Markdown 表。两种都读，轮询撞在两条 JSONL 之间时也不会短暂丢明细。
+static NSDictionary *PTContextSnapshotFromText(NSString *text) {
+    if (![text isKindOfClass:NSString.class] ||
+        [text rangeOfString:@"Context Usage" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        return nil;
+    }
+    static NSRegularExpression *ansiExpression;
+    static NSRegularExpression *summaryExpression;
+    static NSRegularExpression *tableRowExpression;
+    static NSRegularExpression *plainRowExpression;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        ansiExpression = [NSRegularExpression regularExpressionWithPattern:
+            @"\\x1B\\[[0-?]*[ -/]*[@-~]" options:0 error:nil];
+        summaryExpression = [NSRegularExpression regularExpressionWithPattern:
+            @"([0-9]+(?:\\.[0-9]+)?[kKmM]?)\\s*/\\s*([0-9]+(?:\\.[0-9]+)?[kKmM]?)\\s*(?:tokens\\s*)?\\(([0-9]+(?:\\.[0-9]+)?)%\\)"
+            options:NSRegularExpressionCaseInsensitive error:nil];
+        tableRowExpression = [NSRegularExpression regularExpressionWithPattern:
+            @"^\\|\\s*([^|]+?)\\s*\\|\\s*~?([0-9]+(?:\\.[0-9]+)?[kKmM]?)\\s*\\|\\s*([0-9]+(?:\\.[0-9]+)?)%\\s*\\|\\s*$"
+            options:NSRegularExpressionCaseInsensitive error:nil];
+        plainRowExpression = [NSRegularExpression regularExpressionWithPattern:
+            @"(System prompt|System tools|Memory files|Skills|Messages|Free space|Autocompact buffer):\\s*([0-9]+(?:\\.[0-9]+)?[kKmM]?)\\s*(?:tokens\\s*)?\\(([0-9]+(?:\\.[0-9]+)?)%\\)"
+            options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    NSString *plain = [ansiExpression stringByReplacingMatchesInString:text options:0
+        range:NSMakeRange(0, text.length) withTemplate:@""];
+    NSTextCheckingResult *summary = [summaryExpression firstMatchInString:plain options:0
+        range:NSMakeRange(0, plain.length)];
+    if (!summary || summary.numberOfRanges < 4) return nil;
+    NSUInteger used = PTTokenCountFromCompactString([plain substringWithRange:[summary rangeAtIndex:1]]);
+    NSUInteger window = PTTokenCountFromCompactString([plain substringWithRange:[summary rangeAtIndex:2]]);
+    if (used == 0 || window == 0) return nil;
+
+    NSMutableArray<NSDictionary *> *categories = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *line in [plain componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSTextCheckingResult *match = [tableRowExpression firstMatchInString:line options:0
+            range:NSMakeRange(0, line.length)];
+        if (!match) {
+            match = [plainRowExpression firstMatchInString:line options:0
+                range:NSMakeRange(0, line.length)];
+        }
+        if (!match || match.numberOfRanges < 4) continue;
+        NSString *name = [line substringWithRange:[match rangeAtIndex:1]];
+        NSString *key = PTContextCategoryKey(name);
+        if (key.length == 0 || [seen containsObject:key]) continue;
+        [seen addObject:key];
+        [categories addObject:@{
+            @"category": key,
+            @"tokens": @(PTTokenCountFromCompactString(
+                [line substringWithRange:[match rangeAtIndex:2]])),
+            @"percentage": @([[line substringWithRange:[match rangeAtIndex:3]] doubleValue])
+        }];
+    }
+    return @{ @"used": @(used), @"window": @(window), @"categories": categories };
 }
 
 static NSString *PTMarkdownQuote(NSString *text) {
@@ -305,8 +454,12 @@ static void PTCollectTranscriptDirectories(id value,
 @property(nonatomic, strong) NSArray<NSDictionary *> *tasks;
 @property(nonatomic) NSUInteger contextUsed;
 @property(nonatomic) NSUInteger contextWindow;
+@property(nonatomic, strong) NSArray<NSDictionary *> *contextBreakdown;
 @property(nonatomic) double apiEquivalentCostUSD;
 @property(nonatomic) BOOL apiCostAvailable;
+@property(nonatomic, strong) NSDictionary<NSString *, NSDictionary *> *modelUsageBreakdown;
+@property(nonatomic) NSUInteger codeLinesAdded;
+@property(nonatomic) NSUInteger codeLinesRemoved;
 @property(nonatomic, copy) NSString *parseCustomTitle;
 @property(nonatomic, copy) NSString *parseGeneratedTitle;
 @property(nonatomic, copy) NSString *parseLastPrompt;
@@ -378,8 +531,16 @@ static PTSessionInfo *PTParseSessionData(
     session.model = baseSession.model ?: @"";
     session.contextUsed = baseSession.contextUsed;
     session.contextWindow = baseSession ? baseSession.contextWindow : 200000;
+    session.contextBreakdown = baseSession.contextBreakdown ?: @[];
     session.apiEquivalentCostUSD = baseSession.apiEquivalentCostUSD;
     session.apiCostAvailable = baseSession.apiCostAvailable;
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *modelBreakdown = [NSMutableDictionary dictionary];
+    [baseSession.modelUsageBreakdown enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSDictionary *value, BOOL *_Nonnull stop) {
+        (void)stop;
+        modelBreakdown[key] = [value mutableCopy];
+    }];
+    NSUInteger codeLinesAdded = baseSession.codeLinesAdded;
+    NSUInteger codeLinesRemoved = baseSession.codeLinesRemoved;
 
     NSString *customTitle = baseSession.parseCustomTitle ?: @"";
     NSString *generatedTitle = baseSession.parseGeneratedTitle ?: @"";
@@ -422,6 +583,15 @@ static PTSessionInfo *PTParseSessionData(
             session.cwd = recordedCWD;
         }
 
+        if ([type isEqual:@"system"] && [object[@"content"] isKindOfClass:NSString.class]) {
+            NSDictionary *snapshot = PTContextSnapshotFromText(object[@"content"]);
+            if (snapshot) {
+                session.contextUsed = [snapshot[@"used"] unsignedIntegerValue];
+                session.contextWindow = [snapshot[@"window"] unsignedIntegerValue];
+                session.contextBreakdown = snapshot[@"categories"] ?: @[];
+            }
+        }
+
         if ([type isEqual:@"custom-title"] && [object[@"customTitle"] isKindOfClass:NSString.class]) {
             customTitle = object[@"customTitle"];
         } else if ([type isEqual:@"ai-title"]) {
@@ -433,6 +603,27 @@ static PTSessionInfo *PTParseSessionData(
             if ([object[@"isSidechain"] boolValue]) continue;
             NSDictionary *message = object[@"message"];
             if (![message isKindOfClass:NSDictionary.class]) continue; // 防止 message 不是字典时 message[@"content"] 直接崩掉
+
+            // Edit/MultiEdit 结果自带 structuredPatch（标准 unified diff hunk），
+            // 直接数 +/- 行数，跟 git diff --numstat 是同一套口径。
+            NSDictionary *toolUseResult = [object[@"toolUseResult"] isKindOfClass:NSDictionary.class]
+                ? object[@"toolUseResult"] : nil;
+            NSArray *structuredPatch = [toolUseResult[@"structuredPatch"] isKindOfClass:NSArray.class]
+                ? toolUseResult[@"structuredPatch"] : nil;
+            NSString *patchKey = [NSString stringWithFormat:@"%@:patch", object[@"uuid"] ?: @""];
+            if (structuredPatch.count > 0 && object[@"uuid"] && ![messageKeys containsObject:patchKey]) {
+                [messageKeys addObject:patchKey];
+                for (NSDictionary *hunk in structuredPatch) {
+                    NSArray *hunkLines = [hunk[@"lines"] isKindOfClass:NSArray.class] ? hunk[@"lines"] : nil;
+                    for (NSString *lineText in hunkLines) {
+                        if (![lineText isKindOfClass:NSString.class] || lineText.length == 0) continue;
+                        unichar marker = [lineText characterAtIndex:0];
+                        if (marker == '+') codeLinesAdded++;
+                        else if (marker == '-') codeLinesRemoved++;
+                    }
+                }
+            }
+
             id rawContent = message[@"content"];
             if ([rawContent isKindOfClass:NSArray.class]) {
                 NSUInteger resultIndex = 0;
@@ -455,6 +646,12 @@ static PTSessionInfo *PTParseSessionData(
                 }
             }
             NSString *text = PTTextFromMessageContent(message[@"content"]);
+            NSDictionary *contextSnapshot = PTContextSnapshotFromText(text);
+            if (contextSnapshot) {
+                session.contextUsed = [contextSnapshot[@"used"] unsignedIntegerValue];
+                session.contextWindow = [contextSnapshot[@"window"] unsignedIntegerValue];
+                session.contextBreakdown = contextSnapshot[@"categories"] ?: @[];
+            }
             NSString *addedDirectory = PTAddedWorkingDirectoryFromText(text);
             if (addedDirectory.length > 0) [accessedDirectories addObject:addedDirectory];
             BOOL isMeta = [object[@"isMeta"] boolValue];
@@ -481,15 +678,29 @@ static PTSessionInfo *PTParseSessionData(
             NSString *model = message[@"model"];
             if ([model isEqual:@"<synthetic>"]) continue;
             NSDictionary *usage = message[@"usage"];
-            NSString *usageKey = object[@"uuid"] ?: message[@"id"];
+            NSString *usageKey = object[@"requestId"] ?: message[@"id"];
             if ([usage isKindOfClass:NSDictionary.class] && usageKey.length > 0 &&
                 ![usageMessageKeys containsObject:usageKey]) {
                 [usageMessageKeys addObject:usageKey];
                 BOOL supported = NO;
-                double cost = PTAPIEquivalentCostForUsage(model ?: @"", usage, NSDate.date, &supported);
+                NSDate *pricingDate = PTDateFromClaudeAPIString(object[@"timestamp"]) ?: NSDate.date;
+                double cost = PTAPIEquivalentCostForUsage(model ?: @"", usage, pricingDate, &supported);
                 if (supported) {
                     session.apiEquivalentCostUSD += cost;
                     session.apiCostAvailable = YES;
+                    NSString *modelKey = model.length ? model : @"unknown";
+                    NSMutableDictionary *entry = modelBreakdown[modelKey];
+                    if (!entry) {
+                        entry = [NSMutableDictionary dictionaryWithDictionary:@{
+                            @"input": @0, @"output": @0, @"cacheRead": @0, @"cacheWrite": @0, @"cost": @0.0
+                        }];
+                        modelBreakdown[modelKey] = entry;
+                    }
+                    entry[@"input"] = @([entry[@"input"] unsignedLongLongValue] + [usage[@"input_tokens"] unsignedLongLongValue]);
+                    entry[@"output"] = @([entry[@"output"] unsignedLongLongValue] + [usage[@"output_tokens"] unsignedLongLongValue]);
+                    entry[@"cacheRead"] = @([entry[@"cacheRead"] unsignedLongLongValue] + [usage[@"cache_read_input_tokens"] unsignedLongLongValue]);
+                    entry[@"cacheWrite"] = @([entry[@"cacheWrite"] unsignedLongLongValue] + [usage[@"cache_creation_input_tokens"] unsignedLongLongValue]);
+                    entry[@"cost"] = @([entry[@"cost"] doubleValue] + cost);
                 }
             }
             if ([object[@"isSidechain"] boolValue] || [object[@"isApiErrorMessage"] boolValue]) continue;
@@ -566,6 +777,9 @@ static PTSessionInfo *PTParseSessionData(
     session.parseFirstPrompt = firstPrompt;
     session.parseMessageKeys = messageKeys;
     session.parseUsageMessageKeys = usageMessageKeys;
+    session.modelUsageBreakdown = modelBreakdown;
+    session.codeLinesAdded = codeLinesAdded;
+    session.codeLinesRemoved = codeLinesRemoved;
     session.accessedDirectories = accessedDirectories.array;
     session.assistantMessages = messages;
     session.changedFiles = PTAggregateChangedFiles(messages);
@@ -879,11 +1093,19 @@ static PTSessionInfo *PTParseSessionAppending(
 - (void)stop;
 @end
 
-static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments) {
+static NSString *PTRunToolWithEnvironment(NSString *path,
+                                          NSArray<NSString *> *arguments,
+                                          NSDictionary<NSString *, NSString *> *overrides) {
     NSTask *task = [[NSTask alloc] init];
     NSPipe *pipe = [NSPipe pipe];
     task.executableURL = [NSURL fileURLWithPath:path];
     task.arguments = arguments;
+    if (overrides.count > 0) {
+        NSMutableDictionary<NSString *, NSString *> *environment =
+            [NSProcessInfo.processInfo.environment mutableCopy];
+        [environment addEntriesFromDictionary:overrides];
+        task.environment = environment;
+    }
     task.standardOutput = pipe;
     // stderr 丢给 /dev/null：如果还用 NSPipe 但没人读，lsof/ps 一吐 warning
     // 管道缓冲区（约 64KB）就会写满，readDataToEndOfFile 永久卡死。
@@ -892,6 +1114,10 @@ static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments) {
     NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
     [task waitUntilExit];
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+}
+
+static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments) {
+    return PTRunToolWithEnvironment(path, arguments, nil);
 }
 
 static NSString *PTClaudeExecutablePath(void) {
@@ -1713,8 +1939,22 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSDictionary<NSString *, PTFirstMouseButton *> *_changedFileButtonsByPath;
     NSTextField *_inspectorConnectionLabel;
     NSTextField *_inspectorContextLabel;
-    NSTextField *_inspectorQuotaLabel;
-    NSTextField *_inspectorCostLabel;
+    NSTextField *_inspectorContextPercentLabel;
+    PTMeterView *_inspectorContextMeter;
+    NSStackView *_inspectorContextDetailStack;
+    NSButton *_contextDisclosureButton;
+    BOOL _contextDetailExpanded;
+    NSTextField *_inspectorFiveHourPercentLabel;
+    PTMeterView *_inspectorFiveHourMeter;
+    NSTextField *_inspectorFiveHourCaption;
+    NSTextField *_inspectorSevenDayPercentLabel;
+    PTMeterView *_inspectorSevenDayMeter;
+    NSTextField *_inspectorSevenDayCaption;
+    NSTextField *_inspectorCostHeadline;
+    NSTextField *_inspectorCostChangesPill;
+    NSStackView *_inspectorCostDetailStack;
+    NSButton *_costDisclosureButton;
+    BOOL _costDetailExpanded;
     NSPopUpButton *_gitDirectoryPicker;
     NSButton *_removeGitDirectoryButton;
     NSTextField *_gitDirectoryInput;
@@ -1749,10 +1989,15 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSButton *_inspectorToggleButton;
     NSStackView *_tasksStack;
     NSArray<NSDictionary *> *_renderedTasks;
+    NSArray<NSDictionary *> *_renderedContextBreakdown;
+    NSDictionary<NSString *, NSDictionary *> *_renderedCostBreakdown;
     PTAgentState *_agentState;
     PTTranscriptWatcher *_transcriptWatcher;
     NSString *_watchedTranscriptPath;
     BOOL _connecting;
+    BOOL _awaitingClaudeReply;
+    NSString *_awaitingClaudeSessionID;
+    NSUInteger _awaitingClaudeBaselineMessageCount;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -1776,14 +2021,14 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     [_store refresh];
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(refreshSessions:) userInfo:nil repeats:YES];
     [self refreshClaudeUsage:nil];
-    _usageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:300.0 target:self selector:@selector(refreshClaudeUsage:) userInfo:nil repeats:YES];
+    _usageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 target:self selector:@selector(refreshClaudeUsage:) userInfo:nil repeats:YES];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
-    if (!_planUsageFetchedAt || [[NSDate date] timeIntervalSinceDate:_planUsageFetchedAt] > 120.0) {
+    if (!_planUsageFetchedAt || [[NSDate date] timeIntervalSinceDate:_planUsageFetchedAt] > 60.0) {
         [self refreshClaudeUsage:nil];
     }
 }
@@ -2231,17 +2476,254 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     };
 
     NSTextField *connectionValue = nil;
-    NSTextField *contextValue = nil;
-    NSTextField *quotaValue = nil;
-    NSTextField *costValue = nil;
     NSView *connectionCard = makeCard(PTL(@"TERMINAL 连接", @"TERMINAL CONNECTION"), &connectionValue);
-    NSView *contextCard = makeCard(PTL(@"上下文使用", @"CONTEXT USAGE"), &contextValue);
-    NSView *quotaCard = makeCard(PTL(@"CLAUDE 套餐额度", @"CLAUDE PLAN LIMITS"), &quotaValue);
-    NSView *costCard = makeCard(PTL(@"本会话 API 等价成本", @"API-EQUIVALENT SESSION COST"), &costValue);
     _inspectorConnectionLabel = connectionValue;
+
+    // 上下文卡片与成本卡片保持同一层级：总占用和状态条永远可见，只有
+    // /context 提供的真实分类明细参与展开折叠。
+    PTAppearanceSurfaceView *contextCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+    contextCard.translatesAutoresizingMaskIntoConstraints = NO;
+    contextCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
+    contextCard.layer.cornerRadius = 14;
+    contextCard.layer.borderWidth = 0.6;
+
+    NSTextField *contextHeading = [self label:PTL(@"上下文使用", @"CONTEXT USAGE")
+                                           size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+    [contextCard addSubview:contextHeading];
+    NSButton *contextDisclosure = [NSButton buttonWithTitle:PTL(@"详情 ›", @"Details ›")
+                                                     target:self action:@selector(toggleContextDetail:)];
+    contextDisclosure.translatesAutoresizingMaskIntoConstraints = NO;
+    contextDisclosure.bezelStyle = NSBezelStyleInline;
+    contextDisclosure.font = [NSFont systemFontOfSize:10 weight:NSFontWeightMedium];
+    contextDisclosure.toolTip = PTL(@"在 Claude Code 执行 /context 后显示真实分类明细",
+                                    @"Run /context in Claude Code to expose the real category breakdown");
+    [contextCard addSubview:contextDisclosure];
+    _contextDisclosureButton = contextDisclosure;
+
+    NSStackView *contextBodyStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    contextBodyStack.translatesAutoresizingMaskIntoConstraints = NO;
+    contextBodyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    contextBodyStack.alignment = NSLayoutAttributeLeading;
+    contextBodyStack.spacing = 7;
+    [contextCard addSubview:contextBodyStack];
+
+    NSView *contextHeadlineRow = [[NSView alloc] initWithFrame:NSZeroRect];
+    contextHeadlineRow.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *contextValue = [self label:@"—" size:13 weight:NSFontWeightBold color:NSColor.labelColor];
+    NSTextField *contextPercent = [self label:@"—" size:12 weight:NSFontWeightBold color:PTWarmAccentColor()];
+    [contextHeadlineRow addSubview:contextValue];
+    [contextHeadlineRow addSubview:contextPercent];
+    [NSLayoutConstraint activateConstraints:@[
+        [contextValue.leadingAnchor constraintEqualToAnchor:contextHeadlineRow.leadingAnchor],
+        [contextValue.topAnchor constraintEqualToAnchor:contextHeadlineRow.topAnchor],
+        [contextValue.bottomAnchor constraintEqualToAnchor:contextHeadlineRow.bottomAnchor],
+        [contextPercent.firstBaselineAnchor constraintEqualToAnchor:contextValue.firstBaselineAnchor],
+        [contextPercent.trailingAnchor constraintEqualToAnchor:contextHeadlineRow.trailingAnchor],
+        [contextPercent.leadingAnchor constraintGreaterThanOrEqualToAnchor:contextValue.trailingAnchor constant:6]
+    ]];
+    [contextBodyStack addArrangedSubview:contextHeadlineRow];
+    [contextHeadlineRow.widthAnchor constraintEqualToAnchor:contextBodyStack.widthAnchor].active = YES;
+
+    PTMeterView *contextMeter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
+    contextMeter.translatesAutoresizingMaskIntoConstraints = NO;
+    contextMeter.fillColor = PTWarmAccentColor();
+    [contextBodyStack addArrangedSubview:contextMeter];
+    [contextMeter.widthAnchor constraintEqualToAnchor:contextBodyStack.widthAnchor].active = YES;
+    [contextMeter.heightAnchor constraintEqualToConstant:7].active = YES;
+
+    NSStackView *contextDetailStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    contextDetailStack.translatesAutoresizingMaskIntoConstraints = NO;
+    contextDetailStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    contextDetailStack.alignment = NSLayoutAttributeLeading;
+    contextDetailStack.spacing = 7;
+    contextDetailStack.hidden = YES;
+    [contextBodyStack addArrangedSubview:contextDetailStack];
+    [contextDetailStack.widthAnchor constraintEqualToAnchor:contextBodyStack.widthAnchor].active = YES;
+
     _inspectorContextLabel = contextValue;
-    _inspectorQuotaLabel = quotaValue;
-    _inspectorCostLabel = costValue;
+    _inspectorContextPercentLabel = contextPercent;
+    _inspectorContextMeter = contextMeter;
+    _inspectorContextDetailStack = contextDetailStack;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [contextHeading.topAnchor constraintEqualToAnchor:contextCard.topAnchor constant:11],
+        [contextHeading.leadingAnchor constraintEqualToAnchor:contextCard.leadingAnchor constant:12],
+        [contextDisclosure.centerYAnchor constraintEqualToAnchor:contextHeading.centerYAnchor],
+        [contextDisclosure.trailingAnchor constraintEqualToAnchor:contextCard.trailingAnchor constant:-8],
+        [contextDisclosure.leadingAnchor constraintGreaterThanOrEqualToAnchor:contextHeading.trailingAnchor constant:6],
+        [contextBodyStack.topAnchor constraintEqualToAnchor:contextHeading.bottomAnchor constant:8],
+        [contextBodyStack.leadingAnchor constraintEqualToAnchor:contextCard.leadingAnchor constant:12],
+        [contextBodyStack.trailingAnchor constraintEqualToAnchor:contextCard.trailingAnchor constant:-12],
+        [contextBodyStack.bottomAnchor constraintEqualToAnchor:contextCard.bottomAnchor constant:-12]
+    ]];
+
+    // 套餐额度卡片：每个窗口一行「名称＋百分比」+ 一条圆角进度条 + 重置倒计时，
+    // 用条形长度直接看占比，不用每次心算文字里的数字。
+    PTAppearanceSurfaceView *quotaCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+    quotaCard.translatesAutoresizingMaskIntoConstraints = NO;
+    quotaCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
+    quotaCard.layer.cornerRadius = 14;
+    quotaCard.layer.borderWidth = 0.6;
+
+    NSTextField *quotaHeading = [self label:PTL(@"CLAUDE 套餐额度", @"CLAUDE PLAN LIMITS")
+                                         size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+    [quotaCard addSubview:quotaHeading];
+
+    NSStackView *quotaBodyStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    quotaBodyStack.translatesAutoresizingMaskIntoConstraints = NO;
+    quotaBodyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    quotaBodyStack.alignment = NSLayoutAttributeLeading;
+    quotaBodyStack.spacing = 10;
+    [quotaCard addSubview:quotaBodyStack];
+
+    NSView* (^makeMeterRow)(NSString *, NSTextField **, PTMeterView **, NSTextField **) =
+        ^NSView *(NSString *rowLabel, NSTextField **percentOut, PTMeterView **meterOut, NSTextField **captionOut) {
+        NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+
+        NSTextField *nameLabel = [self label:rowLabel size:11 weight:NSFontWeightMedium color:NSColor.labelColor];
+        NSTextField *percentLabel = [self label:@"—" size:12 weight:NSFontWeightBold color:NSColor.labelColor];
+
+        PTMeterView *meter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
+        meter.translatesAutoresizingMaskIntoConstraints = NO;
+
+        NSTextField *caption = [self label:@"" size:10 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
+
+        [row addSubview:nameLabel];
+        [row addSubview:percentLabel];
+        [row addSubview:meter];
+        [row addSubview:caption];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [nameLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+            [nameLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [percentLabel.firstBaselineAnchor constraintEqualToAnchor:nameLabel.firstBaselineAnchor],
+            [percentLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [percentLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:nameLabel.trailingAnchor constant:6],
+            [meter.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:5],
+            [meter.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [meter.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [meter.heightAnchor constraintEqualToConstant:6],
+            [caption.topAnchor constraintEqualToAnchor:meter.bottomAnchor constant:4],
+            [caption.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [caption.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [caption.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
+        ]];
+
+        if (percentOut) *percentOut = percentLabel;
+        if (meterOut) *meterOut = meter;
+        if (captionOut) *captionOut = caption;
+        return row;
+    };
+
+    NSTextField *fiveHourPercentLabel = nil;
+    PTMeterView *fiveHourMeter = nil;
+    NSTextField *fiveHourCaption = nil;
+    NSView *fiveHourRow = makeMeterRow(PTL(@"5 小时", @"5 hours"),
+        &fiveHourPercentLabel, &fiveHourMeter, &fiveHourCaption);
+    _inspectorFiveHourPercentLabel = fiveHourPercentLabel;
+    _inspectorFiveHourMeter = fiveHourMeter;
+    _inspectorFiveHourCaption = fiveHourCaption;
+
+    NSTextField *sevenDayPercentLabel = nil;
+    PTMeterView *sevenDayMeter = nil;
+    NSTextField *sevenDayCaption = nil;
+    NSView *sevenDayRow = makeMeterRow(PTL(@"7 天", @"7 days"),
+        &sevenDayPercentLabel, &sevenDayMeter, &sevenDayCaption);
+    _inspectorSevenDayPercentLabel = sevenDayPercentLabel;
+    _inspectorSevenDayMeter = sevenDayMeter;
+    _inspectorSevenDayCaption = sevenDayCaption;
+    [quotaBodyStack addArrangedSubview:fiveHourRow];
+    [quotaBodyStack addArrangedSubview:sevenDayRow];
+    [fiveHourRow.widthAnchor constraintEqualToAnchor:quotaBodyStack.widthAnchor].active = YES;
+    [sevenDayRow.widthAnchor constraintEqualToAnchor:quotaBodyStack.widthAnchor].active = YES;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [quotaHeading.topAnchor constraintEqualToAnchor:quotaCard.topAnchor constant:11],
+        [quotaHeading.leadingAnchor constraintEqualToAnchor:quotaCard.leadingAnchor constant:12],
+        [quotaHeading.trailingAnchor constraintEqualToAnchor:quotaCard.trailingAnchor constant:-12],
+        [quotaBodyStack.topAnchor constraintEqualToAnchor:quotaHeading.bottomAnchor constant:9],
+        [quotaBodyStack.leadingAnchor constraintEqualToAnchor:quotaCard.leadingAnchor constant:12],
+        [quotaBodyStack.trailingAnchor constraintEqualToAnchor:quotaCard.trailingAnchor constant:-12],
+        [quotaBodyStack.bottomAnchor constraintEqualToAnchor:quotaCard.bottomAnchor constant:-12]
+    ]];
+
+    // 成本卡片：大号金额当标题，代码改动用一个红绿双色胶囊，「详情」展开后
+    // 在下面动态铺开按模型拆分的行——每行也带一条按成本占比换算长度的进度条。
+    PTAppearanceSurfaceView *costCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+    costCard.translatesAutoresizingMaskIntoConstraints = NO;
+    costCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
+    costCard.layer.cornerRadius = 14;
+    costCard.layer.borderWidth = 0.6;
+
+    NSTextField *costHeading = [self label:PTL(@"本会话 API 等价成本", @"API-EQUIVALENT SESSION COST")
+                                        size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+    [costCard addSubview:costHeading];
+
+    NSButton *costDisclosure = [NSButton buttonWithTitle:PTL(@"详情 ›", @"Details ›")
+                                                    target:self action:@selector(toggleCostDetail:)];
+    costDisclosure.translatesAutoresizingMaskIntoConstraints = NO;
+    costDisclosure.bezelStyle = NSBezelStyleInline;
+    costDisclosure.font = [NSFont systemFontOfSize:10 weight:NSFontWeightMedium];
+    [costCard addSubview:costDisclosure];
+    _costDisclosureButton = costDisclosure;
+
+    NSStackView *costBodyStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    costBodyStack.translatesAutoresizingMaskIntoConstraints = NO;
+    costBodyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    costBodyStack.alignment = NSLayoutAttributeLeading;
+    costBodyStack.spacing = 8;
+    [costCard addSubview:costBodyStack];
+
+    NSView *costHeadlineRow = [[NSView alloc] initWithFrame:NSZeroRect];
+    costHeadlineRow.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *costHeadline = [self label:@"—" size:20 weight:NSFontWeightBold color:NSColor.labelColor];
+    NSTextField *costChangesPill = [self label:@"" size:10.5 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    costChangesPill.alignment = NSTextAlignmentCenter;
+    costChangesPill.wantsLayer = YES;
+    costChangesPill.layer.cornerRadius = 8;
+    costChangesPill.layer.backgroundColor = PTWarmChipColor().CGColor;
+    [costHeadlineRow addSubview:costHeadline];
+    [costHeadlineRow addSubview:costChangesPill];
+    [NSLayoutConstraint activateConstraints:@[
+        [costHeadline.leadingAnchor constraintEqualToAnchor:costHeadlineRow.leadingAnchor],
+        [costHeadline.topAnchor constraintEqualToAnchor:costHeadlineRow.topAnchor],
+        [costHeadline.bottomAnchor constraintEqualToAnchor:costHeadlineRow.bottomAnchor],
+        [costChangesPill.centerYAnchor constraintEqualToAnchor:costHeadline.centerYAnchor],
+        [costChangesPill.leadingAnchor constraintGreaterThanOrEqualToAnchor:costHeadline.trailingAnchor constant:8],
+        [costChangesPill.trailingAnchor constraintLessThanOrEqualToAnchor:costHeadlineRow.trailingAnchor],
+        [costChangesPill.heightAnchor constraintEqualToConstant:18]
+    ]];
+    _inspectorCostHeadline = costHeadline;
+    _inspectorCostChangesPill = costChangesPill;
+    [costBodyStack addArrangedSubview:costHeadlineRow];
+    [costHeadlineRow.widthAnchor constraintEqualToAnchor:costBodyStack.widthAnchor].active = YES;
+
+    NSTextField *costCaption = [self label:PTL(@"按官方 API 单价估算 · 非订阅实际扣款", @"Estimated at official API rates · not the actual subscription charge")
+                                        size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
+    [costBodyStack addArrangedSubview:costCaption];
+
+    NSStackView *costDetailStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    costDetailStack.translatesAutoresizingMaskIntoConstraints = NO;
+    costDetailStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    costDetailStack.alignment = NSLayoutAttributeLeading;
+    costDetailStack.spacing = 10;
+    costDetailStack.hidden = YES;
+    [costBodyStack addArrangedSubview:costDetailStack];
+    [costDetailStack.widthAnchor constraintEqualToAnchor:costBodyStack.widthAnchor].active = YES;
+    _inspectorCostDetailStack = costDetailStack;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [costHeading.topAnchor constraintEqualToAnchor:costCard.topAnchor constant:11],
+        [costHeading.leadingAnchor constraintEqualToAnchor:costCard.leadingAnchor constant:12],
+        [costDisclosure.centerYAnchor constraintEqualToAnchor:costHeading.centerYAnchor],
+        [costDisclosure.trailingAnchor constraintEqualToAnchor:costCard.trailingAnchor constant:-8],
+        [costDisclosure.leadingAnchor constraintGreaterThanOrEqualToAnchor:costHeading.trailingAnchor constant:6],
+        [costBodyStack.topAnchor constraintEqualToAnchor:costHeading.bottomAnchor constant:8],
+        [costBodyStack.leadingAnchor constraintEqualToAnchor:costCard.leadingAnchor constant:12],
+        [costBodyStack.trailingAnchor constraintEqualToAnchor:costCard.trailingAnchor constant:-12],
+        [costBodyStack.bottomAnchor constraintEqualToAnchor:costCard.bottomAnchor constant:-12]
+    ]];
     [stack addArrangedSubview:connectionCard];
     [stack addArrangedSubview:contextCard];
     [stack addArrangedSubview:quotaCard];
@@ -2717,6 +3199,52 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     return nil;
 }
 
+- (void)presentClaudeWaiting:(BOOL)waiting forSessionID:(NSString *)sessionID {
+    if (sessionID.length == 0) return;
+    NSString *script = [NSString stringWithFormat:
+        @"window.setClaudeWaiting && window.setClaudeWaiting(%@); null;",
+        waiting ? @"true" : @"false"];
+    if (_webReady && [_selectedSession.sessionID isEqual:sessionID]) {
+        [_conversationView evaluateJavaScript:script completionHandler:nil];
+    }
+    if (_floatingWebReady && _floatingPanel.visible && [_floatingSessionID isEqual:sessionID]) {
+        [_floatingConversationView evaluateJavaScript:script completionHandler:nil];
+    }
+}
+
+- (void)beginAwaitingClaudeReplyForSessionID:(NSString *)sessionID {
+    if (sessionID.length == 0) return;
+    PTSessionInfo *session = [self sessionWithID:sessionID];
+    _awaitingClaudeReply = YES;
+    _awaitingClaudeSessionID = [sessionID copy];
+    _awaitingClaudeBaselineMessageCount = session.assistantMessages.count;
+    [self presentClaudeWaiting:YES forSessionID:sessionID];
+}
+
+- (void)finishAwaitingClaudeReplyForSessionID:(NSString *)sessionID {
+    if (!_awaitingClaudeReply || ![_awaitingClaudeSessionID isEqual:sessionID]) return;
+    NSString *finishedSessionID = [_awaitingClaudeSessionID copy];
+    _awaitingClaudeReply = NO;
+    _awaitingClaudeSessionID = nil;
+    _awaitingClaudeBaselineMessageCount = 0;
+    [self presentClaudeWaiting:NO forSessionID:finishedSessionID];
+}
+
+- (void)reconcileAwaitingClaudeReplyWithSession:(PTSessionInfo *)session {
+    if (!_awaitingClaudeReply || ![session.sessionID isEqual:_awaitingClaudeSessionID]) return;
+    NSArray<NSDictionary *> *messages = session.assistantMessages ?: @[];
+    if (messages.count <= _awaitingClaudeBaselineMessageCount) return;
+    for (NSUInteger index = _awaitingClaudeBaselineMessageCount; index < messages.count; index++) {
+        NSString *role = [messages[index][@"role"] isKindOfClass:NSString.class]
+            ? messages[index][@"role"] : @"";
+        if (![role isEqual:@"user"]) {
+            [self finishAwaitingClaudeReplyForSessionID:session.sessionID];
+            _statusLabel.stringValue = PTL(@"Claude 已开始回复", @"Claude has started responding");
+            return;
+        }
+    }
+}
+
 - (void)updateFloatingControls {
     BOOL hasSelection = _selectedSession.sessionID.length > 0;
     BOOL showingSelection = _floatingPanel.visible &&
@@ -2909,21 +3437,26 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         session.assistantMessages.count
     )) return;
 
-    NSDictionary *payload = @{
+    NSUInteger messageCount = session.assistantMessages.count;
+    BOOL canAppend = [_floatingRenderedSessionID isEqual:session.sessionID] &&
+        _floatingRenderedModifiedAt != nil && _floatingRenderedMessageCount < messageCount;
+
+    // 与主窗口同一套策略：追加时不再序列化整份历史消息（JS 侧会直接丢弃）。
+    NSMutableDictionary *payload = [@{
         @"sessionId": session.sessionID ?: @"",
         @"title": session.title ?: @"未命名会话",
         @"cwd": session.cwd ?: @"",
         @"model": session.model ?: @"Claude",
         @"interfaceLanguage": PTInterfaceLanguageCode(),
-        @"messages": session.assistantMessages ?: @[]
-    };
+        @"awaitingReply": @(_awaitingClaudeReply &&
+            [_awaitingClaudeSessionID isEqual:session.sessionID])
+    } mutableCopy];
+    if (!canAppend) payload[@"messages"] = session.assistantMessages ?: @[];
+
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
     NSString *json = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
     if (!json) return;
 
-    NSUInteger messageCount = session.assistantMessages.count;
-    BOOL canAppend = [_floatingRenderedSessionID isEqual:session.sessionID] &&
-        _floatingRenderedModifiedAt != nil && _floatingRenderedMessageCount < messageCount;
     NSString *script = nil;
     if (canAppend) {
         NSArray *incoming = [session.assistantMessages subarrayWithRange:
@@ -2933,7 +3466,10 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
             ? [[NSString alloc] initWithData:incomingData encoding:NSUTF8StringEncoding] : nil;
         if (incomingJSON) {
             script = [NSString stringWithFormat:
-                @"window.appendClaudeMessages(%@, %@); null;", json, incomingJSON];
+                @"(function(){var m=%@;"
+                 "if(!window.__ptSessionMatches||!window.__ptSessionMatches(m))return 0;"
+                 "window.appendClaudeMessages(m,%@);return 1;})()",
+                json, incomingJSON];
         }
     }
     if (!script) script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
@@ -2943,13 +3479,16 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingRenderInFlight = YES;
     __weak typeof(self) weakSelf = self;
     [_floatingConversationView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
-        (void)result;
         PTAppDelegate *self = weakSelf;
         if (!self) return;
         self->_floatingRenderInFlight = NO;
+        // 握手返回 0 表示悬浮窗的 JS 状态已不是这个会话，这次追加没生效。
+        // 这不是错误，只要清掉水位让下一轮重发完整快照即可，不该报"显示更新失败"。
+        BOOL appendRejected = canAppend && [result isKindOfClass:NSNumber.class] &&
+            ![(NSNumber *)result boolValue];
         BOOL stillCurrent = generation == self->_floatingRenderGeneration &&
             self->_floatingPanel.visible && [self->_floatingSessionID isEqual:targetSessionID];
-        if (stillCurrent && !error) {
+        if (stillCurrent && !error && !appendRejected) {
             self->_floatingRenderedSessionID = targetSessionID;
             self->_floatingRenderedModifiedAt = targetModifiedAt;
             self->_floatingRenderedMessageCount = session.assistantMessages.count;
@@ -2957,7 +3496,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
             self->_floatingRenderedSessionID = nil;
             self->_floatingRenderedModifiedAt = nil;
             self->_floatingRenderedMessageCount = 0;
-            self->_floatingPanel.title = @"悬浮对话 · 显示更新失败";
+            if (error) self->_floatingPanel.title = @"悬浮对话 · 显示更新失败";
         }
         self->_pendingFloatingSession = nil;
         PTSessionInfo *pending = [self sessionWithID:self->_floatingSessionID];
@@ -3439,7 +3978,9 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (void)updateFloatingTitleForSession:(PTSessionInfo *)session {
     if (!_floatingPanel || !session) return;
     NSString *quota = _planUsageAvailable
-        ? [NSString stringWithFormat:@"5h %.0f%% · 7d %.0f%%", _fiveHourPercent, _sevenDayPercent]
+        ? [NSString stringWithFormat:@"5h %@%% · 7d %@%%",
+            _fiveHourPercent < 10.0 ? [NSString stringWithFormat:@"%.1f", _fiveHourPercent] : [NSString stringWithFormat:@"%.0f", _fiveHourPercent],
+            _sevenDayPercent < 10.0 ? [NSString stringWithFormat:@"%.1f", _sevenDayPercent] : [NSString stringWithFormat:@"%.0f", _sevenDayPercent]]
         : @"额度 —";
     NSString *cost = session.apiCostAvailable
         ? [NSString stringWithFormat:@"API≈%@", PTAPIEquivalentCostDisplay(session.apiEquivalentCostUSD)]
@@ -3448,34 +3989,230 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         session.title ?: @"悬浮对话", quota, cost];
 }
 
+static NSColor *PTQuotaTierColor(double percent) {
+    if (percent >= 90.0) return NSColor.systemRedColor;
+    if (percent >= 60.0) return NSColor.systemOrangeColor;
+    return NSColor.systemGreenColor;
+}
+
+static NSString *PTContextCategoryDisplayName(NSString *key) {
+    NSDictionary<NSString *, NSArray<NSString *> *> *names = @{
+        @"system_prompt": @[@"系统提示词", @"System prompt"],
+        @"system_tools": @[@"系统工具", @"System tools"],
+        @"memory_files": @[@"记忆文件", @"Memory files"],
+        @"skills": @[@"Skills", @"Skills"],
+        @"messages": @[@"消息", @"Messages"],
+        @"free_space": @[@"剩余空间", @"Free space"],
+        @"autocompact_buffer": @[@"自动压缩缓冲", @"Autocompact buffer"]
+    };
+    NSArray<NSString *> *localized = names[key];
+    return localized ? PTL(localized[0], localized[1]) : key;
+}
+
+- (void)clearContextBreakdownRows {
+    for (NSView *view in _inspectorContextDetailStack.arrangedSubviews.copy) {
+        [_inspectorContextDetailStack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+}
+
+- (void)rebuildContextBreakdownRows:(NSArray<NSDictionary *> *)breakdown {
+    [self clearContextBreakdownRows];
+    NSDictionary<NSString *, NSColor *> *colors = @{
+        @"system_prompt": NSColor.systemGrayColor,
+        @"system_tools": PTWarmBorderColor(),
+        @"memory_files": NSColor.systemPinkColor,
+        @"skills": NSColor.systemOrangeColor,
+        @"messages": NSColor.systemPurpleColor,
+        @"free_space": NSColor.systemGreenColor,
+        @"autocompact_buffer": NSColor.tertiaryLabelColor
+    };
+    for (NSDictionary *entry in breakdown) {
+        NSString *key = [entry[@"category"] isKindOfClass:NSString.class]
+            ? entry[@"category"] : @"";
+        NSColor *color = colors[key] ?: PTWarmAccentColor();
+        double percentage = [entry[@"percentage"] doubleValue];
+
+        NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        NSTextField *dot = [self label:@"●" size:8.5 weight:NSFontWeightBold color:color];
+        NSTextField *name = [self label:PTContextCategoryDisplayName(key)
+                                   size:10.5 weight:NSFontWeightMedium color:NSColor.labelColor];
+        NSTextField *value = [self label:[NSString stringWithFormat:@"%@ · %.1f%%",
+            PTCompactTokenCount([entry[@"tokens"] unsignedIntegerValue]), percentage]
+                                    size:10.5 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+        value.font = [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightSemibold];
+        PTMeterView *meter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
+        meter.translatesAutoresizingMaskIntoConstraints = NO;
+        meter.progress = percentage / 100.0;
+        meter.fillColor = color;
+        [row addSubview:dot];
+        [row addSubview:name];
+        [row addSubview:value];
+        [row addSubview:meter];
+        [NSLayoutConstraint activateConstraints:@[
+            [dot.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [dot.firstBaselineAnchor constraintEqualToAnchor:name.firstBaselineAnchor],
+            [name.topAnchor constraintEqualToAnchor:row.topAnchor],
+            [name.leadingAnchor constraintEqualToAnchor:dot.trailingAnchor constant:5],
+            [value.firstBaselineAnchor constraintEqualToAnchor:name.firstBaselineAnchor],
+            [value.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [value.leadingAnchor constraintGreaterThanOrEqualToAnchor:name.trailingAnchor constant:6],
+            [meter.topAnchor constraintEqualToAnchor:name.bottomAnchor constant:4],
+            [meter.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [meter.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [meter.heightAnchor constraintEqualToConstant:4],
+            [meter.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
+        ]];
+        [_inspectorContextDetailStack addArrangedSubview:row];
+        [row.widthAnchor constraintEqualToAnchor:_inspectorContextDetailStack.widthAnchor].active = YES;
+    }
+}
+
+- (void)clearCostBreakdownRows {
+    for (NSView *view in _inspectorCostDetailStack.arrangedSubviews.copy) {
+        [_inspectorCostDetailStack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+}
+
+- (void)rebuildCostBreakdownRows:(NSDictionary<NSString *, NSDictionary *> *)breakdown {
+    NSArray<NSString *> *modelKeys = [breakdown.allKeys sortedArrayUsingComparator:
+        ^NSComparisonResult(NSString *modelA, NSString *modelB) {
+            double costA = [breakdown[modelA][@"cost"] doubleValue];
+            double costB = [breakdown[modelB][@"cost"] doubleValue];
+            return costA < costB ? NSOrderedDescending : (costA > costB ? NSOrderedAscending : NSOrderedSame);
+        }];
+    [self clearCostBreakdownRows];
+
+    NSArray<NSColor *> *modelColors = @[PTWarmAccentColor(), NSColor.systemBlueColor,
+        NSColor.systemPurpleColor, NSColor.systemTealColor];
+    NSUInteger colorIndex = 0;
+    for (NSString *modelKey in modelKeys) {
+        NSDictionary *entry = breakdown[modelKey];
+        double modelCost = [entry[@"cost"] doubleValue];
+        double share = _selectedSession.apiEquivalentCostUSD > 0
+            ? modelCost / _selectedSession.apiEquivalentCostUSD : 0;
+
+        NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        NSTextField *nameLabel = [self label:modelKey size:11 weight:NSFontWeightSemibold color:NSColor.labelColor];
+        NSTextField *costLabel = [self label:PTAPIEquivalentCostDisplay(modelCost) size:11 weight:NSFontWeightBold color:NSColor.labelColor];
+        PTMeterView *meter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
+        meter.translatesAutoresizingMaskIntoConstraints = NO;
+        meter.progress = share;
+        meter.fillColor = modelColors[colorIndex % modelColors.count];
+        colorIndex++;
+        NSTextField *tokenCaption = [self label:[NSString stringWithFormat:
+            @"%@ input · %@ output · %@ cache read · %@ cache write",
+            PTCompactTokenCount([entry[@"input"] unsignedIntegerValue]),
+            PTCompactTokenCount([entry[@"output"] unsignedIntegerValue]),
+            PTCompactTokenCount([entry[@"cacheRead"] unsignedIntegerValue]),
+            PTCompactTokenCount([entry[@"cacheWrite"] unsignedIntegerValue])]
+            size:10 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
+        tokenCaption.lineBreakMode = NSLineBreakByWordWrapping;
+        tokenCaption.maximumNumberOfLines = 0;
+
+        [row addSubview:nameLabel];
+        [row addSubview:costLabel];
+        [row addSubview:meter];
+        [row addSubview:tokenCaption];
+        [NSLayoutConstraint activateConstraints:@[
+            [nameLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+            [nameLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [costLabel.firstBaselineAnchor constraintEqualToAnchor:nameLabel.firstBaselineAnchor],
+            [costLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [costLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:nameLabel.trailingAnchor constant:6],
+            [meter.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:5],
+            [meter.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [meter.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [meter.heightAnchor constraintEqualToConstant:5],
+            [tokenCaption.topAnchor constraintEqualToAnchor:meter.bottomAnchor constant:4],
+            [tokenCaption.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+            [tokenCaption.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+            [tokenCaption.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
+        ]];
+        [_inspectorCostDetailStack addArrangedSubview:row];
+        [row.widthAnchor constraintEqualToAnchor:_inspectorCostDetailStack.widthAnchor].active = YES;
+    }
+}
+
 - (void)updateUsageDisplays {
     if (_planUsageAvailable) {
-        _quotaLabel.stringValue = [NSString stringWithFormat:@"5h %.0f%% · 7d %.0f%%",
-            _fiveHourPercent, _sevenDayPercent];
+        NSString *fivePercentText = _fiveHourPercent < 10.0
+            ? [NSString stringWithFormat:@"%.1f", _fiveHourPercent]
+            : [NSString stringWithFormat:@"%.0f", _fiveHourPercent];
+        NSString *sevenPercentText = _sevenDayPercent < 10.0
+            ? [NSString stringWithFormat:@"%.1f", _sevenDayPercent]
+            : [NSString stringWithFormat:@"%.0f", _sevenDayPercent];
+        _quotaLabel.stringValue = [NSString stringWithFormat:@"5h %@%% · 7d %@%%",
+            fivePercentText, sevenPercentText];
         _quotaLabel.textColor = MAX(_fiveHourPercent, _sevenDayPercent) >= 80.0
             ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
-        NSString *fiveReset = PTResetDescription(_fiveHourResetAt, NSDate.date);
-        NSString *sevenReset = PTResetDescription(_sevenDayResetAt, NSDate.date);
+        NSString *fiveCountdown = PTCountdownDescription(_fiveHourResetAt, NSDate.date);
+        NSString *sevenCountdown = PTCountdownDescription(_sevenDayResetAt, NSDate.date);
         _quotaLabel.toolTip = [NSString stringWithFormat:
-            PTL(@"5 小时：%.0f%%，%@\n7 天：%.0f%%，%@\n由 Claude Code 每 5 分钟更新",
-                @"5 hours: %.0f%%, %@\n7 days: %.0f%%, %@\nUpdated by Claude Code every 5 minutes"),
-            _fiveHourPercent, fiveReset, _sevenDayPercent, sevenReset];
-        _inspectorQuotaLabel.stringValue = [NSString stringWithFormat:
-            @"5 小时 %.0f%% · %@\n7 天 %.0f%% · %@",
-            _fiveHourPercent, fiveReset, _sevenDayPercent, sevenReset];
+            PTL(@"5 小时：%@%%，%@\n7 天：%@%%，%@\nPrettyTerm 每分钟自动刷新",
+                @"5 hours: %@%%, %@\n7 days: %@%%, %@\nPrettyTerm auto-refreshes every minute"),
+            fivePercentText, fiveCountdown, sevenPercentText, sevenCountdown];
+
+        _inspectorFiveHourPercentLabel.stringValue = [NSString stringWithFormat:@"%@%%", fivePercentText];
+        _inspectorFiveHourPercentLabel.textColor = PTQuotaTierColor(_fiveHourPercent);
+        _inspectorFiveHourMeter.progress = _fiveHourPercent / 100.0;
+        _inspectorFiveHourMeter.fillColor = PTQuotaTierColor(_fiveHourPercent);
+        _inspectorFiveHourCaption.stringValue = fiveCountdown;
+
+        _inspectorSevenDayPercentLabel.stringValue = [NSString stringWithFormat:@"%@%%", sevenPercentText];
+        _inspectorSevenDayPercentLabel.textColor = PTQuotaTierColor(_sevenDayPercent);
+        _inspectorSevenDayMeter.progress = _sevenDayPercent / 100.0;
+        _inspectorSevenDayMeter.fillColor = PTQuotaTierColor(_sevenDayPercent);
+        _inspectorSevenDayCaption.stringValue = sevenCountdown;
     } else {
         _quotaLabel.stringValue = @"5h — · 7d —";
         _quotaLabel.textColor = NSColor.secondaryLabelColor;
         NSString *reason = _planUsageError.length ? _planUsageError : @"正在读取 Claude 套餐额度";
         _quotaLabel.toolTip = reason;
-        _inspectorQuotaLabel.stringValue = [NSString stringWithFormat:@"暂不可用\n%@", reason];
+
+        _inspectorFiveHourPercentLabel.stringValue = @"—";
+        _inspectorFiveHourPercentLabel.textColor = NSColor.labelColor;
+        _inspectorFiveHourMeter.progress = 0;
+        _inspectorFiveHourCaption.stringValue = reason;
+
+        _inspectorSevenDayPercentLabel.stringValue = @"—";
+        _inspectorSevenDayPercentLabel.textColor = NSColor.labelColor;
+        _inspectorSevenDayMeter.progress = 0;
+        _inspectorSevenDayCaption.stringValue = reason;
     }
 
     if (_selectedSession.apiCostAvailable) {
-        _inspectorCostLabel.stringValue = [NSString stringWithFormat:@"≈ %@\n按官方 API 单价估算\n非订阅实际扣款",
-            PTAPIEquivalentCostDisplay(_selectedSession.apiEquivalentCostUSD)];
-    } else {
-        _inspectorCostLabel.stringValue = @"暂无可计价 usage\n仅作 API 等价估算";
+        _inspectorCostHeadline.stringValue = PTAPIEquivalentCostDisplay(_selectedSession.apiEquivalentCostUSD);
+        if (_selectedSession.codeLinesAdded > 0 || _selectedSession.codeLinesRemoved > 0) {
+            NSMutableAttributedString *pill = [[NSMutableAttributedString alloc] init];
+            NSFont *pillFont = [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightSemibold];
+            [pill appendAttributedString:[[NSAttributedString alloc]
+                initWithString:[NSString stringWithFormat:@" +%lu ", (unsigned long)_selectedSession.codeLinesAdded]
+                    attributes:@{NSForegroundColorAttributeName: NSColor.systemGreenColor, NSFontAttributeName: pillFont}]];
+            [pill appendAttributedString:[[NSAttributedString alloc]
+                initWithString:[NSString stringWithFormat:@"/ -%lu ", (unsigned long)_selectedSession.codeLinesRemoved]
+                    attributes:@{NSForegroundColorAttributeName: NSColor.systemRedColor, NSFontAttributeName: pillFont}]];
+            _inspectorCostChangesPill.attributedStringValue = pill;
+            _inspectorCostChangesPill.hidden = NO;
+        } else {
+            _inspectorCostChangesPill.hidden = YES;
+        }
+
+        // 跟 changedFiles / tasks 一样按值比较：这段每次 transcript 变动都会被调到，
+        // 无条件重建整棵子视图树 + 重新激活 Auto Layout 约束会白白拖慢主线程。
+        NSDictionary<NSString *, NSDictionary *> *breakdown = _selectedSession.modelUsageBreakdown ?: @{};
+        if (![_renderedCostBreakdown isEqualToDictionary:breakdown]) {
+            _renderedCostBreakdown = [breakdown copy];
+            [self rebuildCostBreakdownRows:breakdown];
+        }
+    } else if (!_renderedCostBreakdown || _renderedCostBreakdown.count > 0) {
+        _renderedCostBreakdown = @{};
+        _inspectorCostHeadline.stringValue = PTL(@"暂无可计价 usage", @"No priceable usage yet");
+        _inspectorCostChangesPill.hidden = YES;
+        [self clearCostBreakdownRows];
     }
 
     if (_floatingPanel.visible && _floatingSessionID.length) {
@@ -3516,12 +4253,12 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSString *claudePath = PTClaudeExecutablePath();
-        NSString *output = claudePath.length ? PTRunTool(claudePath, @[
+        NSString *output = claudePath.length ? PTRunToolWithEnvironment(claudePath, @[
             @"-p", @"/usage",
             @"--max-budget-usd", @"0.000001",
             @"--output-format", @"json",
             @"--no-session-persistence"
-        ]) : @"";
+        ], @{ @"TZ": @"UTC" }) : @"";
         NSDictionary *payload = PTClaudePlanUsageFromCommandOutput(output, NSDate.date);
         dispatch_async(dispatch_get_main_queue(), ^{
             [weakSelf finishClaudeUsageWithPayload:payload error:payload
@@ -4063,10 +4800,27 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (void)updateInspectorForSession:(PTSessionInfo *)session {
     if (!session) return;
     [self rememberGitDirectoriesForSession:session];
-    _inspectorContextLabel.stringValue = session.contextUsed > 0
+    BOOL hasContextUsage = session.contextUsed > 0 && session.contextWindow > 0;
+    double contextRatio = hasContextUsage
+        ? MIN(1.0, (double)session.contextUsed / (double)session.contextWindow) : 0;
+    _inspectorContextLabel.stringValue = hasContextUsage
         ? [NSString stringWithFormat:@"%@ / %@ tokens",
             PTCompactTokenCount(session.contextUsed), PTCompactTokenCount(session.contextWindow)]
-        : @"暂无 usage 数据";
+        : PTL(@"暂无 usage 数据", @"No usage data yet");
+    _inspectorContextPercentLabel.stringValue = hasContextUsage
+        ? [NSString stringWithFormat:(contextRatio * 100.0 < 10.0 ? @"%.1f%%" : @"%.0f%%"),
+            contextRatio * 100.0]
+        : @"—";
+    _inspectorContextMeter.progress = contextRatio;
+    _inspectorContextMeter.fillColor = PTWarmAccentColor();
+
+    NSArray<NSDictionary *> *contextBreakdown = session.contextBreakdown ?: @[];
+    _contextDisclosureButton.enabled = contextBreakdown.count > 0;
+    if (![_renderedContextBreakdown isEqualToArray:contextBreakdown]) {
+        _renderedContextBreakdown = [contextBreakdown copy];
+        [self rebuildContextBreakdownRows:contextBreakdown];
+    }
+    _inspectorContextDetailStack.hidden = !_contextDetailExpanded || contextBreakdown.count == 0;
     [self updateUsageDisplays];
 
     NSArray<NSDictionary *> *changedFiles = session.changedFiles ?: @[];
@@ -4167,6 +4921,23 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _inspectorView.hidden = !_inspectorView.hidden;
     _inspectorToggleButton.title = _inspectorView.hidden
         ? PTL(@"显示", @"Show") : PTL(@"检查器", @"Inspect");
+}
+
+- (void)toggleContextDetail:(id)sender {
+    (void)sender;
+    if (!_contextDisclosureButton.enabled) return;
+    _contextDetailExpanded = !_contextDetailExpanded;
+    _inspectorContextDetailStack.hidden = !_contextDetailExpanded;
+    _contextDisclosureButton.title = _contextDetailExpanded
+        ? PTL(@"详情 ⌄", @"Details ⌄") : PTL(@"详情 ›", @"Details ›");
+}
+
+- (void)toggleCostDetail:(id)sender {
+    (void)sender;
+    _costDetailExpanded = !_costDetailExpanded;
+    _inspectorCostDetailStack.hidden = !_costDetailExpanded;
+    _costDisclosureButton.title = _costDetailExpanded
+        ? PTL(@"详情 ⌄", @"Details ⌄") : PTL(@"详情 ›", @"Details ›");
 }
 
 - (NSArray<NSDictionary *> *)transcriptEditEventsForSession:(PTSessionInfo *)session
@@ -4288,6 +5059,9 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         self->_statusLabel.stringValue = status;
         self->_connecting = NO;
         self->_agentState.sendInFlight = NO;
+        if (!self->_bridge.running && self->_awaitingClaudeReply) {
+            [self finishAwaitingClaudeReplyForSessionID:self->_awaitingClaudeSessionID];
+        }
         [self refreshAgentStateAndControls];
         [self updateConnectButtonTitle];
     };
@@ -4304,6 +5078,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (void)applySessions:(NSArray<PTSessionInfo *> *)sessions {
     NSMutableArray<NSString *> *signatureParts = [NSMutableArray arrayWithCapacity:sessions.count];
     for (PTSessionInfo *session in sessions) {
+        [self reconcileAwaitingClaudeReplyWithSession:session];
         [signatureParts addObject:[NSString stringWithFormat:@"%@|%.6f|%lu|%@",
             session.sessionID,
             session.modifiedAt.timeIntervalSince1970,
@@ -4428,20 +5203,29 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         messageCount
     )) return;
 
-    NSDictionary *payload = @{
+    BOOL canAppend = [_renderedSessionID isEqual:session.sessionID] &&
+        _renderedModifiedAt != nil && _renderedMessageCount < messageCount;
+
+    // 追加渲染时不再序列化整份历史消息：app.js 的 appendClaudeMessages 收到
+    // 后第一件事就是 delete metadata.messages，只用元数据 + 增量那几条。
+    // 真实 7.7MB transcript 上，全量 payload 每次要在主线程生成 3.6MB 脚本
+    // （约 17ms，还不含 WebView 解析这 3.6MB 源码的开销），而只传元数据是 10KB。
+    NSMutableDictionary *payload = [@{
         @"sessionId": session.sessionID ?: @"",
         @"title": session.title ?: @"未命名会话",
         @"cwd": session.cwd ?: @"",
         @"model": session.model ?: @"Claude",
         @"interfaceLanguage": PTInterfaceLanguageCode(),
-        @"messages": session.assistantMessages ?: @[]
-    };
+        @"awaitingReply": @(_awaitingClaudeReply &&
+            [_awaitingClaudeSessionID isEqual:session.sessionID])
+    } mutableCopy];
+    if (!canAppend) payload[@"messages"] = session.assistantMessages ?: @[];
+
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
     if (!jsonData) return;
     NSString *json = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     if (!json) return;
-    BOOL canAppend = [_renderedSessionID isEqual:session.sessionID] &&
-        _renderedModifiedAt != nil && _renderedMessageCount < messageCount;
+
     NSString *script = nil;
     if (canAppend) {
         NSArray *incoming = [session.assistantMessages subarrayWithRange:
@@ -4450,8 +5234,14 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         NSString *incomingJSON = incomingData
             ? [[NSString alloc] initWithData:incomingData encoding:NSUTF8StringEncoding] : nil;
         if (incomingJSON) {
+            // 元数据里没有 messages，一旦 WebView 悄悄重载过、JS 侧状态已丢，
+            // 走 append 会把对话清空。所以先同步握手确认 JS 还持有同一个会话，
+            // 不匹配就返回 0，让原生回退到完整快照重发。
             script = [NSString stringWithFormat:
-                @"window.appendClaudeMessages(%@, %@); null;", json, incomingJSON];
+                @"(function(){var m=%@;"
+                 "if(!window.__ptSessionMatches||!window.__ptSessionMatches(m))return 0;"
+                 "window.appendClaudeMessages(m,%@);return 1;})()",
+                json, incomingJSON];
         }
     }
     if (!script) script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
@@ -4459,15 +5249,20 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _renderInFlight = YES;
     __weak typeof(self) weakSelf = self;
     [_conversationView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
-        (void)result;
         PTAppDelegate *self = weakSelf;
         if (!self) return;
         self->_renderInFlight = NO;
-        if (error) {
+        // 握手返回 0 = JS 侧已经不是这个会话了（WebView 重载过）。
+        // 这次追加没有生效，清掉渲染水位让下一轮重发完整快照。
+        BOOL appendRejected = canAppend && [result isKindOfClass:NSNumber.class] &&
+            ![(NSNumber *)result boolValue];
+        if (error || appendRejected) {
             self->_renderedSessionID = nil;
             self->_renderedMessageCount = 0;
             self->_renderedModifiedAt = nil;
-            self->_statusLabel.stringValue = PTL(@"显示更新失败，正在重新同步完整会话…", @"Display update failed; resyncing the full conversation…");
+            if (error) {
+                self->_statusLabel.stringValue = PTL(@"显示更新失败，正在重新同步完整会话…", @"Display update failed; resyncing the full conversation…");
+            }
         } else {
             self->_renderedSessionID = session.sessionID;
             self->_renderedMessageCount = messageCount;
@@ -4740,6 +5535,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     // 只有 Terminal 真正接受后才清空。之前桥接失败时输入框仍被无条件清空，
     // 从老师视角看就是“消息发不出去还凭空消失”，也丢掉了重试机会。
     [self sendOutgoingMessage:message images:images forSessionID:_selectedSession.sessionID success:^{
+        [self beginAwaitingClaudeReplyForSessionID:self->_selectedSession.sessionID];
         [_composerTextView clearAfterSuccessfulSubmissionMatchingText:message];
         // 回车触发发送时，输入法可能在 keyDown: 返回后才结束当前事务；下一轮只在
         // 内容仍等于已发送快照时补做一次，因此不会误删随后键入的新内容。
@@ -4755,6 +5551,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSString *message = _floatingComposerTextView.string;
     NSArray<NSImage *> *images = [self floatingPendingImagesForClaude];
     [self sendOutgoingMessage:message images:images forSessionID:_floatingSessionID success:^{
+        [self beginAwaitingClaudeReplyForSessionID:self->_floatingSessionID];
         [_floatingComposerTextView clearAfterSuccessfulSubmissionMatchingText:message];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self->_floatingComposerTextView clearAfterSuccessfulSubmissionMatchingText:message];

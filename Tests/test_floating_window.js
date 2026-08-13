@@ -53,6 +53,14 @@ test('successful sends clear both composers through the native text editing tran
   assert.doesNotMatch(floatingSend, /_floatingComposerTextView\.string\s*=\s*@""/);
 });
 
+test('successful messages show one real waiting state until transcript activity arrives', () => {
+  assert.match(source, /beginAwaitingClaudeReplyForSessionID:self->_selectedSession\.sessionID/);
+  assert.match(source, /beginAwaitingClaudeReplyForSessionID:self->_floatingSessionID/);
+  assert.match(source, /reconcileAwaitingClaudeReplyWithSession:/);
+  assert.match(source, /window\.setClaudeWaiting/);
+  assert.match(source, /@"awaitingReply"/);
+});
+
 test('both windows append new JSONL messages and retain full-snapshot recovery', () => {
   const mainRender = source.match(
     /- \(void\)renderSession:\(PTSessionInfo \*\)session[\s\S]*?(?=\n- \([^\n]+\))/
@@ -237,4 +245,8 @@ test('plan usage delegates authentication to Claude Code without app authorizati
   assert.doesNotMatch(source, /api\/oauth\/usage|find-generic-password/);
   assert.match(source, /@"-p", @"\/usage"/);
   assert.match(source, /@"--no-session-persistence"/);
+  assert.match(source, /PTRunToolWithEnvironment[\s\S]*?@\{ @"TZ": @"UTC" \}/);
+  assert.match(source, /_inspectorFiveHourCaption\.stringValue\s*=\s*fiveCountdown/);
+  assert.match(source, /_inspectorSevenDayCaption\.stringValue\s*=\s*sevenCountdown/);
+  assert.doesNotMatch(source, /PTL\(@"%@后重置",\s*@"resets in %@"\)/);
 });

@@ -11,8 +11,8 @@ FOUNDATION_EXPORT double PTAPIEquivalentCostForUsage(NSString *model,
 
 FOUNDATION_EXPORT NSString *PTAPIEquivalentCostDisplay(double costUSD);
 FOUNDATION_EXPORT NSDate * _Nullable PTDateFromClaudeAPIString(NSString *value);
-FOUNDATION_EXPORT NSString *PTResetDescription(NSDate * _Nullable resetDate,
-                                               NSDate *now);
+FOUNDATION_EXPORT NSString *PTCountdownDescription(NSDate * _Nullable targetDate,
+                                                   NSDate *now);
 
 /// Parses the zero-turn JSON result produced by `claude -p /usage`.
 /// PrettyTerm delegates authentication and token refresh to the installed Claude Code binary.

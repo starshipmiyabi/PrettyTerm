@@ -14,11 +14,12 @@ PrettyTerm is a lightweight native macOS companion for Claude Code sessions runn
 - Bundled MathJax rendering for inline and display LaTeX.
 - Expandable thinking, tool, error, and line-by-line diff events; per-file diffs start collapsed.
 - Codex-style edited-file summaries at the end of each turn, with one-click access to that turn's recorded `Edit` / `Write` review without running Git.
-- Inspector for connection state, context usage, plan limits, estimated API-equivalent cost, changed files, tasks, an expandable native Git review, and explicit Git publishing actions.
+- Inspector for connection state, persistent context usage metering with collapsible `/context` category details, plan limits, estimated API-equivalent cost, changed files, tasks, an expandable native Git review, and explicit Git publishing actions.
 - Remembered Git observation directories discovered from the selected Claude Code transcript, plus manually added directories.
 - Always-on-top floating conversation window.
 - Text and image composition shared by the main and floating windows.
 - One-click **Compact** control that sends the exact `/compact` command to the currently verified Terminal conversation.
+- Transcript-aware waiting animation that appears after a successful message send and disappears when Claude's first real reply or tool event reaches the local JSONL transcript.
 - Warm beige and deep-orange light and dark appearances designed to reduce glare.
 - Built-in Simplified Chinese and English interface selection, persisted locally across launches.
 
@@ -73,9 +74,15 @@ Create the versioned DMG and `SHA256SUMS.txt` with:
 
 ## How It Works
 
-PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders a read-only conversation snapshot in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. When the inspector changes width, PrettyTerm preserves a character-level reading anchor so text reflow does not jump the conversation to another passage. Sending remains anchored to Apple Terminal: PrettyTerm validates the selected Claude PID, TTY, exact process name, and session before writing to the bound tab. Every text submission ends with one additional, independently delivered Return after the body, preventing Terminal's body-adjacent Return from being absorbed as paste input.
+PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders a read-only conversation snapshot in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. A session handshake prevents metadata-only appends from clearing the conversation if WebKit has reloaded. When the inspector changes width, PrettyTerm preserves a character-level reading anchor so text reflow does not jump the conversation to another passage. Sending remains anchored to Apple Terminal: PrettyTerm validates the selected Claude PID, TTY, exact process name, and session before writing to the bound tab. Every text submission ends with one additional, independently delivered Return after the body, preventing Terminal's body-adjacent Return from being absorbed as paste input. After Terminal accepts a message, a transcript-aware waiting signal remains visible until Claude's first real reply or tool event arrives.
 
 PrettyTerm does not replace Claude Code or run a separate agent service. Claude.ai Remote Control is intentionally disabled.
+
+## Context and Usage Inspector
+
+The context card always keeps the latest total token count, percentage, and progress meter visible. Its optional details are sourced from Claude Code's real `/context` transcript records and start collapsed. When available, PrettyTerm shows System prompt, System tools, Memory files, Skills, Messages, Free space, and Autocompact buffer without estimating missing categories or counting deferred tools as loaded context.
+
+Plan-limit data comes from Claude Code's zero-turn `/usage` command running with a UTC environment. PrettyTerm accepts both exact-hour and minute reset formats, refreshes once per minute, and presents only countdown durations in the selected interface language.
 
 ## Terminal Submission Reliability
 

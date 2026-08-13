@@ -20,6 +20,25 @@ test('assistant text is flat inside a Reasonix-style turn', () => {
   assert.doesNotMatch(html, /class="[^"]*assistant-text[^"]*card/);
 });
 
+test('a real waiting state renders the animated Terminal-to-Claude signal route', () => {
+  const html = renderer.renderSession({
+    sessionId: 'waiting-session',
+    awaitingReply: true,
+    messages: [{ role: 'user', text: '请继续' }]
+  });
+
+  assert.match(html, /class="claude-waiting"/);
+  assert.match(html, /Claude 正在组织思路/);
+  assert.match(html, /class="claude-mark"/);
+  assert.match(html, /aria-label="Claude"/);
+  assert.equal((html.match(/class="thought-packet"/g) || []).length, 3);
+  assert.doesNotMatch(
+    renderer.renderSession({ awaitingReply: false, messages: [{ role: 'user', text: '完成' }] }),
+    /claude-waiting/
+  );
+  assert.equal(typeof renderer.setClaudeWaiting, 'function');
+});
+
 test('thinking, tools, and per-file diffs start folded while errors start open', () => {
   const thinking = renderer.renderEvent({ kind: 'thinking', text: '分析中' }, {});
   const tool = renderer.renderEvent({ kind: 'tool', toolName: 'Read', text: '读取文件' }, {});
@@ -237,4 +256,41 @@ test('quote selection accepts one assistant message and rejects unsafe ranges', 
     ),
     null
   );
+});
+
+// 追加渲染时原生只发元数据（不含 messages），省掉每次几 MB 的序列化。
+// 这条捷径的安全前提就是这个握手：JS 状态一旦不是同一个会话，必须拒绝，
+// 否则拿着空 messages 去渲染会把整个对话清空。
+test('metadata-only appends are gated by an explicit session handshake', async () => {
+  assert.equal(typeof renderer.sessionMatches, 'function');
+
+  // 尚未装载任何会话：拒绝，避免空 messages 覆盖。
+  assert.equal(renderer.sessionMatches({ sessionId: 's1' }), false);
+
+  await renderer.setClaudeSession({
+    sessionId: 's1',
+    model: 'Claude',
+    messages: [{ role: 'user', text: '第一条' }]
+  });
+
+  assert.equal(renderer.sessionMatches({ sessionId: 's1' }), true);
+  assert.equal(renderer.sessionMatches({ sessionId: 's2' }), false);
+  assert.equal(renderer.sessionMatches({}), false);
+  assert.equal(renderer.sessionMatches(null), false);
+
+  // 会话不匹配且没有 messages 时，必须原地不动等原生重发完整快照，
+  // 而不是把已渲染的内容清掉。
+  const before = renderer.renderSession;
+  await renderer.appendClaudeMessages({ sessionId: 's2', model: 'Claude' }, [
+    { role: 'assistant', text: '不该出现' }
+  ]);
+  assert.equal(typeof before, 'function');
+  assert.equal(renderer.sessionMatches({ sessionId: 's1' }), true,
+    'a rejected metadata-only append must not clobber the loaded session');
+
+  // 同一会话的元数据追加正常合并，并且不需要 messages 字段。
+  await renderer.appendClaudeMessages({ sessionId: 's1', model: 'Claude' }, [
+    { role: 'assistant', text: '第二条' }
+  ]);
+  assert.equal(renderer.sessionMatches({ sessionId: 's1' }), true);
 });

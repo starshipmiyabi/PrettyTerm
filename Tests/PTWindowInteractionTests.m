@@ -95,10 +95,17 @@ int main(void) {
         NSTextView *gitDiffTextView = [delegate valueForKey:@"gitDiffTextView"];
         NSProgressIndicator *gitDiffProgress = [delegate valueForKey:@"gitDiffProgress"];
         NSButton *compactButton = [delegate valueForKey:@"compactButton"];
+        NSTextField *contextLabel = [delegate valueForKey:@"inspectorContextLabel"];
+        NSTextField *contextPercent = [delegate valueForKey:@"inspectorContextPercentLabel"];
+        NSView *contextMeter = [delegate valueForKey:@"inspectorContextMeter"];
+        NSStackView *contextDetailStack = [delegate valueForKey:@"inspectorContextDetailStack"];
+        NSButton *contextDisclosure = [delegate valueForKey:@"contextDisclosureButton"];
         PTAssert(window != nil && changedFiles != nil && splitView != nil && inspector != nil &&
             gitDirectoryPicker != nil && removeGitDirectoryButton != nil &&
             gitDirectoryInput != nil && gitDirectoryHint != nil && gitDiffScroll != nil &&
-            gitDiffTextView != nil && gitDiffProgress != nil && compactButton != nil,
+            gitDiffTextView != nil && gitDiffProgress != nil && compactButton != nil &&
+            contextLabel != nil && contextPercent != nil && contextMeter != nil &&
+            contextDetailStack != nil && contextDisclosure != nil,
             @"window, inspector, Git controls, and changed-files stack must exist");
         PTAssert([compactButton.title isEqual:@"Compact"] &&
                  compactButton.action == NSSelectorFromString(@"compactConversation:") &&
@@ -149,8 +156,14 @@ int main(void) {
             @"thin inspector divider must expose a reliably draggable hit target");
 
         id session = [[NSClassFromString(@"PTSessionInfo") alloc] init];
-        [session setValue:@0 forKey:@"contextUsed"];
-        [session setValue:@200000 forKey:@"contextWindow"];
+        [session setValue:@56600 forKey:@"contextUsed"];
+        [session setValue:@967000 forKey:@"contextWindow"];
+        [session setValue:@[
+            @{@"category": @"system_prompt", @"tokens": @9300, @"percentage": @1.0},
+            @{@"category": @"messages", @"tokens": @22500, @"percentage": @2.3},
+            @{@"category": @"free_space", @"tokens": @877400, @"percentage": @90.7},
+            @{@"category": @"autocompact_buffer", @"tokens": @33000, @"percentage": @3.4}
+        ] forKey:@"contextBreakdown"];
         [session setValue:@"session-local-review" forKey:@"sessionID"];
         [session setValue:@[@"/tmp"] forKey:@"accessedDirectories"];
         [session setValue:@"/tmp" forKey:@"cwd"];
@@ -172,7 +185,39 @@ int main(void) {
             }
         ] forKey:@"assistantMessages"];
         [delegate setValue:session forKey:@"selectedSession"];
+        [delegate setValue:@[session] forKey:@"sessions"];
         PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
+        PTAssert([contextLabel.stringValue isEqual:@"57K / 967K tokens"] &&
+            [contextPercent.stringValue isEqual:@"5.9%"],
+            @"context card must keep the exact usage headline visible");
+        PTAssert([[contextMeter valueForKey:@"progress"] doubleValue] > 0.05 &&
+            contextDetailStack.hidden && contextDisclosure.enabled,
+            @"context status meter must stay visible while real category details start collapsed");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleContextDetail:"), nil);
+        PTAssert(!contextDetailStack.hidden && contextDetailStack.arrangedSubviews.count == 4,
+            @"context disclosure must expand the parsed /context categories");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleContextDetail:"), nil);
+        PTAssert(contextDetailStack.hidden && !contextMeter.hidden,
+            @"collapsing context details must never hide the persistent status meter");
+
+        NSArray *waitingBaseline = [[session valueForKey:@"assistantMessages"] copy];
+        PTCallOneObject(delegate,
+            NSSelectorFromString(@"beginAwaitingClaudeReplyForSessionID:"),
+            @"session-local-review");
+        PTAssert([[delegate valueForKey:@"awaitingClaudeReply"] boolValue],
+            @"a successfully submitted message must begin the visible Claude waiting state");
+        NSMutableArray *messagesWithActivity = [waitingBaseline mutableCopy];
+        [messagesWithActivity addObject:@{
+            @"role": @"assistant",
+            @"text": @"started",
+            @"messageKey": @"waiting-activity"
+        }];
+        [session setValue:messagesWithActivity forKey:@"assistantMessages"];
+        PTCallOneObject(delegate,
+            NSSelectorFromString(@"reconcileAwaitingClaudeReplyWithSession:"), session);
+        PTAssert(![[delegate valueForKey:@"awaitingClaudeReply"] boolValue],
+            @"the first real assistant transcript event must dismiss the waiting state");
+        [session setValue:waitingBaseline forKey:@"assistantMessages"];
 
         PTAssert([gitDirectoryPicker.selectedItem.representedObject isEqual:@"/tmp"],
             @"the inspector must remember and select directories observed in the Claude transcript");

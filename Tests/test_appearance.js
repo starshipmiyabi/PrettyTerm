@@ -61,3 +61,11 @@ test('assistant quote menu has native-like light and dark styling', () => {
   assert.match(html, /backdrop-filter:\s*blur/);
   assert.match(html, /@media[\s\S]*\.quote-menu\s*\{/);
 });
+
+test('the waiting signal has warm motion, dark styling, and reduced-motion behavior', () => {
+  assert.match(html, /\.claude-waiting\s*\{/);
+  assert.match(html, /@keyframes\s+packet-route/);
+  assert.match(html, /@keyframes\s+core-pulse/);
+  assert.match(html, /@media[\s\S]*\.claude-waiting\s*\{/);
+  assert.match(html, /prefers-reduced-motion[\s\S]*animation-duration:\s*\.001ms/);
+});

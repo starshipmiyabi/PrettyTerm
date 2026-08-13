@@ -69,6 +69,44 @@ int main(void) {
         PTParserAssert([full.assistantMessages.lastObject[@"text"] isEqual:@"later"],
             @"incremental and forced full parses must converge on the same final content");
 
+        NSString *contextOutput = @"<local-command-stdout>\x1B[1mContext Usage\x1B[22m\n"
+            @"claude-sonnet-5\n56.6k/967k tokens (6%)\n"
+            @"System prompt: 9.3k tokens (1.0%)\n"
+            @"System tools: 17.1k tokens (1.8%)\n"
+            @"Memory files: 5.5k tokens (0.6%)\n"
+            @"Skills: 2.2k tokens (0.2%)\n"
+            @"Messages: 22.5k tokens (2.3%)\n"
+            @"Free space: 877.4k (90.7%)\n"
+            @"Autocompact buffer: 33k tokens (3.4%)</local-command-stdout>";
+        NSDictionary *contextRecord = @{
+            @"type": @"system", @"subtype": @"local_command",
+            @"sessionId": @"session-a", @"uuid": @"context-1",
+            @"content": contextOutput
+        };
+        NSData *contextJSON = [NSJSONSerialization dataWithJSONObject:contextRecord options:0 error:nil];
+        PTAppendText(path, [[NSString alloc] initWithFormat:@"%@\n",
+            [[NSString alloc] initWithData:contextJSON encoding:NSUTF8StringEncoding]]);
+        PTSessionInfo *withContext = PTParseSessionAppending(
+            path, [NSDate dateWithTimeIntervalSince1970:5.5], fullSize, full, NULL);
+        PTParserAssert(withContext.contextUsed == 56600 && withContext.contextWindow == 967000,
+            @"the real /context summary must replace the coarse model-window estimate");
+        PTParserAssert(withContext.contextBreakdown.count == 7,
+            @"the real /context category breakdown must survive transcript parsing");
+        PTParserAssert([withContext.contextBreakdown.firstObject[@"category"] isEqual:@"system_prompt"] &&
+            [withContext.contextBreakdown.lastObject[@"category"] isEqual:@"autocompact_buffer"],
+            @"context categories must preserve Claude Code display order");
+
+        NSDictionary *markdownContext = PTContextSnapshotFromText(
+            @"## Context Usage\n\n**Tokens:** 56.6k / 967k (6%)\n\n"
+             "| Category | Tokens | Percentage |\n|---|---|---|\n"
+             "| System prompt | 9.3k | 1.0% |\n"
+             "| MCP tools (deferred) | 7.6k | 0.8% |\n"
+             "| Messages | 22.5k | 2.3% |\n"
+             "| Free space | 877.4k | 90.7% |\n"
+             "| Autocompact buffer | 33k | 3.4% |\n");
+        PTParserAssert([markdownContext[@"categories"] count] == 4,
+            @"Markdown /context parsing must ignore deferred tools that are not loaded");
+
         NSString *addDirectoryPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
             [NSString stringWithFormat:@"prettyterm-add-dir-%@", NSUUID.UUID.UUIDString]];
         NSString *addDirectoryText = [NSString stringWithFormat:

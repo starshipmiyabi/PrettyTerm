@@ -44,11 +44,19 @@ FOUNDATION_EXPORT NSDictionary * _Nullable PTEventFromToolResultBlock(
     NSString *timestamp
 );
 
+// AskUserQuestion 的 toolUseResult.answers（question -> answer 文本字典）拼成多行展示文本。
+FOUNDATION_EXPORT NSString *PTFormattedQuestionAnswers(NSDictionary *answers);
+
 FOUNDATION_EXPORT BOOL PTIsSupportedImagePath(NSString *path);
 
 FOUNDATION_EXPORT NSString *PTMessageForClaudeAttachments(
     NSString *message,
     NSUInteger imageCount
+);
+
+FOUNDATION_EXPORT NSString *PTMessageByAppendingClaudeFileReferences(
+    NSString *message,
+    NSArray<NSString *> *filePaths
 );
 
 // 原生粘贴前统一行尾并剥离可改变 TTY 状态的控制字符；粘贴动作和唯一一次

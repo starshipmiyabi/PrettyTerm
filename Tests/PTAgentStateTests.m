@@ -60,6 +60,12 @@ int main(void) {
             @"an image-only turn needs a harmless submit character after native paste");
         PTAssert([PTMessageForClaudeAttachments(@"", 0) isEqual:@""],
             @"an empty turn without attachments must remain unsendable");
+        PTAssert([PTMessageByAppendingClaudeFileReferences(@"检查这些文件", @[
+            @"/tmp/a.swift", @"/tmp/folder with spaces/note.md", @"/tmp/a.swift"
+        ]) isEqual:@"检查这些文件\n\n@/tmp/a.swift\n@/tmp/folder with spaces/note.md"],
+            @"file attachments must become exact deduplicated Claude Code references");
+        PTAssert([PTMessageByAppendingClaudeFileReferences(@"", @[@"/tmp/a.swift"])
+            isEqual:@"@/tmp/a.swift"], @"file-only turns must remain sendable");
         PTAssert([PTNormalizedTerminalPasteText(@"单行消息") isEqual:@"单行消息"],
             @"single-line paste text must remain byte-for-byte stable");
         PTAssert([PTNormalizedTerminalPasteText(@"第一行\r\n第二行\r第三行") isEqual:

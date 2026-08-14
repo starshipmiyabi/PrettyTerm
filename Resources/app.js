@@ -33,14 +33,20 @@
       showMoreFiles: '再显示 {count} 个文件', editedFiles: '已编辑 {count} 个文件',
       review: '审阅', thinking: '思考过程', tool: '工具调用', error: '错误',
       empty: '这个会话还没有可显示的事件。', loading: '正在读取 Claude 的会话事件…',
-      waitingTitle: 'Claude 正在组织思路', waitingDetail: 'Terminal 信号已送达，回复会在这里出现'
+      waitingTitle: 'Claude 正在组织思路', waitingDetail: 'Terminal 信号已送达，回复会在这里出现',
+      askUserTitle: 'Claude 想确认一下', askUserCustomPlaceholder: '没有符合的选项？在这里说明',
+      askUserSubmit: '提交回答', askUserSent: '已发送', askUserAnswered: '已作答',
+      askUserSingle: '单选', askUserMultiple: '可多选', askUserCustom: '补充说明'
     },
     en: {
       quote: 'Quote selection', expandInput: 'Expand input', lines: 'lines', codeChange: 'Code change',
       showMoreFiles: 'Show {count} more files', editedFiles: 'Edited {count} files',
       review: 'Review', thinking: 'Thinking', tool: 'Tool call', error: 'Error',
       empty: 'This conversation has no events to display yet.', loading: 'Reading Claude conversation events…',
-      waitingTitle: 'Claude is working through it', waitingDetail: 'Terminal signal delivered; the response will appear here'
+      waitingTitle: 'Claude is working through it', waitingDetail: 'Terminal signal delivered; the response will appear here',
+      askUserTitle: 'Claude wants to check with you', askUserCustomPlaceholder: 'None of these fit? Say what you want here',
+      askUserSubmit: 'Submit answers', askUserSent: 'Sent', askUserAnswered: 'Answered',
+      askUserSingle: 'Choose one', askUserMultiple: 'Choose any', askUserCustom: 'Add a note'
     }
   };
 
@@ -428,6 +434,7 @@
 
   function eventKind(message) {
     const raw = String(message.kind || message.type || '').toLowerCase();
+    if (raw === 'question') return 'question';
     if (raw === 'diff' || raw === 'edit' || raw === 'write') return 'diff';
     if (raw.includes('think') || raw === 'reasoning') return 'thinking';
     if (raw.includes('error') || message.isError || message.error) return 'error';
@@ -451,6 +458,83 @@
       return `<div class="diff-line ${line.type}"><span class="diff-mark">${mark}</span><code>${escapeHTML(line.text)}</code></div>`;
     }).join('');
     return `<details class="event diff-event"><summary><span class="event-icon">Δ</span><span>${escapeHTML(message.toolName || 'Edit')}</span><code class="event-path">${escapeHTML(path)}</code><span class="diff-stats"><b>+${added}</b><i>−${removed}</i></span></summary><div class="diff-view">${body}</div></details>`;
+  }
+
+  function renderQuestionCard(message) {
+    const messageKey = escapeHTML(message.messageKey || '');
+    if (message.answered) {
+      return `<section class="question-card answered"${messageKey ? ` data-message-key="${messageKey}"` : ''}><header class="question-card-header"><span class="question-spark" aria-hidden="true">✓</span><span class="question-card-title">${escapeHTML(t('askUserAnswered'))}</span></header><div class="question-answer-text">${renderMarkdown(message.answerText || '')}</div></section>`;
+    }
+    const toolUseId = escapeHTML(message.toolUseId || '');
+    const questions = Array.isArray(message.questions) ? message.questions : [];
+    const blocks = questions.map((question, index) => {
+      const options = Array.isArray(question.options) ? question.options : [];
+      const multi = Boolean(question.multiSelect);
+      const questionText = String(question.question || '');
+      const optionButtons = options.map((option, optionIndex) => {
+        const label = String((option && option.label) || '');
+        const description = option && option.description ? String(option.description) : '';
+        return `<button type="button" class="question-option" data-label="${escapeHTML(label)}" aria-pressed="false"><span class="question-option-mark" aria-hidden="true">${optionIndex + 1}</span><span class="question-option-copy"><span class="question-option-label">${escapeHTML(label)}</span>${description ? `<span class="question-option-desc">${escapeHTML(description)}</span>` : ''}</span><span class="question-option-check" aria-hidden="true">✓</span></button>`;
+      }).join('');
+      return `<div class="question-block" data-question-index="${index}" data-multi="${multi ? '1' : '0'}" data-question-text="${escapeHTML(questionText)}"><div class="question-block-head">${question.header ? `<span class="question-header-badge">${escapeHTML(String(question.header))}</span>` : ''}<span class="question-mode">${escapeHTML(t(multi ? 'askUserMultiple' : 'askUserSingle'))}</span></div><p class="question-text">${escapeHTML(questionText)}</p><div class="question-options">${optionButtons}</div><label class="question-custom-wrap"><span class="question-custom-icon" aria-hidden="true">＋</span><span class="question-custom-label">${escapeHTML(t('askUserCustom'))}</span><input type="text" class="question-custom-input" placeholder="${escapeHTML(t('askUserCustomPlaceholder'))}"></label></div>`;
+    }).join('');
+    return `<section class="question-card"${messageKey ? ` data-message-key="${messageKey}"` : ''} data-tool-use-id="${toolUseId}"><header class="question-card-header"><span class="question-spark" aria-hidden="true">✦</span><span class="question-card-title">${escapeHTML(t('askUserTitle'))}</span><span class="question-live-dot" aria-hidden="true"></span></header><div class="question-list">${blocks}</div><div class="question-card-footer"><button type="button" class="question-submit"><span>${escapeHTML(t('askUserSubmit'))}</span><span class="question-submit-arrow" aria-hidden="true">↗</span></button></div></section>`;
+  }
+
+  function installQuestionCardBridge() {
+    if (!scope || !scope.document) return;
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      if (!target || typeof target.closest !== 'function') return;
+
+      const option = target.closest('.question-option');
+      if (option) {
+        const block = option.closest('.question-block');
+        if (!block || block.closest('.question-card.submitted')) return;
+        if (block.dataset.multi !== '1') {
+          block.querySelectorAll('.question-option.selected').forEach(node => {
+            if (node !== option) {
+              node.classList.remove('selected');
+              node.setAttribute('aria-pressed', 'false');
+            }
+          });
+        }
+        option.classList.toggle('selected');
+        option.setAttribute('aria-pressed', option.classList.contains('selected') ? 'true' : 'false');
+        option.classList.remove('selection-pop');
+        void option.offsetWidth;
+        option.classList.add('selection-pop');
+        return;
+      }
+
+      const submit = target.closest('.question-submit');
+      if (!submit) return;
+      const card = submit.closest('.question-card');
+      if (!card || card.classList.contains('submitted')) return;
+      const lines = [];
+      card.querySelectorAll('.question-block').forEach(block => {
+        const questionText = block.dataset.questionText || '';
+        const custom = block.querySelector('.question-custom-input');
+        const customValue = custom ? custom.value.trim() : '';
+        const answer = customValue || Array.from(block.querySelectorAll('.question-option.selected'))
+          .map(node => node.dataset.label || '').join('、');
+        if (answer) lines.push(`${questionText}：${answer}`);
+      });
+      if (!lines.length) {
+        card.classList.remove('needs-answer');
+        void card.offsetWidth;
+        card.classList.add('needs-answer');
+        return;
+      }
+      const bridge = scope.webkit && scope.webkit.messageHandlers && scope.webkit.messageHandlers.answerQuestion;
+      if (bridge && typeof bridge.postMessage === 'function') {
+        const sessionId = String(state.session && (state.session.sessionId || state.session.id) || '');
+        bridge.postMessage({ toolUseId: card.dataset.toolUseId || '', text: lines.join('\n'), sessionId });
+      }
+      card.classList.add('submitted');
+      submit.disabled = true;
+      submit.textContent = t('askUserSent');
+    });
   }
 
   function changedFileSummary(messages) {
@@ -545,6 +629,7 @@
     const messageKey = escapeHTML(message.messageKey || '');
     const anchorAttribute = ` data-message-key="${messageKey}"`;
     if (kind === 'diff') return renderDiff(message);
+    if (kind === 'question') return renderQuestionCard(message);
     if (kind === 'thinking') {
       return `<details class="event thinking-event"${anchorAttribute}><summary><span class="event-icon">◌</span>${escapeHTML(t('thinking'))}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
     }
@@ -872,6 +957,7 @@
 
   installQuoteMenu();
   installGitReviewBridge();
+  installQuestionCardBridge();
   installStableViewport();
 
   return {

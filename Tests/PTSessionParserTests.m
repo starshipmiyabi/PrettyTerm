@@ -175,6 +175,74 @@ int main(void) {
         [NSFileManager.defaultManager removeItemAtPath:addDirectoryFile error:nil];
         [NSFileManager.defaultManager removeItemAtPath:readDirectory error:nil];
         [NSFileManager.defaultManager removeItemAtPath:bashDirectory error:nil];
+
+        // AskUserQuestion：待答时落成一条 kind=="question" 事件；老师（或 Terminal 里
+        // 手动作答）之后追加的 tool_result 必须原地把它改成 answered=YES，
+        // 而不是另起一条工具结果气泡。
+        NSString *questionFile = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"prettyterm-question-%@.jsonl", NSUUID.UUID.UUIDString]];
+        NSDictionary *questionRecord = @{
+            @"type": @"assistant", @"sessionId": @"session-q", @"uuid": @"q-a1",
+            @"message": @{
+                @"role": @"assistant", @"model": @"claude-sonnet-5",
+                @"content": @[ @{
+                    @"type": @"tool_use", @"id": @"toolu_test1", @"name": @"AskUserQuestion",
+                    @"input": @{ @"questions": @[ @{
+                        @"question": @"选哪个？", @"header": @"H", @"multiSelect": @NO,
+                        @"options": @[
+                            @{ @"label": @"甲", @"description": @"d1" },
+                            @{ @"label": @"乙", @"description": @"d2" }
+                        ]
+                    } ] }
+                } ]
+            }
+        };
+        NSData *questionJSON = [NSJSONSerialization dataWithJSONObject:questionRecord options:0 error:nil];
+        NSString *questionLine = [NSString stringWithFormat:@"%@\n",
+            [[NSString alloc] initWithData:questionJSON encoding:NSUTF8StringEncoding]];
+        [questionLine writeToFile:questionFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+        NSUInteger questionSize = 0;
+        PTSessionInfo *pendingQuestion = PTParseSession(
+            questionFile, [NSDate dateWithTimeIntervalSince1970:1], &questionSize);
+        PTParserAssert(pendingQuestion.assistantMessages.count == 1,
+            @"AskUserQuestion tool_use must produce exactly one event");
+        NSDictionary *pendingEvent = pendingQuestion.assistantMessages.firstObject;
+        PTParserAssert([pendingEvent[@"kind"] isEqual:@"question"],
+            @"AskUserQuestion tool_use must parse as kind==question, not a generic tool bubble");
+        PTParserAssert([pendingEvent[@"answered"] isEqual:@NO],
+            @"a freshly-asked question must start as answered=NO");
+        PTParserAssert([pendingEvent[@"toolUseId"] isEqual:@"toolu_test1"],
+            @"the question event must carry the tool_use id for later answer matching");
+
+        NSDictionary *answerRecord = @{
+            @"type": @"user", @"sessionId": @"session-q", @"uuid": @"q-u1",
+            @"message": @{
+                @"role": @"user",
+                @"content": @[ @{
+                    @"type": @"tool_result", @"tool_use_id": @"toolu_test1",
+                    @"content": @"The user answered: \"选哪个？\"=\"甲\""
+                } ]
+            },
+            @"toolUseResult": @{ @"answers": @{ @"选哪个？": @"甲" } }
+        };
+        NSData *answerJSON = [NSJSONSerialization dataWithJSONObject:answerRecord options:0 error:nil];
+        NSString *answerLine = [NSString stringWithFormat:@"%@\n",
+            [[NSString alloc] initWithData:answerJSON encoding:NSUTF8StringEncoding]];
+        PTAppendText(questionFile, answerLine);
+        NSUInteger answeredSize = 0;
+        PTSessionInfo *answeredQuestion = PTParseSessionAppending(
+            questionFile, [NSDate dateWithTimeIntervalSince1970:2], questionSize, pendingQuestion, &answeredSize);
+        PTParserAssert(answeredQuestion.assistantMessages.count == 1,
+            @"answering the question must update the existing event in place, not append a second bubble");
+        NSDictionary *answeredEvent = answeredQuestion.assistantMessages.firstObject;
+        PTParserAssert([answeredEvent[@"answered"] isEqual:@YES],
+            @"the tool_result carrying this toolUseId must flip the event to answered=YES");
+        PTParserAssert([answeredEvent[@"answerText"] isEqual:@"选哪个？：甲"],
+            @"answerText must come from toolUseResult.answers, formatted as question：answer");
+
+        [NSFileManager.defaultManager removeItemAtPath:questionFile error:nil];
+
         puts("PTSessionParserTests: PASS");
     }
     return 0;

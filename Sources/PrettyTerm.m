@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <signal.h>
@@ -66,10 +67,446 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 @interface PTFirstMouseButton : NSButton
 @end
 
+@interface PTAnimatedButton : PTFirstMouseButton
+@property(nonatomic, strong) NSColor *fillColor;
+@property(nonatomic, strong) NSColor *hoverFillColor;
+@property(nonatomic, strong) NSColor *pressedFillColor;
+@property(nonatomic, strong) NSColor *strokeColor;
+@property(nonatomic) CGFloat cornerRadius;
+@end
+
+@interface PTQuestionOptionButton : PTAnimatedButton
+- (instancetype)initWithLabel:(NSString *)label
+                  description:(NSString *)description
+                        index:(NSInteger)index;
+@end
+
+@interface PTFlippedView : NSView
+@end
+
+@interface PTComposerDropSurfaceView : NSView
+@property(nonatomic, copy) BOOL (^dropHandler)(NSArray<NSURL *> *urls);
+@property(nonatomic) BOOL dropEnabled;
+@end
+
+@interface PTEffortSlider : NSControl <NSGestureRecognizerDelegate>
+@property(nonatomic) NSInteger selectedIndex;
+@end
+
 @implementation PTFirstMouseButton
 - (BOOL)acceptsFirstMouse:(NSEvent *)event {
     (void)event;
     return YES;
+}
+@end
+
+@implementation PTAnimatedButton {
+    NSTrackingArea *_trackingArea;
+    BOOL _hovered;
+    BOOL _pressed;
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) {
+        self.wantsLayer = YES;
+        self.bordered = NO;
+        self.focusRingType = NSFocusRingTypeNone;
+        self.imagePosition = NSImageLeading;
+        self.imageHugsTitle = YES;
+        _fillColor = NSColor.clearColor;
+        _hoverFillColor = PTWarmChipColor();
+        _pressedFillColor = PTWarmBorderColor();
+        _strokeColor = NSColor.clearColor;
+        _cornerRadius = 12;
+    }
+    return self;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_trackingArea) [self removeTrackingArea:_trackingArea];
+    _trackingArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+        options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+        owner:self userInfo:nil];
+    [self addTrackingArea:_trackingArea];
+}
+
+- (BOOL)wantsUpdateLayer { return YES; }
+
+- (void)updateLayer {
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        NSColor *fill = self->_pressed ? self.pressedFillColor
+            : (self->_hovered ? self.hoverFillColor : self.fillColor);
+        self.layer.backgroundColor = fill.CGColor;
+        self.layer.borderColor = self.strokeColor.CGColor;
+        self.layer.borderWidth = self.strokeColor == NSColor.clearColor ? 0 : 0.7;
+        self.layer.cornerRadius = self.cornerRadius;
+    }];
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    (void)event;
+    _hovered = YES;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    (void)event;
+    _hovered = NO;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    _pressed = YES;
+    [self setNeedsDisplay:YES];
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.10];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    self.layer.transform = CATransform3DMakeScale(0.955, 0.955, 1);
+    [CATransaction commit];
+    [super mouseDown:event];
+    _pressed = NO;
+    [self setNeedsDisplay:YES];
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.22];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    self.layer.transform = CATransform3DIdentity;
+    [CATransaction commit];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self setNeedsDisplay:YES];
+}
+@end
+
+@implementation PTQuestionOptionButton {
+    NSTextField *_numberLabel;
+    NSTextField *_optionLabel;
+    NSTextField *_descriptionLabel;
+    NSTextField *_checkLabel;
+}
+
+- (instancetype)initWithLabel:(NSString *)label
+                  description:(NSString *)description
+                        index:(NSInteger)index {
+    self = [super initWithFrame:NSZeroRect];
+    if (!self) return nil;
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+    self.buttonType = NSButtonTypePushOnPushOff;
+    self.title = @"";
+    self.identifier = label;
+    self.fillColor = PTWarmCardColor();
+    self.hoverFillColor = PTWarmChipColor();
+    self.pressedFillColor = PTWarmBorderColor();
+    self.strokeColor = PTWarmBorderColor();
+    self.cornerRadius = 15;
+    self.focusRingType = NSFocusRingTypeNone;
+    [self setAccessibilityLabel:description.length > 0
+        ? [NSString stringWithFormat:@"%@，%@", label, description] : label];
+
+    _numberLabel = [NSTextField labelWithString:[NSString stringWithFormat:@"%ld", (long)index + 1]];
+    _numberLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _numberLabel.alignment = NSTextAlignmentCenter;
+    _numberLabel.font = [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightBold];
+    _numberLabel.wantsLayer = YES;
+    _numberLabel.layer.cornerRadius = 9;
+
+    _optionLabel = [NSTextField labelWithString:label];
+    _optionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _optionLabel.font = [NSFont systemFontOfSize:13.5 weight:NSFontWeightSemibold];
+    _optionLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    _descriptionLabel = [NSTextField labelWithString:description ?: @""];
+    _descriptionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _descriptionLabel.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightRegular];
+    _descriptionLabel.textColor = NSColor.secondaryLabelColor;
+    _descriptionLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    _descriptionLabel.maximumNumberOfLines = 2;
+    _descriptionLabel.hidden = description.length == 0;
+
+    _checkLabel = [NSTextField labelWithString:@"✓"];
+    _checkLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _checkLabel.alignment = NSTextAlignmentCenter;
+    _checkLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightBold];
+
+    [self addSubview:_numberLabel];
+    [self addSubview:_optionLabel];
+    [self addSubview:_descriptionLabel];
+    [self addSubview:_checkLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [_numberLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:14],
+        [_numberLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_numberLabel.widthAnchor constraintEqualToConstant:28],
+        [_numberLabel.heightAnchor constraintEqualToConstant:28],
+        [_optionLabel.leadingAnchor constraintEqualToAnchor:_numberLabel.trailingAnchor constant:12],
+        [_optionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_checkLabel.leadingAnchor constant:-10],
+        [_checkLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-14],
+        [_checkLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_checkLabel.widthAnchor constraintEqualToConstant:24]
+    ]];
+    if (description.length > 0) {
+        [NSLayoutConstraint activateConstraints:@[
+            [_optionLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:11],
+            [_descriptionLabel.topAnchor constraintEqualToAnchor:_optionLabel.bottomAnchor constant:2],
+            [_descriptionLabel.leadingAnchor constraintEqualToAnchor:_optionLabel.leadingAnchor],
+            [_descriptionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_checkLabel.leadingAnchor constant:-10],
+            [_descriptionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor constant:-10],
+            [self.heightAnchor constraintGreaterThanOrEqualToConstant:62]
+        ]];
+    } else {
+        [_optionLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor].active = YES;
+        [self.heightAnchor constraintGreaterThanOrEqualToConstant:54].active = YES;
+    }
+    [self setNeedsDisplay:YES];
+    return self;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    // NSView 的 hitTest: 参数位于当前 view 的父视图坐标系；这里若拿 bounds 判断，
+    // 所有位置不在父视图原点的按钮都会把真实点击误判为范围外。
+    if (self.hidden || !self.enabled || !NSPointInRect(point, self.frame)) return nil;
+    return self;
+}
+
+- (void)setState:(NSControlStateValue)value {
+    [super setState:value];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)updateLayer {
+    [super updateLayer];
+    BOOL selected = self.state == NSControlStateValueOn;
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        if (selected) {
+            self.layer.backgroundColor = PTWarmDynamicColor(
+                0.956, 0.855, 0.710, 0.286, 0.173, 0.102).CGColor;
+            self.layer.borderColor = PTWarmAccentColor().CGColor;
+            self.layer.borderWidth = 1.25;
+        }
+        self->_numberLabel.layer.backgroundColor =
+            (selected ? PTWarmAccentColor() : PTWarmChipColor()).CGColor;
+        self->_numberLabel.textColor = selected ? NSColor.whiteColor : NSColor.secondaryLabelColor;
+        self->_checkLabel.textColor = selected ? PTWarmAccentColor() : NSColor.clearColor;
+    }];
+}
+@end
+
+@implementation PTFlippedView
+- (BOOL)isFlipped { return YES; }
+@end
+
+@implementation PTComposerDropSurfaceView {
+    BOOL _dragActive;
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) {
+        self.wantsLayer = YES;
+        _dropEnabled = NO;
+        [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+    }
+    return self;
+}
+
+- (BOOL)wantsUpdateLayer { return YES; }
+
+- (void)updateLayer {
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        self.layer.backgroundColor = PTWarmCardColor().CGColor;
+        self.layer.borderColor = (_dragActive ? PTWarmAccentColor() : PTWarmBorderColor()).CGColor;
+        self.layer.borderWidth = _dragActive ? 1.8 : 0.8;
+        self.layer.cornerRadius = 26;
+        self.layer.shadowColor = NSColor.blackColor.CGColor;
+        self.layer.shadowOpacity = _dragActive ? 0.18 : 0.09;
+        self.layer.shadowRadius = _dragActive ? 18 : 13;
+        self.layer.shadowOffset = CGSizeMake(0, -3);
+    }];
+}
+
+- (NSArray<NSURL *> *)draggedFileURLs:(id<NSDraggingInfo>)sender {
+    NSDictionary *options = @{NSPasteboardURLReadingFileURLsOnlyKey: @YES};
+    return [sender.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:options] ?: @[];
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    if (!self.dropEnabled || [self draggedFileURLs:sender].count == 0) return NSDragOperationNone;
+    _dragActive = YES;
+    [self setNeedsDisplay:YES];
+    return NSDragOperationCopy;
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    _dragActive = NO;
+    [self setNeedsDisplay:YES];
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSArray<NSURL *> *urls = [self draggedFileURLs:sender];
+    _dragActive = NO;
+    [self setNeedsDisplay:YES];
+    return self.dropEnabled && urls.count > 0 && self.dropHandler && self.dropHandler(urls);
+}
+@end
+
+@implementation PTEffortSlider {
+    CALayer *_trackLayer;
+    CALayer *_fillLayer;
+    CALayer *_thumbLayer;
+    NSArray<CALayer *> *_dotLayers;
+    NSInteger _trackingStartIndex;
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) {
+        self.wantsLayer = YES;
+        _selectedIndex = 1;
+        _trackLayer = [CALayer layer];
+        _fillLayer = [CALayer layer];
+        _thumbLayer = [CALayer layer];
+        NSMutableArray *dots = [NSMutableArray array];
+        [self.layer addSublayer:_trackLayer];
+        [self.layer addSublayer:_fillLayer];
+        for (NSInteger index = 0; index < 5; index++) {
+            CALayer *dot = [CALayer layer];
+            [dots addObject:dot];
+            [self.layer addSublayer:dot];
+        }
+        _dotLayers = dots;
+        [self.layer addSublayer:_thumbLayer];
+
+        NSPanGestureRecognizer *pan = [[NSPanGestureRecognizer alloc]
+            initWithTarget:self action:@selector(handleEffortPan:)];
+        NSClickGestureRecognizer *click = [[NSClickGestureRecognizer alloc]
+            initWithTarget:self action:@selector(handleEffortClick:)];
+        pan.delegate = self;
+        click.delegate = self;
+        [self addGestureRecognizer:pan];
+        [self addGestureRecognizer:click];
+    }
+    return self;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+
+- (BOOL)gestureRecognizer:(NSGestureRecognizer *)gestureRecognizer
+        shouldRequireFailureOfGestureRecognizer:(NSGestureRecognizer *)otherGestureRecognizer {
+    return [gestureRecognizer isKindOfClass:NSClickGestureRecognizer.class]
+        && [otherGestureRecognizer isKindOfClass:NSPanGestureRecognizer.class];
+}
+
+- (CGFloat)xForIndex:(NSInteger)index {
+    CGFloat left = 19;
+    CGFloat right = MAX(left, self.bounds.size.width - 19);
+    return left + (right - left) * MIN(4, MAX(0, index)) / 4.0;
+}
+
+- (void)setSelectedIndex:(NSInteger)selectedIndex {
+    NSInteger next = MIN(4, MAX(0, selectedIndex));
+    if (_selectedIndex == next) return;
+    CGFloat oldX = [self xForIndex:_selectedIndex];
+    _selectedIndex = next;
+    [self setNeedsLayout:YES];
+    if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+        CGFloat nextX = [self xForIndex:next];
+        CABasicAnimation *thumb = [CABasicAnimation animationWithKeyPath:@"position.x"];
+        thumb.fromValue = @(oldX);
+        thumb.toValue = @(nextX);
+        thumb.duration = 0.24;
+        thumb.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        [_thumbLayer addAnimation:thumb forKey:@"effort-thumb"];
+    }
+}
+
+- (void)layout {
+    [super layout];
+    CGFloat left = 19;
+    CGFloat right = MAX(left, self.bounds.size.width - 19);
+    CGFloat centerY = NSMidY(self.bounds);
+    CGFloat selectedX = [self xForIndex:self.selectedIndex];
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        _trackLayer.backgroundColor = PTWarmChipColor().CGColor;
+        _fillLayer.backgroundColor = PTWarmAccentColor().CGColor;
+        _thumbLayer.backgroundColor = PTWarmCardColor().CGColor;
+        _thumbLayer.borderColor = PTWarmBorderColor().CGColor;
+        for (CALayer *dot in _dotLayers) dot.backgroundColor = PTWarmBorderColor().CGColor;
+    }];
+    _trackLayer.frame = CGRectMake(left, centerY - 4, right - left, 8);
+    _trackLayer.cornerRadius = 4;
+    _fillLayer.frame = CGRectMake(left, centerY - 4, MAX(0, selectedX - left), 8);
+    _fillLayer.cornerRadius = 4;
+    for (NSInteger index = 0; index < 5; index++) {
+        CALayer *dot = _dotLayers[index];
+        dot.frame = CGRectMake([self xForIndex:index] - 3, centerY - 3, 6, 6);
+        dot.cornerRadius = 3;
+    }
+    _thumbLayer.bounds = CGRectMake(0, 0, 34, 34);
+    _thumbLayer.position = CGPointMake(selectedX, centerY);
+    _thumbLayer.cornerRadius = 17;
+    _thumbLayer.borderWidth = 0.7;
+    _thumbLayer.shadowColor = NSColor.blackColor.CGColor;
+    _thumbLayer.shadowOpacity = 0.12;
+    _thumbLayer.shadowRadius = 5;
+    _thumbLayer.shadowOffset = CGSizeMake(0, -1);
+}
+
+- (void)updateSelectionForPoint:(NSPoint)point {
+    CGFloat x = point.x;
+    CGFloat left = 19;
+    CGFloat width = MAX(1, self.bounds.size.width - 38);
+    NSInteger index = lround((x - left) / width * 4.0);
+    index = MIN(4, MAX(0, index));
+    self.selectedIndex = index;
+}
+
+- (void)sendDeferredActionFromIndex:(NSInteger)startIndex {
+    if (self.selectedIndex != startIndex && self.action && self.target) {
+        // 手势必须先完整结束，再提交会改变应用状态的命令。
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PTEffortSlider *self = weakSelf;
+            if (self && self.action && self.target) [self sendAction:self.action to:self.target];
+        });
+    }
+}
+
+- (void)handleEffortClick:(NSClickGestureRecognizer *)recognizer {
+    if (recognizer.state != NSGestureRecognizerStateEnded) return;
+    NSInteger startIndex = self.selectedIndex;
+    [self updateSelectionForPoint:[recognizer locationInView:self]];
+    [self sendDeferredActionFromIndex:startIndex];
+}
+
+- (void)handleEffortPan:(NSPanGestureRecognizer *)recognizer {
+    NSPoint point = [recognizer locationInView:self];
+    switch (recognizer.state) {
+        case NSGestureRecognizerStateBegan:
+            _trackingStartIndex = self.selectedIndex;
+            [self updateSelectionForPoint:point];
+            break;
+        case NSGestureRecognizerStateChanged:
+            [self updateSelectionForPoint:point];
+            break;
+        case NSGestureRecognizerStateEnded:
+            [self updateSelectionForPoint:point];
+            [self sendDeferredActionFromIndex:_trackingStartIndex];
+            break;
+        case NSGestureRecognizerStateCancelled:
+        case NSGestureRecognizerStateFailed:
+            self.selectedIndex = _trackingStartIndex;
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self setNeedsLayout:YES];
 }
 @end
 
@@ -447,6 +884,7 @@ static void PTCollectTranscriptDirectories(id value,
 @property(nonatomic, copy) NSString *cwd;
 @property(nonatomic, copy) NSString *filePath;
 @property(nonatomic, copy) NSString *model;
+@property(nonatomic, copy) NSString *effort;
 @property(nonatomic, strong) NSDate *modifiedAt;
 @property(nonatomic, strong) NSArray<NSString *> *accessedDirectories;
 @property(nonatomic, strong) NSArray<NSDictionary *> *assistantMessages;
@@ -529,6 +967,7 @@ static PTSessionInfo *PTParseSessionData(
     session.modifiedAt = modifiedAt;
     session.cwd = baseSession.cwd ?: @"";
     session.model = baseSession.model ?: @"";
+    session.effort = baseSession.effort ?: @"";
     session.contextUsed = baseSession.contextUsed;
     session.contextWindow = baseSession ? baseSession.contextWindow : 200000;
     session.contextBreakdown = baseSession.contextBreakdown ?: @[];
@@ -554,6 +993,20 @@ static PTSessionInfo *PTParseSessionData(
         ? [baseSession.parseUsageMessageKeys mutableCopy] : [NSMutableSet set];
     NSMutableOrderedSet<NSString *> *accessedDirectories = [NSMutableOrderedSet orderedSetWithArray:
         baseSession.accessedDirectories ?: @[]];
+
+    // AskUserQuestion 事件在被问出来那一刻先以 answered=NO 落进 messages；
+    // 老师在 Terminal 里手动作答（或未来 PrettyTerm 里点了 UI 回填）后，
+    // transcript 里对应的 tool_result 记录要能原地把这条事件改成 answered=YES，
+    // 而不是另起一条新气泡。这个字典按 toolUseId 找到那条事件的可变字典引用。
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *questionEventsByToolUseId =
+        [NSMutableDictionary dictionary];
+    for (NSDictionary *existing in messages) {
+        NSString *toolUseId = [existing[@"toolUseId"] isKindOfClass:NSString.class] ? existing[@"toolUseId"] : nil;
+        if ([existing[@"kind"] isEqual:@"question"] && toolUseId.length > 0 &&
+            [existing isKindOfClass:NSMutableDictionary.class]) {
+            questionEventsByToolUseId[toolUseId] = (NSMutableDictionary *)existing;
+        }
+    }
 
     for (NSString *line in [source componentsSeparatedByString:@"\n"]) {
         if (line.length < 2) continue;
@@ -633,6 +1086,22 @@ static PTSessionInfo *PTParseSessionData(
                         resultIndex++;
                         continue;
                     }
+                    NSString *toolUseId = [block[@"tool_use_id"] isKindOfClass:NSString.class]
+                        ? block[@"tool_use_id"] : nil;
+                    NSMutableDictionary *questionEvent = toolUseId ? questionEventsByToolUseId[toolUseId] : nil;
+                    if (questionEvent) {
+                        // 回答落在这里：不新起一条工具结果气泡，直接原地改已经在 messages
+                        // 里的那条 question 事件。answers 字典比 content 里那段面向模型的
+                        // 提示语干净得多，优先用它拼展示文本。
+                        NSDictionary *answers = [toolUseResult[@"answers"] isKindOfClass:NSDictionary.class]
+                            ? toolUseResult[@"answers"] : nil;
+                        questionEvent[@"answered"] = @YES;
+                        questionEvent[@"answerText"] = answers.count > 0
+                            ? PTFormattedQuestionAnswers(answers)
+                            : (PTEventFromToolResultBlock(block, @"", @"")[@"text"] ?: @"");
+                        resultIndex++;
+                        continue;
+                    }
                     NSString *uuid = object[@"uuid"] ?: message[@"id"] ?: NSUUID.UUID.UUIDString;
                     NSString *key = [NSString stringWithFormat:@"%@:result:%lu",
                         uuid, (unsigned long)resultIndex];
@@ -704,6 +1173,8 @@ static PTSessionInfo *PTParseSessionData(
                 }
             }
             if ([object[@"isSidechain"] boolValue] || [object[@"isApiErrorMessage"] boolValue]) continue;
+            NSString *effort = [object[@"effort"] isKindOfClass:NSString.class] ? object[@"effort"] : @"";
+            if (effort.length > 0) session.effort = effort;
             if ([model isKindOfClass:NSString.class] && model.length > 0) {
                 session.model = model;
                 NSString *lowerModel = model.lowercaseString;
@@ -761,6 +1232,12 @@ static PTSessionInfo *PTParseSessionData(
                 if (event) {
                     [messageKeys addObject:key];
                     [messages addObject:event];
+                    NSString *toolUseId = [event[@"toolUseId"] isKindOfClass:NSString.class]
+                        ? event[@"toolUseId"] : nil;
+                    if ([event[@"kind"] isEqual:@"question"] && toolUseId.length > 0 &&
+                        [event isKindOfClass:NSMutableDictionary.class]) {
+                        questionEventsByToolUseId[toolUseId] = (NSMutableDictionary *)event;
+                    }
                 }
                 blockIndex++;
             }
@@ -861,6 +1338,7 @@ static PTSessionInfo *PTParseSessionAppending(
 @interface PTSessionStore : NSObject
 @property(nonatomic, copy) void (^sessionsChanged)(NSArray<PTSessionInfo *> *sessions);
 @property(nonatomic, copy) void (^globalModelChanged)(NSString *model);
+@property(nonatomic, copy) void (^globalEffortChanged)(NSString *effort);
 - (void)refresh;
 - (void)refreshChangedPath:(NSString *)filePath
                 completion:(void (^)(PTSessionInfo * _Nullable session))completion;
@@ -914,6 +1392,9 @@ static PTSessionInfo *PTParseSessionAppending(
         if (model.length && self.globalModelChanged) {
             self.globalModelChanged(model);
         }
+        NSString *effort = [settings[@"effortLevel"] isKindOfClass:NSString.class]
+            ? settings[@"effortLevel"] : @"";
+        if (effort.length && self.globalEffortChanged) self.globalEffortChanged(effort);
     });
     dispatch_source_set_cancel_handler(_settingsWatcher, ^{
         if (self->_settingsFD >= 0) {
@@ -1788,10 +2269,45 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 @interface PTComposerTextView : NSTextView
 @property(nonatomic, copy) dispatch_block_t submitHandler;
 @property(nonatomic, copy) BOOL (^imagePasteHandler)(NSPasteboard *pasteboard);
+@property(nonatomic, copy) BOOL (^fileDropHandler)(NSArray<NSURL *> *urls);
+@property(nonatomic, copy) NSString *placeholderText;
 - (void)clearAfterSuccessfulSubmissionMatchingText:(NSString *)submittedText;
 @end
 
 @implementation PTComposerTextView
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+    return self;
+}
+
+- (void)setPlaceholderText:(NSString *)placeholderText {
+    _placeholderText = [placeholderText copy];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setString:(NSString *)string {
+    [super setString:string];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)didChangeText {
+    [super didChangeText];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    if (self.string.length > 0 || self.placeholderText.length == 0) return;
+    NSDictionary *attributes = @{
+        NSFontAttributeName: self.font ?: [NSFont systemFontOfSize:14],
+        NSForegroundColorAttributeName: NSColor.placeholderTextColor
+    };
+    NSPoint point = NSMakePoint(self.textContainerInset.width + 1,
+        self.textContainerInset.height + 1);
+    [self.placeholderText drawAtPoint:point withAttributes:attributes];
+}
+
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
     BOOL commandPaste =
         (event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask) ==
@@ -1840,6 +2356,21 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     [super paste:sender];
 }
 
+- (NSArray<NSURL *> *)draggedFileURLs:(id<NSDraggingInfo>)sender {
+    NSDictionary *options = @{NSPasteboardURLReadingFileURLsOnlyKey: @YES};
+    return [sender.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:options] ?: @[];
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    return self.editable && self.fileDropHandler && [self draggedFileURLs:sender].count > 0
+        ? NSDragOperationCopy : NSDragOperationNone;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSArray<NSURL *> *urls = [self draggedFileURLs:sender];
+    return self.editable && urls.count > 0 && self.fileDropHandler && self.fileDropHandler(urls);
+}
+
 - (void)clearAfterSuccessfulSubmissionMatchingText:(NSString *)submittedText {
     // NSTextView 的 string setter 在 keyDown: 尚未退出时偶尔会被输入系统的同一轮
     // 编辑事务覆盖回来。走 shouldChange/textStorage/didChangeText 的正式编辑链，
@@ -1875,6 +2406,15 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSPopUpButton *_languagePicker;
     NSProgressIndicator *_contextBar;
     NSPopUpButton *_modelPicker;
+    PTComposerDropSurfaceView *_composerSurface;
+    PTAnimatedButton *_composerModelButton;
+    PTAnimatedButton *_composerEffortButton;
+    NSPopover *_composerOptionsPopover;
+    NSStackView *_composerOptionsStack;
+    PTEffortSlider *_composerEffortSlider;
+    NSTextField *_composerEffortPopoverTitle;
+    NSString *_selectedComposerModelID;
+    NSString *_selectedComposerEffort;
     PTComposerTextView *_composerTextView;
     NSTextField *_composerTargetLabel;
     NSButton *_imageButton;
@@ -1883,6 +2423,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSLayoutConstraint *_composerHeightConstraint;
     NSLayoutConstraint *_imagePreviewHeightConstraint;
     NSMutableArray<NSDictionary *> *_pendingImages;
+    NSMutableArray<NSString *> *_pendingFiles;
     NSMutableSet<NSString *> *_temporaryImagePaths;
     NSButton *_connectButton;
     NSButton *_floatingButton;
@@ -1904,6 +2445,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     BOOL _webReady;
     NSPanel *_floatingPanel;
     WKWebView *_floatingConversationView;
+    PTComposerDropSurfaceView *_floatingComposerSurface;
     PTComposerTextView *_floatingComposerTextView;
     NSTextField *_floatingComposerLabel;
     NSButton *_floatingImageButton;
@@ -1912,6 +2454,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSLayoutConstraint *_floatingComposerHeightConstraint;
     NSLayoutConstraint *_floatingImagePreviewHeightConstraint;
     NSMutableArray<NSDictionary *> *_floatingPendingImages;
+    NSMutableArray<NSString *> *_floatingPendingFiles;
+    PTAnimatedButton *_floatingEffortButton;
     NSButton *_floatingSendButton;
     NSString *_floatingSessionID;
     BOOL _floatingWebReady;
@@ -1998,15 +2542,38 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     BOOL _awaitingClaudeReply;
     NSString *_awaitingClaudeSessionID;
     NSUInteger _awaitingClaudeBaselineMessageCount;
+
+    // ask_via_prettyterm MCP 桥：轮询 ~/.claude/prettyterm-questions 目录，
+    // 跟 transcript 完全无关，绕开"问题和答案一起落盘"那个死结。
+    NSTimer *_questionPollTimer;
+    NSMutableSet<NSString *> *_processedQuestionRequestIDs;
+    NSMutableArray<NSDictionary *> *_pendingQuestionRequests;
+    NSPanel *_questionPanel;
+    NSStackView *_questionPanelStack;
+    NSTextField *_questionPanelStatusLabel;
+    NSMutableArray<NSDictionary *> *_questionPanelBlocks;
+    NSString *_questionPanelRequestID;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     _agentState = [[PTAgentState alloc] init];
     _transcriptWatcher = [[PTTranscriptWatcher alloc] init];
+    _processedQuestionRequestIDs = [NSMutableSet set];
+    _pendingQuestionRequests = [NSMutableArray array];
     _pendingImages = [NSMutableArray array];
+    _pendingFiles = [NSMutableArray array];
     _floatingPendingImages = [NSMutableArray array];
+    _floatingPendingFiles = [NSMutableArray array];
     _temporaryImagePaths = [NSMutableSet set];
+    NSData *settingsData = [NSData dataWithContentsOfFile:
+        [NSHomeDirectory() stringByAppendingPathComponent:@".claude/settings.json"]];
+    NSDictionary *settings = settingsData
+        ? [NSJSONSerialization JSONObjectWithData:settingsData options:0 error:nil] : nil;
+    _selectedComposerEffort = [settings[@"effortLevel"] isKindOfClass:NSString.class]
+        ? settings[@"effortLevel"] : @"";
+    _selectedComposerModelID = [settings[@"model"] isKindOfClass:NSString.class]
+        ? settings[@"model"] : @"";
     _gitDirectoryPaths = [NSMutableArray array];
     NSArray *suppressedDirectories = [NSUserDefaults.standardUserDefaults
         arrayForKey:@"PTGitSuppressedDirectories"];
@@ -2022,6 +2589,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(refreshSessions:) userInfo:nil repeats:YES];
     [self refreshClaudeUsage:nil];
     _usageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 target:self selector:@selector(refreshClaudeUsage:) userInfo:nil repeats:YES];
+    _questionPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(pollQuestionRequests:) userInfo:nil repeats:YES];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
@@ -2057,13 +2625,21 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         removeScriptMessageHandlerForName:@"quoteSelection"];
     [_conversationView.configuration.userContentController
         removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
+    [_conversationView.configuration.userContentController
+        removeScriptMessageHandlerForName:@"answerQuestion"];
     if (_floatingConversationView) {
         [_floatingConversationView.configuration.userContentController
             removeScriptMessageHandlerForName:@"quoteSelection"];
         [_floatingConversationView.configuration.userContentController
             removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
+        [_floatingConversationView.configuration.userContentController
+            removeScriptMessageHandlerForName:@"answerQuestion"];
     }
     [_floatingPanel orderOut:nil];
+    [_composerOptionsPopover close];
+    _composerOptionsPopover = nil;
+    _composerOptionsStack = nil;
+    _composerEffortSlider = nil;
     _floatingPanel = nil;
     _floatingConversationView = nil;
     _floatingWebReady = NO;
@@ -2144,10 +2720,13 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (void)applicationWillTerminate:(NSNotification *)notification {
     [_refreshTimer invalidate];
     [_usageRefreshTimer invalidate];
+    [_questionPollTimer invalidate];
     [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"quoteSelection"];
     [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
+    [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"answerQuestion"];
     [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"quoteSelection"];
     [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
+    [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"answerQuestion"];
     [_bridge stop];
     [_transcriptWatcher stopWatching];
     [_store stopWatchingGlobalSettings];
@@ -2495,8 +3074,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     contextDisclosure.translatesAutoresizingMaskIntoConstraints = NO;
     contextDisclosure.bezelStyle = NSBezelStyleInline;
     contextDisclosure.font = [NSFont systemFontOfSize:10 weight:NSFontWeightMedium];
-    contextDisclosure.toolTip = PTL(@"在 Claude Code 执行 /context 后显示真实分类明细",
-                                    @"Run /context in Claude Code to expose the real category breakdown");
+    contextDisclosure.toolTip = PTL(@"展开已记录的上下文分类明细，不向 Claude Code 发送命令",
+                                    @"Expand recorded context categories without sending a Claude Code command");
     [contextCard addSubview:contextDisclosure];
     _contextDisclosureButton = contextDisclosure;
 
@@ -2985,7 +3564,6 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         _modelPicker.lastItem.representedObject = entry[1];
     }
     _modelPicker.enabled = NO;
-    [header addSubview:_modelPicker];
 
     _remoteButton = [NSButton buttonWithTitle:PTL(@"RC禁用", @"RC Off") target:nil action:nil];
     _remoteButton.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3029,6 +3607,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
     [configuration.userContentController addScriptMessageHandler:self name:@"quoteSelection"];
     [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptEditReview"];
+    [configuration.userContentController addScriptMessageHandler:self name:@"answerQuestion"];
     _conversationView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
     _conversationView.translatesAutoresizingMaskIntoConstraints = NO;
     _conversationView.navigationDelegate = self;
@@ -3037,11 +3616,9 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSURL *htmlURL = [NSBundle.mainBundle URLForResource:@"index" withExtension:@"html"];
     if (htmlURL) [_conversationView loadFileURL:htmlURL allowingReadAccessToURL:NSBundle.mainBundle.resourceURL];
 
-    NSVisualEffectView *composerBar = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    PTAppearanceSurfaceView *composerBar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
     composerBar.translatesAutoresizingMaskIntoConstraints = NO;
-    composerBar.material = NSVisualEffectMaterialContentBackground;
-    composerBar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    composerBar.state = NSVisualEffectStateActive;
+    composerBar.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
     [pane addSubview:composerBar];
 
     _composerTargetLabel = [self label:PTL(@"只读 · 请先同步当前会话", @"Read only · sync this conversation first") size:10.5 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
@@ -3054,7 +3631,15 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _imagePreviewScroll.hasVerticalScroller = NO;
     _imagePreviewScroll.autohidesScrollers = YES;
     _imagePreviewScroll.hidden = YES;
-    [composerBar addSubview:_imagePreviewScroll];
+    _composerSurface = [[PTComposerDropSurfaceView alloc] initWithFrame:NSZeroRect];
+    _composerSurface.translatesAutoresizingMaskIntoConstraints = NO;
+    __weak typeof(self) weakSelf = self;
+    _composerSurface.dropHandler = ^BOOL(NSArray<NSURL *> *urls) {
+        return [weakSelf addComposerAttachmentURLs:urls floating:NO];
+    };
+    [composerBar addSubview:_composerSurface];
+
+    [_composerSurface addSubview:_imagePreviewScroll];
 
     _imagePreviewStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     _imagePreviewStack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3064,51 +3649,81 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _imagePreviewStack.edgeInsets = NSEdgeInsetsMake(2, 0, 2, 0);
     _imagePreviewScroll.documentView = _imagePreviewStack;
 
-    _imageButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"photo.badge.plus"
-        accessibilityDescription:PTL(@"添加图片", @"Add images")] target:self action:@selector(chooseImages:)];
+    PTAnimatedButton *addButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    addButton.title = @"＋";
+    addButton.font = [NSFont systemFontOfSize:25 weight:NSFontWeightLight];
+    addButton.contentTintColor = NSColor.labelColor;
+    addButton.fillColor = NSColor.clearColor;
+    addButton.hoverFillColor = PTWarmChipColor();
+    addButton.pressedFillColor = PTWarmBorderColor();
+    addButton.cornerRadius = 19;
+    addButton.target = self;
+    addButton.action = @selector(chooseAttachments:);
+    _imageButton = addButton;
     _imageButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _imageButton.bezelStyle = NSBezelStyleRounded;
-    _imageButton.toolTip = PTL(@"添加图片（仅支持图片文件）", @"Add images (image files only)");
+    _imageButton.toolTip = PTL(@"添加文件或图片，也可以直接拖入", @"Add files or images, or drag them here");
     _imageButton.enabled = NO;
-    [composerBar addSubview:_imageButton];
+    [_composerSurface addSubview:_imageButton];
 
     NSScrollView *composerScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     composerScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    composerScroll.borderType = NSBezelBorder;
+    composerScroll.borderType = NSNoBorder;
     composerScroll.hasVerticalScroller = YES;
     composerScroll.autohidesScrollers = YES;
-    composerScroll.drawsBackground = YES;
-    composerScroll.backgroundColor = PTWarmCardColor();
-    composerScroll.wantsLayer = YES;
-    composerScroll.layer.cornerRadius = 12;
-    composerScroll.layer.masksToBounds = YES;
-    [composerBar addSubview:composerScroll];
+    composerScroll.drawsBackground = NO;
+    [_composerSurface addSubview:composerScroll];
 
     _composerTextView = [[PTComposerTextView alloc] initWithFrame:NSMakeRect(0, 0, 500, 52)];
-    _composerTextView.font = [NSFont systemFontOfSize:13 weight:NSFontWeightRegular];
+    _composerTextView.font = [NSFont systemFontOfSize:15 weight:NSFontWeightRegular];
     _composerTextView.drawsBackground = NO;
     _composerTextView.richText = NO;
     _composerTextView.allowsUndo = YES;
     _composerTextView.verticallyResizable = YES;
     _composerTextView.horizontallyResizable = NO;
     _composerTextView.textContainer.widthTracksTextView = YES;
-    _composerTextView.textContainerInset = NSMakeSize(8, 8);
+    _composerTextView.textContainerInset = NSMakeSize(7, 9);
+    _composerTextView.placeholderText = PTL(@"给 Claude 发消息", @"Message Claude");
     _composerTextView.editable = NO;
-    __weak typeof(self) weakSelf = self;
     _composerTextView.submitHandler = ^{
         [weakSelf sendMessage:nil];
     };
     _composerTextView.imagePasteHandler = ^BOOL(NSPasteboard *pasteboard) {
         return [weakSelf handleImagePasteboard:pasteboard];
     };
+    _composerTextView.fileDropHandler = ^BOOL(NSArray<NSURL *> *urls) {
+        return [weakSelf addComposerAttachmentURLs:urls floating:NO];
+    };
     composerScroll.documentView = _composerTextView;
 
-    _sendButton = [NSButton buttonWithTitle:PTL(@"发送 ↗", @"Send ↗") target:self action:@selector(sendMessage:)];
+    _composerEffortButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    _composerEffortButton.title = PTL(@"推理强度⌄", @"Effort⌄");
+    _composerEffortButton.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    _composerEffortButton.contentTintColor = NSColor.secondaryLabelColor;
+    _composerEffortButton.fillColor = NSColor.clearColor;
+    _composerEffortButton.hoverFillColor = PTWarmChipColor();
+    _composerEffortButton.pressedFillColor = PTWarmBorderColor();
+    _composerEffortButton.cornerRadius = 17;
+    _composerEffortButton.target = self;
+    _composerEffortButton.action = @selector(showComposerOptions:);
+    _composerEffortButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _composerEffortButton.enabled = NO;
+    [_composerSurface addSubview:_composerEffortButton];
+
+    PTAnimatedButton *sendButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    sendButton.title = @"↑";
+    sendButton.font = [NSFont systemFontOfSize:23 weight:NSFontWeightMedium];
+    sendButton.contentTintColor = NSColor.whiteColor;
+    sendButton.fillColor = PTColor(0.12, 0.11, 0.10);
+    sendButton.hoverFillColor = PTWarmAccentColor();
+    sendButton.pressedFillColor = PTColor(0.45, 0.18, 0.06);
+    sendButton.cornerRadius = 22;
+    sendButton.target = self;
+    sendButton.action = @selector(sendMessage:);
+    _sendButton = sendButton;
     _sendButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _sendButton.bezelStyle = NSBezelStyleRounded;
-    _sendButton.contentTintColor = PTWarmAccentColor();
+    _sendButton.toolTip = PTL(@"发送消息", @"Send message");
     _sendButton.enabled = NO;
-    [composerBar addSubview:_sendButton];
+    [_composerSurface addSubview:_sendButton];
 
     NSVisualEffectView *statusBar = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
     statusBar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3119,7 +3734,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _bottomStatusLabel = [self label:PTL(@"只读 · Terminal 是唯一执行引擎", @"Read only · Terminal is the sole execution engine") size:10 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
     [statusBar addSubview:_bottomStatusLabel];
 
-    _composerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:116];
+    _composerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:112];
     _imagePreviewHeightConstraint = [_imagePreviewScroll.heightAnchor constraintEqualToConstant:0];
     [NSLayoutConstraint activateConstraints:@[
         [header.topAnchor constraintEqualToAnchor:pane.topAnchor],
@@ -3143,14 +3758,11 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [_remoteButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
         [_inspectorToggleButton.trailingAnchor constraintEqualToAnchor:_remoteButton.leadingAnchor constant:-8],
         [_inspectorToggleButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_modelPicker.trailingAnchor constraintEqualToAnchor:_inspectorToggleButton.leadingAnchor constant:-8],
-        [_modelPicker.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_modelPicker.widthAnchor constraintEqualToConstant:110],
         [_inspectorToggleButton.widthAnchor constraintEqualToConstant:62],
         [_remoteButton.widthAnchor constraintEqualToConstant:60],
         [_connectButton.widthAnchor constraintEqualToConstant:84],
-        [_conversationTitle.trailingAnchor constraintLessThanOrEqualToAnchor:_modelPicker.leadingAnchor constant:-12],
-        [_conversationDetail.trailingAnchor constraintLessThanOrEqualToAnchor:_modelPicker.leadingAnchor constant:-12],
+        [_conversationTitle.trailingAnchor constraintLessThanOrEqualToAnchor:_inspectorToggleButton.leadingAnchor constant:-12],
+        [_conversationDetail.trailingAnchor constraintLessThanOrEqualToAnchor:_inspectorToggleButton.leadingAnchor constant:-12],
 
         [composerBar.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor],
         [composerBar.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
@@ -3158,23 +3770,33 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         _composerHeightConstraint,
         [_composerTargetLabel.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:18],
         [_composerTargetLabel.topAnchor constraintEqualToAnchor:composerBar.topAnchor constant:8],
-        [_imagePreviewScroll.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:18],
-        [_imagePreviewScroll.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-16],
-        [_imagePreviewScroll.topAnchor constraintEqualToAnchor:_composerTargetLabel.bottomAnchor constant:4],
+        [_composerSurface.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:14],
+        [_composerSurface.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-14],
+        [_composerSurface.topAnchor constraintEqualToAnchor:_composerTargetLabel.bottomAnchor constant:6],
+        [_composerSurface.bottomAnchor constraintEqualToAnchor:composerBar.bottomAnchor constant:-10],
+        [_imagePreviewScroll.leadingAnchor constraintEqualToAnchor:_composerSurface.leadingAnchor constant:12],
+        [_imagePreviewScroll.trailingAnchor constraintEqualToAnchor:_composerSurface.trailingAnchor constant:-12],
+        [_imagePreviewScroll.topAnchor constraintEqualToAnchor:_composerSurface.topAnchor constant:7],
         _imagePreviewHeightConstraint,
         [_imagePreviewStack.leadingAnchor constraintEqualToAnchor:_imagePreviewScroll.contentView.leadingAnchor],
         [_imagePreviewStack.topAnchor constraintEqualToAnchor:_imagePreviewScroll.contentView.topAnchor],
         [_imagePreviewStack.bottomAnchor constraintEqualToAnchor:_imagePreviewScroll.contentView.bottomAnchor],
-        [_imageButton.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:24],
-        [_imageButton.widthAnchor constraintEqualToConstant:36],
-        [_imageButton.heightAnchor constraintEqualToConstant:36],
-        [composerScroll.leadingAnchor constraintEqualToAnchor:_imageButton.trailingAnchor constant:10],
-        [composerScroll.topAnchor constraintEqualToAnchor:_imagePreviewScroll.bottomAnchor constant:6],
-        [composerScroll.bottomAnchor constraintEqualToAnchor:composerBar.bottomAnchor constant:-10],
+        [_imageButton.leadingAnchor constraintEqualToAnchor:_composerSurface.leadingAnchor constant:10],
+        [_imageButton.widthAnchor constraintEqualToConstant:38],
+        [_imageButton.heightAnchor constraintEqualToConstant:38],
+        [composerScroll.leadingAnchor constraintEqualToAnchor:_imageButton.trailingAnchor constant:6],
+        [composerScroll.topAnchor constraintEqualToAnchor:_imagePreviewScroll.bottomAnchor constant:2],
+        [composerScroll.bottomAnchor constraintEqualToAnchor:_composerSurface.bottomAnchor constant:-7],
         [_imageButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [_sendButton.leadingAnchor constraintEqualToAnchor:composerScroll.trailingAnchor constant:12],
-        [_sendButton.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-24],
+        [composerScroll.trailingAnchor constraintEqualToAnchor:_composerEffortButton.leadingAnchor constant:-5],
+        [_composerEffortButton.trailingAnchor constraintEqualToAnchor:_sendButton.leadingAnchor constant:-6],
+        [_composerEffortButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
+        [_composerEffortButton.widthAnchor constraintEqualToConstant:92],
+        [_composerEffortButton.heightAnchor constraintEqualToConstant:34],
+        [_sendButton.trailingAnchor constraintEqualToAnchor:_composerSurface.trailingAnchor constant:-10],
         [_sendButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
+        [_sendButton.widthAnchor constraintEqualToConstant:44],
+        [_sendButton.heightAnchor constraintEqualToConstant:44],
         [statusBar.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor],
         [statusBar.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
         [statusBar.bottomAnchor constraintEqualToAnchor:pane.bottomAnchor],
@@ -3286,17 +3908,16 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
     [configuration.userContentController addScriptMessageHandler:self name:@"quoteSelection"];
     [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptEditReview"];
+    [configuration.userContentController addScriptMessageHandler:self name:@"answerQuestion"];
     _floatingConversationView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
     _floatingConversationView.translatesAutoresizingMaskIntoConstraints = NO;
     _floatingConversationView.navigationDelegate = self;
     if (@available(macOS 12.0, *)) _floatingConversationView.underPageBackgroundColor = NSColor.clearColor;
     [surface addSubview:_floatingConversationView];
 
-    NSVisualEffectView *composerBar = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    PTAppearanceSurfaceView *composerBar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
     composerBar.translatesAutoresizingMaskIntoConstraints = NO;
-    composerBar.material = NSVisualEffectMaterialContentBackground;
-    composerBar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    composerBar.state = NSVisualEffectStateActive;
+    composerBar.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
     [surface addSubview:composerBar];
 
     _floatingComposerLabel = [self label:PTL(@"未同步此会话", @"Conversation not synced") size:10.5
@@ -3310,7 +3931,14 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingImagePreviewScroll.hasVerticalScroller = NO;
     _floatingImagePreviewScroll.autohidesScrollers = YES;
     _floatingImagePreviewScroll.hidden = YES;
-    [composerBar addSubview:_floatingImagePreviewScroll];
+    _floatingComposerSurface = [[PTComposerDropSurfaceView alloc] initWithFrame:NSZeroRect];
+    _floatingComposerSurface.translatesAutoresizingMaskIntoConstraints = NO;
+    __weak typeof(self) weakSelf = self;
+    _floatingComposerSurface.dropHandler = ^BOOL(NSArray<NSURL *> *urls) {
+        return [weakSelf addComposerAttachmentURLs:urls floating:YES];
+    };
+    [composerBar addSubview:_floatingComposerSurface];
+    [_floatingComposerSurface addSubview:_floatingImagePreviewScroll];
 
     _floatingImagePreviewStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     _floatingImagePreviewStack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3319,28 +3947,32 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingImagePreviewStack.spacing = 6;
     _floatingImagePreviewScroll.documentView = _floatingImagePreviewStack;
 
-    _floatingImageButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"photo.badge.plus"
-        accessibilityDescription:PTL(@"添加图片", @"Add images")] target:self action:@selector(chooseFloatingImages:)];
+    PTAnimatedButton *floatingAdd = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    floatingAdd.title = @"＋";
+    floatingAdd.font = [NSFont systemFontOfSize:23 weight:NSFontWeightLight];
+    floatingAdd.contentTintColor = NSColor.labelColor;
+    floatingAdd.fillColor = NSColor.clearColor;
+    floatingAdd.hoverFillColor = PTWarmChipColor();
+    floatingAdd.pressedFillColor = PTWarmBorderColor();
+    floatingAdd.cornerRadius = 18;
+    floatingAdd.target = self;
+    floatingAdd.action = @selector(chooseFloatingAttachments:);
+    _floatingImageButton = floatingAdd;
     _floatingImageButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _floatingImageButton.bezelStyle = NSBezelStyleRounded;
-    _floatingImageButton.toolTip = PTL(@"添加图片（仅支持图片文件）", @"Add images (image files only)");
+    _floatingImageButton.toolTip = PTL(@"添加文件或图片，也可以直接拖入", @"Add files or images, or drag them here");
     _floatingImageButton.enabled = NO;
-    [composerBar addSubview:_floatingImageButton];
+    [_floatingComposerSurface addSubview:_floatingImageButton];
 
     NSScrollView *composerScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     composerScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    composerScroll.borderType = NSBezelBorder;
+    composerScroll.borderType = NSNoBorder;
     composerScroll.hasVerticalScroller = YES;
     composerScroll.autohidesScrollers = YES;
-    composerScroll.drawsBackground = YES;
-    composerScroll.backgroundColor = PTWarmCardColor();
-    composerScroll.wantsLayer = YES;
-    composerScroll.layer.cornerRadius = 11;
-    composerScroll.layer.masksToBounds = YES;
-    [composerBar addSubview:composerScroll];
+    composerScroll.drawsBackground = NO;
+    [_floatingComposerSurface addSubview:composerScroll];
 
     _floatingComposerTextView = [[PTComposerTextView alloc] initWithFrame:NSMakeRect(0, 0, 360, 44)];
-    _floatingComposerTextView.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightRegular];
+    _floatingComposerTextView.font = [NSFont systemFontOfSize:14 weight:NSFontWeightRegular];
     _floatingComposerTextView.drawsBackground = NO;
     _floatingComposerTextView.richText = NO;
     _floatingComposerTextView.allowsUndo = YES;
@@ -3348,24 +3980,47 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingComposerTextView.horizontallyResizable = NO;
     _floatingComposerTextView.textContainer.widthTracksTextView = YES;
     _floatingComposerTextView.textContainerInset = NSMakeSize(7, 7);
+    _floatingComposerTextView.placeholderText = PTL(@"给 Claude 发消息", @"Message Claude");
     _floatingComposerTextView.editable = NO;
-    __weak typeof(self) weakSelf = self;
     _floatingComposerTextView.submitHandler = ^{
         [weakSelf sendFloatingMessage:nil];
     };
     _floatingComposerTextView.imagePasteHandler = ^BOOL(NSPasteboard *pasteboard) {
         return [weakSelf handleFloatingImagePasteboard:pasteboard];
     };
+    _floatingComposerTextView.fileDropHandler = ^BOOL(NSArray<NSURL *> *urls) {
+        return [weakSelf addComposerAttachmentURLs:urls floating:YES];
+    };
     composerScroll.documentView = _floatingComposerTextView;
 
-    _floatingSendButton = [NSButton buttonWithTitle:PTL(@"发送 ↗", @"Send ↗") target:self action:@selector(sendFloatingMessage:)];
-    _floatingSendButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _floatingSendButton.bezelStyle = NSBezelStyleRounded;
-    _floatingSendButton.contentTintColor = PTWarmAccentColor();
-    _floatingSendButton.enabled = NO;
-    [composerBar addSubview:_floatingSendButton];
+    _floatingEffortButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    _floatingEffortButton.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+    _floatingEffortButton.contentTintColor = NSColor.secondaryLabelColor;
+    _floatingEffortButton.fillColor = NSColor.clearColor;
+    _floatingEffortButton.hoverFillColor = PTWarmChipColor();
+    _floatingEffortButton.pressedFillColor = PTWarmBorderColor();
+    _floatingEffortButton.cornerRadius = 16;
+    _floatingEffortButton.target = self;
+    _floatingEffortButton.action = @selector(showComposerOptions:);
+    _floatingEffortButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [_floatingComposerSurface addSubview:_floatingEffortButton];
 
-    _floatingComposerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:110];
+    PTAnimatedButton *floatingSend = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    floatingSend.title = @"↑";
+    floatingSend.font = [NSFont systemFontOfSize:21 weight:NSFontWeightMedium];
+    floatingSend.contentTintColor = NSColor.whiteColor;
+    floatingSend.fillColor = PTColor(0.12, 0.11, 0.10);
+    floatingSend.hoverFillColor = PTWarmAccentColor();
+    floatingSend.pressedFillColor = PTColor(0.45, 0.18, 0.06);
+    floatingSend.cornerRadius = 20;
+    floatingSend.target = self;
+    floatingSend.action = @selector(sendFloatingMessage:);
+    _floatingSendButton = floatingSend;
+    _floatingSendButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _floatingSendButton.enabled = NO;
+    [_floatingComposerSurface addSubview:_floatingSendButton];
+
+    _floatingComposerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:108];
     _floatingImagePreviewHeightConstraint = [_floatingImagePreviewScroll.heightAnchor constraintEqualToConstant:0];
     [NSLayoutConstraint activateConstraints:@[
         [_floatingConversationView.topAnchor constraintEqualToAnchor:surface.topAnchor],
@@ -3379,24 +4034,35 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [_floatingComposerLabel.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:14],
         [_floatingComposerLabel.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-14],
         [_floatingComposerLabel.topAnchor constraintEqualToAnchor:composerBar.topAnchor constant:7],
-        [_floatingImagePreviewScroll.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:14],
-        [_floatingImagePreviewScroll.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-12],
-        [_floatingImagePreviewScroll.topAnchor constraintEqualToAnchor:_floatingComposerLabel.bottomAnchor constant:3],
+        [_floatingComposerSurface.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:12],
+        [_floatingComposerSurface.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-12],
+        [_floatingComposerSurface.topAnchor constraintEqualToAnchor:_floatingComposerLabel.bottomAnchor constant:5],
+        [_floatingComposerSurface.bottomAnchor constraintEqualToAnchor:composerBar.bottomAnchor constant:-9],
+        [_floatingImagePreviewScroll.leadingAnchor constraintEqualToAnchor:_floatingComposerSurface.leadingAnchor constant:10],
+        [_floatingImagePreviewScroll.trailingAnchor constraintEqualToAnchor:_floatingComposerSurface.trailingAnchor constant:-10],
+        [_floatingImagePreviewScroll.topAnchor constraintEqualToAnchor:_floatingComposerSurface.topAnchor constant:6],
         _floatingImagePreviewHeightConstraint,
         [_floatingImagePreviewStack.leadingAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.contentView.leadingAnchor],
         [_floatingImagePreviewStack.topAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.contentView.topAnchor],
         [_floatingImagePreviewStack.bottomAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.contentView.bottomAnchor],
-        [_floatingImageButton.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:18],
-        [_floatingImageButton.widthAnchor constraintEqualToConstant:34],
-        [_floatingImageButton.heightAnchor constraintEqualToConstant:34],
-        [composerScroll.leadingAnchor constraintEqualToAnchor:_floatingImageButton.trailingAnchor constant:9],
-        [composerScroll.topAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.bottomAnchor constant:5],
-        [composerScroll.bottomAnchor constraintEqualToAnchor:composerBar.bottomAnchor constant:-9],
+        [_floatingImageButton.leadingAnchor constraintEqualToAnchor:_floatingComposerSurface.leadingAnchor constant:8],
+        [_floatingImageButton.widthAnchor constraintEqualToConstant:36],
+        [_floatingImageButton.heightAnchor constraintEqualToConstant:36],
+        [composerScroll.leadingAnchor constraintEqualToAnchor:_floatingImageButton.trailingAnchor constant:5],
+        [composerScroll.topAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.bottomAnchor constant:2],
+        [composerScroll.bottomAnchor constraintEqualToAnchor:_floatingComposerSurface.bottomAnchor constant:-6],
         [_floatingImageButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [_floatingSendButton.leadingAnchor constraintEqualToAnchor:composerScroll.trailingAnchor constant:10],
-        [_floatingSendButton.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-18],
-        [_floatingSendButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor]
+        [composerScroll.trailingAnchor constraintEqualToAnchor:_floatingEffortButton.leadingAnchor constant:-4],
+        [_floatingEffortButton.trailingAnchor constraintEqualToAnchor:_floatingSendButton.leadingAnchor constant:-4],
+        [_floatingEffortButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
+        [_floatingEffortButton.widthAnchor constraintEqualToConstant:74],
+        [_floatingEffortButton.heightAnchor constraintEqualToConstant:32],
+        [_floatingSendButton.trailingAnchor constraintEqualToAnchor:_floatingComposerSurface.trailingAnchor constant:-8],
+        [_floatingSendButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
+        [_floatingSendButton.widthAnchor constraintEqualToConstant:40],
+        [_floatingSendButton.heightAnchor constraintEqualToConstant:40]
     ]];
+    [self updateComposerConfigurationButtons];
 
     NSURL *htmlURL = [NSBundle.mainBundle URLForResource:@"index" withExtension:@"html"];
     if (htmlURL) {
@@ -3575,6 +4241,10 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     return images;
 }
 
+- (NSArray<NSString *> *)pendingFilesForClaude {
+    return [_pendingFiles copy] ?: @[];
+}
+
 - (NSArray<NSImage *> *)floatingPendingImagesForClaude {
     NSMutableArray<NSImage *> *images = [NSMutableArray arrayWithCapacity:_floatingPendingImages.count];
     for (NSDictionary *item in _floatingPendingImages) {
@@ -3582,6 +4252,43 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         if (image.isValid) [images addObject:image];
     }
     return images;
+}
+
+- (NSArray<NSString *> *)floatingPendingFilesForClaude {
+    return [_floatingPendingFiles copy] ?: @[];
+}
+
+- (BOOL)addComposerAttachmentURLs:(NSArray<NSURL *> *)urls floating:(BOOL)floating {
+    NSUInteger added = 0;
+    for (NSURL *url in urls ?: @[]) {
+        if (!url.isFileURL) continue;
+        BOOL directory = NO;
+        NSString *path = url.path.stringByStandardizingPath;
+        if (path.length == 0 ||
+            ![NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&directory] || directory) continue;
+        if (PTIsSupportedImagePath(path)) {
+            BOOL accepted = floating
+                ? [self addFloatingImageURL:[NSURL fileURLWithPath:path] temporary:NO]
+                : [self addImageURL:[NSURL fileURLWithPath:path] temporary:NO];
+            if (accepted) added++;
+            continue;
+        }
+        NSMutableArray<NSString *> *files = floating ? _floatingPendingFiles : _pendingFiles;
+        if (![files containsObject:path]) {
+            [files addObject:path];
+            added++;
+        }
+    }
+    if (floating) {
+        [self updateFloatingImagePreviews];
+        _floatingComposerLabel.stringValue = [NSString stringWithFormat:
+            PTL(@"已添加 %lu 个附件", @"Added %lu attachments"), (unsigned long)added];
+    } else {
+        [self updateImagePreviews];
+        _statusLabel.stringValue = [NSString stringWithFormat:
+            PTL(@"已添加 %lu 个附件", @"Added %lu attachments"), (unsigned long)added];
+    }
+    return added > 0;
 }
 
 - (BOOL)addFloatingImageURL:(NSURL *)url temporary:(BOOL)temporary {
@@ -3607,15 +4314,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSDictionary *options = @{NSPasteboardURLReadingFileURLsOnlyKey: @YES};
     NSArray<NSURL *> *fileURLs = [pasteboard readObjectsForClasses:@[NSURL.class] options:options];
     if (fileURLs.count > 0) {
-        for (NSURL *url in fileURLs) {
-            if (!PTIsSupportedImagePath(url.path) || ![[NSImage alloc] initWithContentsOfURL:url]) {
-                _floatingComposerLabel.stringValue = @"仅支持粘贴图片，其他文件已拒绝";
-                return YES;
-            }
-        }
-        for (NSURL *url in fileURLs) [self addFloatingImageURL:url temporary:NO];
-        _floatingComposerLabel.stringValue = [NSString stringWithFormat:@"已添加 %lu 张图片",
-            (unsigned long)fileURLs.count];
+        [self addComposerAttachmentURLs:fileURLs floating:YES];
         return YES;
     }
 
@@ -3630,7 +4329,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     return YES;
 }
 
-- (void)chooseFloatingImages:(id)sender {
+- (void)chooseFloatingAttachments:(id)sender {
     (void)sender;
     BOOL ready = _bridge.running && [_bridge.sessionID isEqual:_floatingSessionID];
     if (!ready) {
@@ -3638,29 +4337,27 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         return;
     }
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.title = @"选择图片";
-    panel.prompt = @"添加";
+    panel.title = PTL(@"添加文件或图片", @"Add files or images");
+    panel.prompt = PTL(@"添加", @"Add");
     panel.canChooseDirectories = NO;
     panel.canChooseFiles = YES;
     panel.allowsMultipleSelection = YES;
     panel.resolvesAliases = YES;
-    NSMutableArray<UTType *> *imageTypes = [NSMutableArray array];
-    for (NSString *extension in @[@"png", @"jpg", @"jpeg", @"heic", @"heif",
-        @"webp", @"gif", @"tif", @"tiff", @"bmp"]) {
-        UTType *type = [UTType typeWithFilenameExtension:extension];
-        if (type) [imageTypes addObject:type];
-    }
-    panel.allowedContentTypes = imageTypes;
     [panel beginSheetModalForWindow:_floatingPanel completionHandler:^(NSModalResponse response) {
         if (response != NSModalResponseOK) return;
-        NSUInteger added = 0;
-        for (NSURL *url in panel.URLs) {
-            if ([self addFloatingImageURL:url temporary:NO]) added++;
-        }
-        self->_floatingComposerLabel.stringValue = added
-            ? [NSString stringWithFormat:@"已添加 %lu 张图片", (unsigned long)added]
-            : @"没有可用的图片";
+        [self addComposerAttachmentURLs:panel.URLs floating:YES];
     }];
+}
+
+- (void)chooseFloatingImages:(id)sender {
+    [self chooseFloatingAttachments:sender];
+}
+
+- (void)removeFloatingPendingFile:(NSButton *)sender {
+    NSString *path = [sender.identifier isKindOfClass:NSString.class] ? sender.identifier : @"";
+    if (path.length == 0) return;
+    [_floatingPendingFiles removeObject:path];
+    [self updateFloatingImagePreviews];
 }
 
 - (void)removeFloatingPendingImage:(NSButton *)sender {
@@ -3723,10 +4420,54 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
             [remove.widthAnchor constraintEqualToConstant:20]
         ]];
     }
-    BOOL hasImages = _floatingPendingImages.count > 0;
-    _floatingImagePreviewScroll.hidden = !hasImages;
-    _floatingImagePreviewHeightConstraint.constant = hasImages ? 46 : 0;
-    _floatingComposerHeightConstraint.constant = hasImages ? 158 : 110;
+    for (NSString *path in _floatingPendingFiles) {
+        PTAppearanceSurfaceView *chip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+        chip.translatesAutoresizingMaskIntoConstraints = NO;
+        chip.surfaceStyle = PTAppearanceSurfaceStyleChip;
+        chip.layer.cornerRadius = 9;
+        chip.layer.borderWidth = 0.6;
+        NSImageView *icon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        icon.translatesAutoresizingMaskIntoConstraints = NO;
+        icon.image = [NSImage imageWithSystemSymbolName:@"doc.fill" accessibilityDescription:PTL(@"文件", @"File")];
+        icon.contentTintColor = PTWarmAccentColor();
+        [chip addSubview:icon];
+        NSTextField *name = [self label:path.lastPathComponent ?: PTL(@"文件", @"File")
+            size:10 weight:NSFontWeightMedium color:NSColor.labelColor];
+        name.toolTip = path;
+        [chip addSubview:name];
+        PTAnimatedButton *remove = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+        remove.translatesAutoresizingMaskIntoConstraints = NO;
+        remove.title = @"×";
+        remove.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
+        remove.contentTintColor = NSColor.secondaryLabelColor;
+        remove.hoverFillColor = PTWarmBorderColor();
+        remove.cornerRadius = 9;
+        remove.target = self;
+        remove.action = @selector(removeFloatingPendingFile:);
+        remove.identifier = path;
+        [chip addSubview:remove];
+        [_floatingImagePreviewStack addArrangedSubview:chip];
+        [NSLayoutConstraint activateConstraints:@[
+            [chip.widthAnchor constraintEqualToConstant:160],
+            [chip.heightAnchor constraintEqualToConstant:42],
+            [icon.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor constant:8],
+            [icon.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [icon.widthAnchor constraintEqualToConstant:20],
+            [icon.heightAnchor constraintEqualToConstant:20],
+            [name.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:7],
+            [name.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [remove.leadingAnchor constraintEqualToAnchor:name.trailingAnchor constant:3],
+            [remove.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:-5],
+            [remove.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [remove.widthAnchor constraintEqualToConstant:20],
+            [remove.heightAnchor constraintEqualToConstant:20],
+            [name.widthAnchor constraintLessThanOrEqualToConstant:96]
+        ]];
+    }
+    BOOL hasAttachments = _floatingPendingImages.count > 0 || _floatingPendingFiles.count > 0;
+    _floatingImagePreviewScroll.hidden = !hasAttachments;
+    _floatingImagePreviewHeightConstraint.constant = hasAttachments ? 46 : 0;
+    _floatingComposerHeightConstraint.constant = hasAttachments ? 156 : 108;
     [_floatingPanel.contentView layoutSubtreeIfNeeded];
 }
 
@@ -3738,6 +4479,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [_temporaryImagePaths removeObject:path];
     }
     [_floatingPendingImages removeAllObjects];
+    [_floatingPendingFiles removeAllObjects];
     [self updateFloatingImagePreviews];
 }
 
@@ -3774,15 +4516,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSDictionary *options = @{NSPasteboardURLReadingFileURLsOnlyKey: @YES};
     NSArray<NSURL *> *fileURLs = [pasteboard readObjectsForClasses:@[NSURL.class] options:options];
     if (fileURLs.count > 0) {
-        for (NSURL *url in fileURLs) {
-            if (!PTIsSupportedImagePath(url.path) || ![[NSImage alloc] initWithContentsOfURL:url]) {
-                _statusLabel.stringValue = @"仅支持粘贴图片，其他文件已拒绝";
-                return YES;
-            }
-        }
-        for (NSURL *url in fileURLs) [self addImageURL:url temporary:NO];
-        _statusLabel.stringValue = [NSString stringWithFormat:@"已添加 %lu 张图片",
-            (unsigned long)fileURLs.count];
+        [self addComposerAttachmentURLs:fileURLs floating:NO];
         return YES;
     }
 
@@ -3797,35 +4531,34 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     return YES;
 }
 
-- (void)chooseImages:(id)sender {
+- (void)chooseAttachments:(id)sender {
+    (void)sender;
     if (!_agentState.commandsEnabled) {
-        _statusLabel.stringValue = @"请先同步当前选中的 Terminal 会话";
+        _statusLabel.stringValue = PTL(@"请先同步当前选中的 Terminal 会话", @"Sync the selected Terminal conversation first");
         return;
     }
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.title = @"选择图片";
-    panel.prompt = @"添加";
+    panel.title = PTL(@"添加文件或图片", @"Add files or images");
+    panel.prompt = PTL(@"添加", @"Add");
     panel.canChooseDirectories = NO;
     panel.canChooseFiles = YES;
     panel.allowsMultipleSelection = YES;
     panel.resolvesAliases = YES;
-    NSMutableArray<UTType *> *imageTypes = [NSMutableArray array];
-    for (NSString *extension in @[@"png", @"jpg", @"jpeg", @"heic", @"heif",
-        @"webp", @"gif", @"tif", @"tiff", @"bmp"]) {
-        UTType *type = [UTType typeWithFilenameExtension:extension];
-        if (type) [imageTypes addObject:type];
-    }
-    panel.allowedContentTypes = imageTypes;
     [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse response) {
         if (response != NSModalResponseOK) return;
-        NSUInteger added = 0;
-        for (NSURL *url in panel.URLs) {
-            if ([self addImageURL:url temporary:NO]) added++;
-        }
-        self->_statusLabel.stringValue = added
-            ? [NSString stringWithFormat:@"已添加 %lu 张图片", (unsigned long)added]
-            : @"没有可用的图片";
+        [self addComposerAttachmentURLs:panel.URLs floating:NO];
     }];
+}
+
+- (void)chooseImages:(id)sender {
+    [self chooseAttachments:sender];
+}
+
+- (void)removePendingFile:(NSButton *)sender {
+    NSString *path = [sender.identifier isKindOfClass:NSString.class] ? sender.identifier : @"";
+    if (path.length == 0) return;
+    [_pendingFiles removeObject:path];
+    [self updateImagePreviews];
 }
 
 - (void)removePendingImage:(NSButton *)sender {
@@ -3898,11 +4631,72 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
             [name.widthAnchor constraintLessThanOrEqualToConstant:108]
         ]];
     }
-    BOOL hasImages = _pendingImages.count > 0;
-    _imagePreviewScroll.hidden = !hasImages;
-    _imagePreviewHeightConstraint.constant = hasImages ? 44 : 0;
-    _composerHeightConstraint.constant = hasImages ? 160 : 116;
-    [_window.contentView layoutSubtreeIfNeeded];
+    for (NSString *path in _pendingFiles) {
+        PTAppearanceSurfaceView *chip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+        chip.translatesAutoresizingMaskIntoConstraints = NO;
+        chip.surfaceStyle = PTAppearanceSurfaceStyleChip;
+        chip.layer.cornerRadius = 10;
+        chip.layer.borderWidth = 0.6;
+
+        NSImageView *icon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        icon.translatesAutoresizingMaskIntoConstraints = NO;
+        icon.image = [NSImage imageWithSystemSymbolName:@"doc.fill" accessibilityDescription:PTL(@"文件", @"File")];
+        icon.contentTintColor = PTWarmAccentColor();
+        [chip addSubview:icon];
+
+        NSTextField *name = [self label:path.lastPathComponent ?: PTL(@"文件", @"File")
+            size:10.5 weight:NSFontWeightMedium color:NSColor.labelColor];
+        name.toolTip = path;
+        [chip addSubview:name];
+
+        PTAnimatedButton *remove = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+        remove.translatesAutoresizingMaskIntoConstraints = NO;
+        remove.title = @"×";
+        remove.font = [NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
+        remove.contentTintColor = NSColor.secondaryLabelColor;
+        remove.fillColor = NSColor.clearColor;
+        remove.hoverFillColor = PTWarmBorderColor();
+        remove.cornerRadius = 9;
+        remove.target = self;
+        remove.action = @selector(removePendingFile:);
+        remove.identifier = path;
+        [chip addSubview:remove];
+
+        [_imagePreviewStack addArrangedSubview:chip];
+        [NSLayoutConstraint activateConstraints:@[
+            [chip.widthAnchor constraintEqualToConstant:190],
+            [chip.heightAnchor constraintEqualToConstant:40],
+            [icon.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor constant:9],
+            [icon.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [icon.widthAnchor constraintEqualToConstant:22],
+            [icon.heightAnchor constraintEqualToConstant:22],
+            [name.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:8],
+            [name.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [remove.leadingAnchor constraintEqualToAnchor:name.trailingAnchor constant:4],
+            [remove.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:-6],
+            [remove.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [remove.widthAnchor constraintEqualToConstant:20],
+            [remove.heightAnchor constraintEqualToConstant:20],
+            [name.widthAnchor constraintLessThanOrEqualToConstant:116]
+        ]];
+    }
+    BOOL hasAttachments = _pendingImages.count > 0 || _pendingFiles.count > 0;
+    _imagePreviewScroll.hidden = !hasAttachments;
+    CGFloat previewHeight = hasAttachments ? 44 : 0;
+    CGFloat composerHeight = hasAttachments ? 160 : 112;
+    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+        _imagePreviewHeightConstraint.constant = previewHeight;
+        _composerHeightConstraint.constant = composerHeight;
+        [_window.contentView layoutSubtreeIfNeeded];
+    } else {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.24;
+            context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            self->_imagePreviewHeightConstraint.animator.constant = previewHeight;
+            self->_composerHeightConstraint.animator.constant = composerHeight;
+            [self->_window.contentView.animator layoutSubtreeIfNeeded];
+        } completionHandler:nil];
+    }
 }
 
 - (void)clearPendingImagesAfterSuccessfulSend {
@@ -3915,6 +4709,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [_temporaryImagePaths removeObject:path];
     }
     [_pendingImages removeAllObjects];
+    [_pendingFiles removeAllObjects];
     [self updateImagePreviews];
 }
 
@@ -3927,6 +4722,209 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     return label;
 }
 
+- (NSArray<NSArray<NSString *> *> *)composerModelEntries {
+    return @[
+        @[@"Claude Fable 5", @"Fable 5", @"claude-fable-5"],
+        @[@"Claude Opus 5", @"Opus 5", @"claude-opus-5"],
+        @[@"Claude Sonnet 5", @"Sonnet 5", @"claude-sonnet-5"],
+        @[@"Claude Haiku 4.5", @"Haiku 4.5", @"claude-haiku-4-5"]
+    ];
+}
+
+- (NSArray<NSString *> *)composerEffortLevels {
+    return @[@"low", @"medium", @"high", @"xhigh", @"max"];
+}
+
+- (NSString *)composerEffortTitle:(NSString *)effort {
+    NSDictionary *titles = @{
+        @"low": @[PTL(@"低", @"Low"), @""],
+        @"medium": @[PTL(@"中", @"Medium"), @""],
+        @"high": @[PTL(@"高", @"High"), @""],
+        @"xhigh": @[PTL(@"极高", @"XHigh"), @""],
+        @"max": @[PTL(@"最高", @"Max"), @""]
+    };
+    NSArray *entry = titles[effort.lowercaseString];
+    return entry.count ? entry.firstObject : PTL(@"推理强度", @"Effort");
+}
+
+- (NSString *)composerModelShortTitle:(NSString *)modelID {
+    for (NSArray<NSString *> *entry in [self composerModelEntries]) {
+        if ([entry[2] isEqual:modelID]) return entry[1];
+    }
+    return modelID.length ? modelID : PTL(@"当前模型", @"Current model");
+}
+
+- (void)updateComposerConfigurationButtons {
+    NSString *effortTitle = [self composerEffortTitle:_selectedComposerEffort];
+    _composerEffortButton.title = [NSString stringWithFormat:@"%@ ⌄", effortTitle];
+    _floatingEffortButton.title = [NSString stringWithFormat:@"%@ ⌄", effortTitle];
+    _composerEffortButton.toolTip = [NSString stringWithFormat:
+        PTL(@"模型：%@ · 推理强度：%@", @"Model: %@ · Effort: %@"),
+        [self composerModelShortTitle:_selectedComposerModelID], effortTitle];
+    _floatingEffortButton.toolTip = _composerEffortButton.toolTip;
+}
+
+- (PTAnimatedButton *)composerPopoverButtonWithTitle:(NSString *)title
+                                               action:(SEL)action
+                                           identifier:(NSString *)identifier {
+    PTAnimatedButton *button = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.title = title;
+    button.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
+    button.contentTintColor = NSColor.labelColor;
+    button.fillColor = NSColor.clearColor;
+    button.hoverFillColor = PTWarmChipColor();
+    button.pressedFillColor = PTWarmBorderColor();
+    button.strokeColor = PTWarmBorderColor();
+    button.cornerRadius = 14;
+    button.target = self;
+    button.action = action;
+    button.identifier = identifier;
+    [button.heightAnchor constraintEqualToConstant:44].active = YES;
+    return button;
+}
+
+- (void)replaceComposerOptionsWithViews:(NSArray<NSView *> *)views height:(CGFloat)height {
+    for (NSView *view in _composerOptionsStack.arrangedSubviews.copy) {
+        [_composerOptionsStack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+    for (NSView *view in views) {
+        view.alphaValue = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion ? 1 : 0;
+        [_composerOptionsStack addArrangedSubview:view];
+        [view.widthAnchor constraintEqualToAnchor:_composerOptionsStack.widthAnchor constant:-30].active = YES;
+    }
+    _composerOptionsPopover.contentSize = NSMakeSize(310, height);
+    if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.20;
+            context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            for (NSView *view in views) view.animator.alphaValue = 1;
+        } completionHandler:nil];
+    }
+}
+
+- (void)showComposerEffortPage:(id)sender {
+    (void)sender;
+    NSTextField *title = [self label:[NSString stringWithFormat:PTL(@"推理强度 · %@", @"Reasoning effort · %@"),
+        [self composerEffortTitle:_selectedComposerEffort]] size:15 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    _composerEffortPopoverTitle = title;
+    _composerEffortSlider = [[PTEffortSlider alloc] initWithFrame:NSZeroRect];
+    _composerEffortSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    NSInteger index = [[self composerEffortLevels] indexOfObject:_selectedComposerEffort ?: @""];
+    _composerEffortSlider.selectedIndex = index == NSNotFound ? 1 : index;
+    _composerEffortSlider.target = self;
+    _composerEffortSlider.action = @selector(changeComposerEffort:);
+    [_composerEffortSlider.heightAnchor constraintEqualToConstant:62].active = YES;
+
+    NSView *captions = [[NSView alloc] initWithFrame:NSZeroRect];
+    captions.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *faster = [self label:PTL(@"更快", @"Faster") size:10.5 weight:NSFontWeightMedium color:NSColor.tertiaryLabelColor];
+    NSTextField *deeper = [self label:PTL(@"更深入", @"Deeper") size:10.5 weight:NSFontWeightMedium color:NSColor.tertiaryLabelColor];
+    [captions addSubview:faster];
+    [captions addSubview:deeper];
+    [NSLayoutConstraint activateConstraints:@[
+        [captions.heightAnchor constraintEqualToConstant:16],
+        [faster.leadingAnchor constraintEqualToAnchor:captions.leadingAnchor constant:4],
+        [faster.centerYAnchor constraintEqualToAnchor:captions.centerYAnchor],
+        [deeper.trailingAnchor constraintEqualToAnchor:captions.trailingAnchor constant:-4],
+        [deeper.centerYAnchor constraintEqualToAnchor:captions.centerYAnchor]
+    ]];
+
+    PTAnimatedButton *advanced = [self composerPopoverButtonWithTitle:PTL(@"高级设置  ›", @"Advanced  ›")
+        action:@selector(showComposerAdvancedPage:) identifier:nil];
+    [self replaceComposerOptionsWithViews:@[title, _composerEffortSlider, captions, advanced] height:216];
+}
+
+- (void)showComposerAdvancedPage:(id)sender {
+    (void)sender;
+    _composerEffortPopoverTitle = nil;
+    PTAnimatedButton *back = [self composerPopoverButtonWithTitle:PTL(@"‹  高级", @"‹  Advanced")
+        action:@selector(showComposerEffortPage:) identifier:nil];
+    NSString *model = [self composerModelShortTitle:_selectedComposerModelID];
+    NSString *effort = [self composerEffortTitle:_selectedComposerEffort];
+    PTAnimatedButton *modelRow = [self composerPopoverButtonWithTitle:
+        [NSString stringWithFormat:PTL(@"模型   ·   %@   ›", @"Model   ·   %@   ›"), model]
+        action:@selector(showComposerModelPage:) identifier:nil];
+    PTAnimatedButton *effortRow = [self composerPopoverButtonWithTitle:
+        [NSString stringWithFormat:PTL(@"推理强度   ·   %@   ›", @"Effort   ·   %@   ›"), effort]
+        action:@selector(showComposerEffortPage:) identifier:nil];
+    [self replaceComposerOptionsWithViews:@[back, modelRow, effortRow] height:190];
+}
+
+- (void)showComposerModelPage:(id)sender {
+    (void)sender;
+    _composerEffortPopoverTitle = nil;
+    PTAnimatedButton *back = [self composerPopoverButtonWithTitle:PTL(@"‹  选择模型", @"‹  Choose model")
+        action:@selector(showComposerAdvancedPage:) identifier:nil];
+    NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObject:back];
+    for (NSArray<NSString *> *entry in [self composerModelEntries]) {
+        NSString *mark = [entry[2] isEqual:_selectedComposerModelID] ? @"✓  " : @"    ";
+        PTAnimatedButton *row = [self composerPopoverButtonWithTitle:
+            [mark stringByAppendingString:entry[0]] action:@selector(changeComposerModel:) identifier:entry[2]];
+        [views addObject:row];
+    }
+    [self replaceComposerOptionsWithViews:views height:300];
+}
+
+- (void)showComposerOptions:(id)sender {
+    if (!_agentState.commandsEnabled) return;
+    if (!_composerOptionsPopover) {
+        _composerOptionsPopover = [[NSPopover alloc] init];
+        _composerOptionsPopover.behavior = NSPopoverBehaviorTransient;
+        _composerOptionsPopover.animates = YES;
+        NSViewController *controller = [[NSViewController alloc] init];
+        PTAppearanceSurfaceView *surface = [[PTAppearanceSurfaceView alloc] initWithFrame:NSMakeRect(0, 0, 310, 216)];
+        surface.surfaceStyle = PTAppearanceSurfaceStyleCard;
+        _composerOptionsStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+        _composerOptionsStack.translatesAutoresizingMaskIntoConstraints = NO;
+        _composerOptionsStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+        _composerOptionsStack.alignment = NSLayoutAttributeLeading;
+        _composerOptionsStack.spacing = 9;
+        _composerOptionsStack.edgeInsets = NSEdgeInsetsMake(15, 15, 15, 15);
+        [surface addSubview:_composerOptionsStack];
+        [NSLayoutConstraint activateConstraints:@[
+            [_composerOptionsStack.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor],
+            [_composerOptionsStack.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor],
+            [_composerOptionsStack.topAnchor constraintEqualToAnchor:surface.topAnchor],
+            [_composerOptionsStack.bottomAnchor constraintLessThanOrEqualToAnchor:surface.bottomAnchor]
+        ]];
+        controller.view = surface;
+        _composerOptionsPopover.contentViewController = controller;
+    }
+    [self showComposerEffortPage:nil];
+    [_composerOptionsPopover showRelativeToRect:[sender bounds] ofView:sender preferredEdge:NSRectEdgeMaxY];
+}
+
+- (void)changeComposerEffort:(PTEffortSlider *)slider {
+    NSArray<NSString *> *levels = [self composerEffortLevels];
+    if (slider.selectedIndex < 0 || slider.selectedIndex >= (NSInteger)levels.count) return;
+    NSString *effort = levels[slider.selectedIndex];
+    if ([_bridge sendMessage:[NSString stringWithFormat:@"/effort %@", effort]]) {
+        _selectedComposerEffort = effort;
+        _selectedSession.effort = effort;
+        [self updateComposerConfigurationButtons];
+        _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"推理强度已切换为 %@", @"Effort changed to %@"),
+            [self composerEffortTitle:effort]];
+        _composerEffortPopoverTitle.stringValue = [NSString stringWithFormat:
+            PTL(@"推理强度 · %@", @"Reasoning effort · %@"), [self composerEffortTitle:effort]];
+    }
+}
+
+- (void)changeComposerModel:(PTAnimatedButton *)sender {
+    NSString *modelID = sender.identifier;
+    if (modelID.length == 0) return;
+    if ([_bridge sendMessage:[NSString stringWithFormat:@"/model %@", modelID]]) {
+        _selectedComposerModelID = modelID;
+        _selectedSession.model = modelID;
+        [self updateComposerConfigurationButtons];
+        [self updateContextAndModelForSession:_selectedSession];
+        _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"模型已切换为 %@", @"Model changed to %@"),
+            [self composerModelShortTitle:modelID]];
+        [self showComposerModelPage:nil];
+    }
+}
+
 - (void)refreshAgentStateAndControls {
     _agentState.selectedSessionID = _selectedSession.sessionID ?: @"";
     _agentState.boundSessionID = _bridge.sessionID ?: @"";
@@ -3935,9 +4933,12 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _composerTextView.editable = ready;
     _sendButton.enabled = ready;
     _imageButton.enabled = ready;
+    _composerSurface.dropEnabled = ready;
+    _composerEffortButton.enabled = ready;
     _remoteButton.enabled = NO;
     _modelPicker.enabled = ready;
     _compactButton.enabled = ready;
+    [self updateComposerConfigurationButtons];
 
     NSString *ttyState = _bridge.running
         ? PTL(@"Terminal 已验证", @"Terminal verified")
@@ -3946,7 +4947,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         ttyState, ready ? PTL(@"当前选中会话可发送", @"Selected conversation can send")
                         : PTL(@"只读，未绑定当前会话", @"Read only; conversation not bound")];
     _composerTargetLabel.stringValue = ready
-        ? [NSString stringWithFormat:PTL(@"发送给：%@ · 可粘贴图片 · ↩ 发送，⌘↩ 换行", @"To: %@ · image paste · ↩ send, ⌘↩ newline"),
+        ? [NSString stringWithFormat:PTL(@"发送给：%@ · 可添加或拖入附件 · ↩ 发送，⌘↩ 换行", @"To: %@ · add or drop attachments · ↩ send, ⌘↩ newline"),
             _selectedSession.title ?: PTL(@"当前会话", @"Current conversation")]
         : PTL(@"只读 · 请先同步当前选中的 Terminal 会话", @"Read only · sync the selected Terminal conversation first");
     _bottomStatusLabel.stringValue = ready
@@ -3964,9 +4965,11 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingComposerTextView.editable = ready;
     _floatingSendButton.enabled = ready;
     _floatingImageButton.enabled = ready;
+    _floatingComposerSurface.dropEnabled = ready;
+    _floatingEffortButton.enabled = ready;
     if (ready) {
         _floatingComposerLabel.stringValue = [NSString stringWithFormat:
-            PTL(@"发送给：%@ · 可粘贴图片 · ↩ 发送，⌘↩ 换行", @"To: %@ · image paste · ↩ send, ⌘↩ newline"),
+            PTL(@"发送给：%@ · 可添加或拖入附件 · ↩ 发送，⌘↩ 换行", @"To: %@ · add or drop attachments · ↩ send, ⌘↩ newline"),
             session.title ?: PTL(@"悬浮会话", @"Floating conversation")];
     } else if (_agentState.sendInFlight && [_bridge.sessionID isEqual:_floatingSessionID]) {
         _floatingComposerLabel.stringValue = PTL(@"正在写入 Terminal…", @"Writing to Terminal…");
@@ -4002,6 +5005,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         @"memory_files": @[@"记忆文件", @"Memory files"],
         @"skills": @[@"Skills", @"Skills"],
         @"messages": @[@"消息", @"Messages"],
+        @"conversation_system": @[@"对话 · 系统开销", @"Conversation & system"],
         @"free_space": @[@"剩余空间", @"Free space"],
         @"autocompact_buffer": @[@"自动压缩缓冲", @"Autocompact buffer"]
     };
@@ -4018,12 +5022,28 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 
 - (void)rebuildContextBreakdownRows:(NSArray<NSDictionary *> *)breakdown {
     [self clearContextBreakdownRows];
+    if (breakdown.count == 0) {
+        NSString *message = PTL(@"会话刚开始，还没有 usage 数据。",
+                                @"Session just started — no usage data yet.");
+        NSTextField *empty = [self label:message size:10 weight:NSFontWeightRegular
+                                   color:NSColor.tertiaryLabelColor];
+        empty.lineBreakMode = NSLineBreakByWordWrapping;
+        empty.maximumNumberOfLines = 0;
+        [empty setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [empty setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [_inspectorContextDetailStack addArrangedSubview:empty];
+        [empty.widthAnchor constraintEqualToAnchor:_inspectorContextDetailStack.widthAnchor].active = YES;
+        return;
+    }
     NSDictionary<NSString *, NSColor *> *colors = @{
         @"system_prompt": NSColor.systemGrayColor,
         @"system_tools": PTWarmBorderColor(),
         @"memory_files": NSColor.systemPinkColor,
         @"skills": NSColor.systemOrangeColor,
         @"messages": NSColor.systemPurpleColor,
+        @"conversation_system": NSColor.systemPurpleColor,
         @"free_space": NSColor.systemGreenColor,
         @"autocompact_buffer": NSColor.tertiaryLabelColor
     };
@@ -4815,7 +5835,9 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _inspectorContextMeter.fillColor = PTWarmAccentColor();
 
     NSArray<NSDictionary *> *contextBreakdown = session.contextBreakdown ?: @[];
-    _contextDisclosureButton.enabled = contextBreakdown.count > 0;
+    // 总 usage 在普通 assistant 记录里就有，而分类只在 Claude Code 自己已写入
+    // /context 记录时可用。详情始终可点，但绝不为此向 Terminal 发送命令。
+    _contextDisclosureButton.enabled = YES;
     if (![_renderedContextBreakdown isEqualToArray:contextBreakdown]) {
         _renderedContextBreakdown = [contextBreakdown copy];
         [self rebuildContextBreakdownRows:contextBreakdown];
@@ -4925,11 +5947,15 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 
 - (void)toggleContextDetail:(id)sender {
     (void)sender;
-    if (!_contextDisclosureButton.enabled) return;
     _contextDetailExpanded = !_contextDetailExpanded;
     _inspectorContextDetailStack.hidden = !_contextDetailExpanded;
     _contextDisclosureButton.title = _contextDetailExpanded
         ? PTL(@"详情 ⌄", @"Details ⌄") : PTL(@"详情 ›", @"Details ›");
+    if (!_contextDetailExpanded || _selectedSession.contextBreakdown.count > 0) return;
+
+    [self rebuildContextBreakdownRows:@[]];
+    _statusLabel.stringValue = PTL(@"当前暂无已记录的上下文分类 · 未向 Terminal 发送命令",
+                                   @"No recorded context categories yet · no Terminal command was sent");
 }
 
 - (void)toggleCostDetail:(id)sender {
@@ -5008,6 +6034,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 
 - (void)updateContextAndModelForSession:(PTSessionInfo *)session {
     if (!session) return;
+    if (session.model.length > 0) _selectedComposerModelID = session.model;
+    if (session.effort.length > 0) _selectedComposerEffort = session.effort;
     NSUInteger window = session.contextWindow;
     NSUInteger used = session.contextUsed;
     if (used > 0 && window > 0) {
@@ -5034,6 +6062,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _modelPicker.itemArray.firstObject.title = session.model.length
         ? [NSString stringWithFormat:PTL(@"当前 · %@", @"Current · %@"), session.model]
         : PTL(@"当前模型", @"Current model");
+    [self updateComposerConfigurationButtons];
 }
 
 - (void)connectStoreAndBridge {
@@ -5052,6 +6081,16 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             [self updateContextAndModelForSession:self->_selectedSession];
             self->_statusLabel.stringValue = [NSString stringWithFormat:PTL(@"检测到模型切换：%@", @"Model switch detected: %@"), model];
         }
+    };
+    _store.globalEffortChanged = ^(NSString *effort) {
+        PTAppDelegate *self = weakSelf;
+        if (!self || effort.length == 0) return;
+        self->_selectedComposerEffort = effort;
+        if (self->_selectedSession && self->_bridge.running &&
+            [self->_bridge.sessionID isEqual:self->_selectedSession.sessionID]) {
+            self->_selectedSession.effort = effort;
+        }
+        [self updateComposerConfigurationButtons];
     };
     _bridge.statusChanged = ^(NSString *status) {
         PTAppDelegate *self = weakSelf;
@@ -5415,6 +6454,22 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         }
         return;
     }
+    if ([message.name isEqualToString:@"answerQuestion"]) {
+        NSString *text = [body[@"text"] isKindOfClass:NSString.class] ? body[@"text"] : @"";
+        NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class] ? body[@"sessionId"] : @"";
+        NSString *expectedSessionID = message.webView == _conversationView
+            ? _selectedSession.sessionID
+            : (message.webView == _floatingConversationView ? _floatingSessionID : nil);
+        if (text.length == 0 || sessionID.length == 0 || ![sessionID isEqual:expectedSessionID]) return;
+        // 复用普通聊天发送的同一条校验+发送路径：终端绑定校验、sendInFlight 互斥、
+        // 状态栏提示，跟老师手打消息走的是同一条通道，不额外发明一套逻辑。
+        [self sendOutgoingMessage:text
+                            images:@[]
+                      forSessionID:sessionID
+                           success:nil
+                  failureResponder:nil];
+        return;
+    }
     if (![message.name isEqualToString:@"quoteSelection"]) return;
     NSString *text = [body[@"text"] isKindOfClass:NSString.class] ? body[@"text"] : nil;
     NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class] ? body[@"sessionId"] : nil;
@@ -5532,9 +6587,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     (void)sender;
     NSString *message = _composerTextView.string;
     NSArray<NSImage *> *images = [self pendingImagesForClaude];
+    NSString *outgoing = PTMessageByAppendingClaudeFileReferences(message, [self pendingFilesForClaude]);
     // 只有 Terminal 真正接受后才清空。之前桥接失败时输入框仍被无条件清空，
     // 从老师视角看就是“消息发不出去还凭空消失”，也丢掉了重试机会。
-    [self sendOutgoingMessage:message images:images forSessionID:_selectedSession.sessionID success:^{
+    [self sendOutgoingMessage:outgoing images:images forSessionID:_selectedSession.sessionID success:^{
         [self beginAwaitingClaudeReplyForSessionID:self->_selectedSession.sessionID];
         [_composerTextView clearAfterSuccessfulSubmissionMatchingText:message];
         // 回车触发发送时，输入法可能在 keyDown: 返回后才结束当前事务；下一轮只在
@@ -5550,7 +6606,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     (void)sender;
     NSString *message = _floatingComposerTextView.string;
     NSArray<NSImage *> *images = [self floatingPendingImagesForClaude];
-    [self sendOutgoingMessage:message images:images forSessionID:_floatingSessionID success:^{
+    NSString *outgoing = PTMessageByAppendingClaudeFileReferences(message, [self floatingPendingFilesForClaude]);
+    [self sendOutgoingMessage:outgoing images:images forSessionID:_floatingSessionID success:^{
         [self beginAwaitingClaudeReplyForSessionID:self->_floatingSessionID];
         [_floatingComposerTextView clearAfterSuccessfulSubmissionMatchingText:message];
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -5594,6 +6651,436 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     } else {
         [self updateContextAndModelForSession:_selectedSession];
     }
+}
+
+#pragma mark - ask_via_prettyterm MCP 桥（独立弹窗，不经过 transcript）
+
+- (NSString *)questionRequestDirectory {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@".claude/prettyterm-questions"];
+}
+
+// 每 0.4s 扫一次目录。只认没处理过、且还没被 MCP 写回答案的 request 文件；
+// 处理过的 id 记进内存 set，重启 App 才会重新扫到还留在磁盘上的旧请求。
+- (void)pollQuestionRequests:(NSTimer *)timer {
+    (void)timer;
+    NSString *directory = self.questionRequestDirectory;
+    NSArray<NSString *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:directory error:nil];
+    if (entries.count == 0) return;
+    for (NSString *entry in entries) {
+        if (![entry hasSuffix:@".request.json"]) continue;
+        NSString *requestID = [entry substringToIndex:entry.length - @".request.json".length];
+        if ([_processedQuestionRequestIDs containsObject:requestID]) continue;
+        NSString *responsePath = [directory stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@.response.json", requestID]];
+        if ([NSFileManager.defaultManager fileExistsAtPath:responsePath]) continue;
+        NSString *requestPath = [directory stringByAppendingPathComponent:entry];
+        NSData *data = [NSData dataWithContentsOfFile:requestPath];
+        id object = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        NSDictionary *payload = [object isKindOfClass:NSDictionary.class] ? object : nil;
+        NSArray *questions = [payload[@"questions"] isKindOfClass:NSArray.class] ? payload[@"questions"] : nil;
+        if (questions.count == 0) continue; // 极端情况下文件还没写完整；下一轮轮询再看
+        [_processedQuestionRequestIDs addObject:requestID];
+        [_pendingQuestionRequests addObject:@{ @"id": requestID, @"questions": questions }];
+    }
+    [self presentNextQuestionRequestIfIdle];
+}
+
+- (void)presentNextQuestionRequestIfIdle {
+    if (_questionPanel.visible) return;
+    if (_pendingQuestionRequests.count == 0) return;
+    NSDictionary *next = _pendingQuestionRequests.firstObject;
+    [_pendingQuestionRequests removeObjectAtIndex:0];
+    [self presentQuestionRequest:next];
+}
+
+- (void)buildQuestionPanelIfNeeded {
+    if (_questionPanel) return;
+    NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+        NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow |
+        NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskFullSizeContentView;
+    _questionPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 560, 560)
+                                                  styleMask:style
+                                                    backing:NSBackingStoreBuffered
+                                                      defer:NO];
+    _questionPanel.title = PTL(@"Claude 想确认一下", @"Claude wants to check with you");
+    _questionPanel.level = NSFloatingWindowLevel;
+    _questionPanel.floatingPanel = YES;
+    _questionPanel.hidesOnDeactivate = NO;
+    _questionPanel.becomesKeyOnlyIfNeeded = NO;
+    _questionPanel.releasedWhenClosed = NO;
+    _questionPanel.titlebarAppearsTransparent = YES;
+    _questionPanel.titleVisibility = NSWindowTitleHidden;
+    _questionPanel.movableByWindowBackground = YES;
+    _questionPanel.opaque = NO;
+    _questionPanel.backgroundColor = NSColor.clearColor;
+    _questionPanel.hasShadow = YES;
+    _questionPanel.minSize = NSMakeSize(420, 360);
+    _questionPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorFullScreenAuxiliary;
+    [_questionPanel standardWindowButton:NSWindowCloseButton].hidden = YES;
+    [_questionPanel standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
+    [_questionPanel standardWindowButton:NSWindowZoomButton].hidden = YES;
+
+    PTAppearanceSurfaceView *surface = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+    surface.surfaceStyle = PTAppearanceSurfaceStyleCard;
+    surface.wantsLayer = YES;
+    surface.layer.cornerRadius = 24;
+    surface.layer.borderWidth = 0.8;
+    surface.layer.masksToBounds = YES;
+    _questionPanel.contentView = surface;
+
+    NSView *header = [[NSView alloc] initWithFrame:NSZeroRect];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    [surface addSubview:header];
+
+    PTAppearanceSurfaceView *mark = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+    mark.translatesAutoresizingMaskIntoConstraints = NO;
+    mark.surfaceStyle = PTAppearanceSurfaceStyleChip;
+    mark.wantsLayer = YES;
+    mark.layer.cornerRadius = 13;
+    NSTextField *markLabel = [self label:@"✦" size:17 weight:NSFontWeightBold color:PTWarmAccentColor()];
+    markLabel.alignment = NSTextAlignmentCenter;
+    [mark addSubview:markLabel];
+    [header addSubview:mark];
+
+    NSTextField *title = [self label:PTL(@"Claude 想确认一下", @"Claude wants to check with you")
+        size:15 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    [header addSubview:title];
+    NSTextField *subtitle = [self label:PTL(@"来自 Claude Code 的确认请求", @"A confirmation request from Claude Code")
+        size:10.5 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    [header addSubview:subtitle];
+
+    PTAnimatedButton *closeButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    closeButton.title = @"×";
+    closeButton.font = [NSFont systemFontOfSize:18 weight:NSFontWeightMedium];
+    closeButton.fillColor = NSColor.clearColor;
+    closeButton.hoverFillColor = PTWarmChipColor();
+    closeButton.pressedFillColor = PTWarmBorderColor();
+    closeButton.strokeColor = NSColor.clearColor;
+    closeButton.cornerRadius = 15;
+    closeButton.target = self;
+    closeButton.action = @selector(closeQuestionPanel:);
+    closeButton.toolTip = PTL(@"关闭", @"Close");
+    [header addSubview:closeButton];
+
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.hasVerticalScroller = YES;
+    scroll.autohidesScrollers = YES;
+    scroll.scrollerStyle = NSScrollerStyleOverlay;
+    scroll.borderType = NSNoBorder;
+    scroll.drawsBackground = NO;
+    [surface addSubview:scroll];
+
+    _questionPanelStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    _questionPanelStack.translatesAutoresizingMaskIntoConstraints = NO;
+    _questionPanelStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    _questionPanelStack.alignment = NSLayoutAttributeLeading;
+    _questionPanelStack.spacing = 18;
+    _questionPanelStack.edgeInsets = NSEdgeInsetsMake(18, 18, 18, 18);
+
+    PTFlippedView *document = [[PTFlippedView alloc] initWithFrame:NSZeroRect];
+    document.translatesAutoresizingMaskIntoConstraints = NO;
+    [document addSubview:_questionPanelStack];
+    scroll.documentView = document;
+
+    _questionPanelStatusLabel = [self label:@"" size:11 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+
+    PTAnimatedButton *submitButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
+    submitButton.translatesAutoresizingMaskIntoConstraints = NO;
+    submitButton.title = PTL(@"提交回答   ↗", @"Submit answers   ↗");
+    submitButton.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    submitButton.contentTintColor = NSColor.whiteColor;
+    submitButton.fillColor = PTWarmAccentColor();
+    submitButton.hoverFillColor = PTWarmDynamicColor(0.720, 0.326, 0.120, 0.965, 0.620, 0.370);
+    submitButton.pressedFillColor = PTWarmDynamicColor(0.535, 0.205, 0.060, 0.740, 0.350, 0.165);
+    submitButton.strokeColor = PTWarmAccentColor();
+    submitButton.cornerRadius = 21;
+    submitButton.target = self;
+    submitButton.action = @selector(submitQuestionPanel:);
+    submitButton.keyEquivalent = @"\r";
+    [submitButton.widthAnchor constraintGreaterThanOrEqualToConstant:132].active = YES;
+    [submitButton.heightAnchor constraintEqualToConstant:42].active = YES;
+
+    NSStackView *footer = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    footer.translatesAutoresizingMaskIntoConstraints = NO;
+    footer.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    footer.distribution = NSStackViewDistributionEqualSpacing;
+    footer.edgeInsets = NSEdgeInsetsMake(11, 20, 18, 20);
+    [footer addArrangedSubview:_questionPanelStatusLabel];
+    [footer addArrangedSubview:submitButton];
+    [surface addSubview:footer];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [header.topAnchor constraintEqualToAnchor:surface.topAnchor constant:10],
+        [header.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:20],
+        [header.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-16],
+        [header.heightAnchor constraintEqualToConstant:58],
+        [mark.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
+        [mark.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+        [mark.widthAnchor constraintEqualToConstant:42],
+        [mark.heightAnchor constraintEqualToConstant:42],
+        [markLabel.centerXAnchor constraintEqualToAnchor:mark.centerXAnchor],
+        [markLabel.centerYAnchor constraintEqualToAnchor:mark.centerYAnchor],
+        [title.leadingAnchor constraintEqualToAnchor:mark.trailingAnchor constant:12],
+        [title.topAnchor constraintEqualToAnchor:mark.topAnchor constant:3],
+        [subtitle.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
+        [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:3],
+        [closeButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor],
+        [closeButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+        [closeButton.widthAnchor constraintEqualToConstant:32],
+        [closeButton.heightAnchor constraintEqualToConstant:32],
+
+        [scroll.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:2],
+        [scroll.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:footer.topAnchor],
+        [footer.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor],
+        [footer.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor],
+        [footer.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor],
+
+        [document.widthAnchor constraintEqualToAnchor:scroll.widthAnchor],
+        [_questionPanelStack.topAnchor constraintEqualToAnchor:document.topAnchor],
+        [_questionPanelStack.leadingAnchor constraintEqualToAnchor:document.leadingAnchor],
+        [_questionPanelStack.trailingAnchor constraintEqualToAnchor:document.trailingAnchor],
+        [_questionPanelStack.bottomAnchor constraintEqualToAnchor:document.bottomAnchor]
+    ]];
+}
+
+- (void)closeQuestionPanel:(id)sender {
+    (void)sender;
+    [_questionPanel orderOut:nil];
+}
+
+- (NSButton *)questionOptionButtonWithLabel:(NSString *)label
+                                 description:(NSString *)description
+                                       index:(NSInteger)index {
+    PTQuestionOptionButton *button = [[PTQuestionOptionButton alloc]
+        initWithLabel:label description:description index:index];
+    button.target = self;
+    button.action = @selector(toggleQuestionOption:);
+    button.state = NSControlStateValueOff;
+    return button;
+}
+
+// 每题一个 view：标题 + 纵向自绘选项 + 一个无原生边框的补充输入区。
+// 结构信息（question 文本、multiSelect、按钮、自定义输入框）存进
+// _questionPanelBlocks，点提交时按顺序读出来拼答案。
+- (NSView *)buildQuestionBlockForQuestion:(NSDictionary *)question {
+    NSString *questionText = [question[@"question"] isKindOfClass:NSString.class] ? question[@"question"] : @"";
+    NSString *header = [question[@"header"] isKindOfClass:NSString.class] ? question[@"header"] : @"";
+    BOOL multiSelect = [question[@"multiSelect"] boolValue];
+    NSArray *options = [question[@"options"] isKindOfClass:NSArray.class] ? question[@"options"] : @[];
+
+    NSStackView *block = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    block.translatesAutoresizingMaskIntoConstraints = NO;
+    block.orientation = NSUserInterfaceLayoutOrientationVertical;
+    block.alignment = NSLayoutAttributeLeading;
+    block.spacing = 10;
+
+    NSStackView *metaRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    metaRow.translatesAutoresizingMaskIntoConstraints = NO;
+    metaRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    metaRow.alignment = NSLayoutAttributeCenterY;
+    metaRow.spacing = 8;
+    if (header.length > 0) {
+        NSTextField *headerLabel = [self label:header size:10 weight:NSFontWeightBold color:PTWarmAccentColor()];
+        headerLabel.alignment = NSTextAlignmentCenter;
+        PTAppearanceSurfaceView *headerChip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+        headerChip.translatesAutoresizingMaskIntoConstraints = NO;
+        headerChip.surfaceStyle = PTAppearanceSurfaceStyleChip;
+        headerChip.wantsLayer = YES;
+        headerChip.layer.cornerRadius = 7;
+        [headerChip addSubview:headerLabel];
+        [NSLayoutConstraint activateConstraints:@[
+            [headerLabel.topAnchor constraintEqualToAnchor:headerChip.topAnchor constant:3],
+            [headerLabel.bottomAnchor constraintEqualToAnchor:headerChip.bottomAnchor constant:-3],
+            [headerLabel.leadingAnchor constraintEqualToAnchor:headerChip.leadingAnchor constant:8],
+            [headerLabel.trailingAnchor constraintEqualToAnchor:headerChip.trailingAnchor constant:-8]
+        ]];
+        [metaRow addArrangedSubview:headerChip];
+    }
+    NSTextField *modeLabel = [self label:multiSelect
+        ? PTL(@"可多选", @"Choose any") : PTL(@"单选", @"Choose one")
+        size:10.5 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    [metaRow addArrangedSubview:modeLabel];
+    [block addArrangedSubview:metaRow];
+
+    NSTextField *questionLabel = [self label:questionText size:14 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    questionLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    questionLabel.maximumNumberOfLines = 0;
+    [block addArrangedSubview:questionLabel];
+    [questionLabel.widthAnchor constraintLessThanOrEqualToConstant:400].active = YES;
+
+    NSMutableArray<NSButton *> *buttons = [NSMutableArray array];
+    NSInteger optionIndex = 0;
+    for (NSDictionary *option in options) {
+        if (![option isKindOfClass:NSDictionary.class]) continue;
+        NSString *label = [option[@"label"] isKindOfClass:NSString.class] ? option[@"label"] : @"";
+        if (label.length == 0) continue;
+        NSString *description = [option[@"description"] isKindOfClass:NSString.class] ? option[@"description"] : @"";
+        NSButton *button = [self questionOptionButtonWithLabel:label description:description index:optionIndex++];
+        [block addArrangedSubview:button];
+        [button.widthAnchor constraintEqualToAnchor:block.widthAnchor].active = YES;
+        [buttons addObject:button];
+    }
+
+    NSTextField *customField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    customField.translatesAutoresizingMaskIntoConstraints = NO;
+    customField.placeholderString = PTL(@"没有符合的选项？在这里说明", @"None of these fit? Say what you want here");
+    customField.font = [NSFont systemFontOfSize:13];
+    customField.bordered = NO;
+    customField.bezeled = NO;
+    customField.drawsBackground = NO;
+    customField.focusRingType = NSFocusRingTypeNone;
+
+    PTAppearanceSurfaceView *inputSurface = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+    inputSurface.translatesAutoresizingMaskIntoConstraints = NO;
+    inputSurface.surfaceStyle = PTAppearanceSurfaceStyleChip;
+    inputSurface.wantsLayer = YES;
+    inputSurface.layer.cornerRadius = 14;
+    inputSurface.layer.borderWidth = 0.7;
+    NSTextField *plus = [self label:@"＋" size:15 weight:NSFontWeightMedium color:PTWarmAccentColor()];
+    NSTextField *customLabel = [self label:PTL(@"补充说明", @"Add a note")
+        size:11.5 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
+    [inputSurface addSubview:plus];
+    [inputSurface addSubview:customLabel];
+    [inputSurface addSubview:customField];
+    [NSLayoutConstraint activateConstraints:@[
+        [inputSurface.heightAnchor constraintEqualToConstant:46],
+        [plus.leadingAnchor constraintEqualToAnchor:inputSurface.leadingAnchor constant:13],
+        [plus.centerYAnchor constraintEqualToAnchor:inputSurface.centerYAnchor],
+        [customLabel.leadingAnchor constraintEqualToAnchor:plus.trailingAnchor constant:6],
+        [customLabel.centerYAnchor constraintEqualToAnchor:inputSurface.centerYAnchor],
+        [customField.leadingAnchor constraintEqualToAnchor:customLabel.trailingAnchor constant:10],
+        [customField.trailingAnchor constraintEqualToAnchor:inputSurface.trailingAnchor constant:-13],
+        [customField.centerYAnchor constraintEqualToAnchor:inputSurface.centerYAnchor]
+    ]];
+    [block addArrangedSubview:inputSurface];
+    [inputSurface.widthAnchor constraintEqualToAnchor:block.widthAnchor].active = YES;
+
+    [_questionPanelBlocks addObject:@{
+        @"question": questionText,
+        @"multiSelect": @(multiSelect),
+        @"buttons": buttons,
+        @"customField": customField
+    }];
+
+    PTAppearanceSurfaceView *card = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.surfaceStyle = PTAppearanceSurfaceStyleCard;
+    card.wantsLayer = YES;
+    card.layer.cornerRadius = 18;
+    card.layer.borderWidth = 0.8;
+    [card addSubview:block];
+    [NSLayoutConstraint activateConstraints:@[
+        [block.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [block.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
+        [block.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [block.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14]
+    ]];
+    return card;
+}
+
+- (void)toggleQuestionOption:(NSButton *)sender {
+    NSStackView *block = nil;
+    for (NSView *view = sender.superview; view; view = view.superview) {
+        if ([view isKindOfClass:NSStackView.class] && view != _questionPanelStack) { block = (NSStackView *)view; break; }
+    }
+    if (!block) return;
+    NSDictionary *info = nil;
+    for (NSDictionary *candidate in _questionPanelBlocks) {
+        if ([candidate[@"buttons"] containsObject:sender]) { info = candidate; break; }
+    }
+    if (!info || [info[@"multiSelect"] boolValue]) return;
+    // 单选：点了这个就把同一题里其它按钮的选中态清掉。
+    for (NSButton *button in info[@"buttons"]) {
+        if (button != sender) button.state = NSControlStateValueOff;
+    }
+}
+
+- (void)presentQuestionRequest:(NSDictionary *)request {
+    [self buildQuestionPanelIfNeeded];
+    _questionPanelRequestID = request[@"id"];
+    _questionPanelStatusLabel.stringValue = @"";
+    for (NSView *view in _questionPanelStack.arrangedSubviews.copy) {
+        [view removeFromSuperview];
+    }
+    _questionPanelBlocks = [NSMutableArray array];
+    NSArray *questions = request[@"questions"] ?: @[];
+    for (NSDictionary *question in questions) {
+        if (![question isKindOfClass:NSDictionary.class]) continue;
+        NSView *card = [self buildQuestionBlockForQuestion:question];
+        [_questionPanelStack addArrangedSubview:card];
+        [card.widthAnchor constraintEqualToAnchor:_questionPanelStack.widthAnchor constant:-36].active = YES;
+    }
+    [_questionPanel center];
+    _questionPanel.alphaValue = 0;
+    [_questionPanel orderFrontRegardless];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.22;
+        context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        _questionPanel.animator.alphaValue = 1;
+    } completionHandler:nil];
+    if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+        CABasicAnimation *arrival = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        arrival.fromValue = @0.975;
+        arrival.toValue = @1.0;
+        arrival.duration = 0.26;
+        arrival.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        [_questionPanel.contentView.layer addAnimation:arrival forKey:@"question-arrival"];
+    }
+}
+
+- (void)submitQuestionPanel:(id)sender {
+    (void)sender;
+    NSMutableDictionary<NSString *, NSString *> *answers = [NSMutableDictionary dictionary];
+    for (NSDictionary *info in _questionPanelBlocks) {
+        NSString *questionText = info[@"question"];
+        NSTextField *customField = info[@"customField"];
+        NSString *customValue = [customField.stringValue stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *answer = customValue;
+        if (answer.length == 0) {
+            NSMutableArray<NSString *> *selected = [NSMutableArray array];
+            for (NSButton *button in info[@"buttons"]) {
+                if (button.state == NSControlStateValueOn) [selected addObject:button.identifier];
+            }
+            answer = [selected componentsJoinedByString:@"、"];
+        }
+        if (answer.length > 0) answers[questionText] = answer;
+    }
+    if (answers.count == 0) {
+        _questionPanelStatusLabel.stringValue = PTL(@"至少选一个选项或填一个答案", @"Pick an option or fill in an answer for at least one question");
+        return;
+    }
+    [self writeQuestionResponseForRequestID:_questionPanelRequestID answers:answers];
+}
+
+- (void)writeQuestionResponseForRequestID:(NSString *)requestID answers:(NSDictionary<NSString *, NSString *> *)answers {
+    NSString *directory = self.questionRequestDirectory;
+    NSString *responsePath = [directory stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.response.json", requestID]];
+    NSString *tmpPath = [responsePath stringByAppendingPathExtension:@"tmp"];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{ @"answers": answers } options:0 error:nil];
+    NSError *error = nil;
+    BOOL wrote = data && [data writeToFile:tmpPath options:NSDataWritingAtomic error:&error];
+    if (wrote) wrote = [NSFileManager.defaultManager moveItemAtPath:tmpPath toPath:responsePath error:&error];
+    if (!wrote) {
+        _questionPanelStatusLabel.stringValue = [NSString stringWithFormat:
+            PTL(@"写回答案失败：%@", @"Failed to write the answer: %@"), error.localizedDescription ?: @"未知错误"];
+        return;
+    }
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.16;
+        context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn];
+        _questionPanel.animator.alphaValue = 0;
+    } completionHandler:^{
+        [_questionPanel orderOut:nil];
+        _questionPanel.alphaValue = 1;
+        [self presentNextQuestionRequestIfIdle];
+    }];
 }
 @end
 

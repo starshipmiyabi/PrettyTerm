@@ -294,3 +294,48 @@ test('metadata-only appends are gated by an explicit session handshake', async (
   ]);
   assert.equal(renderer.sessionMatches({ sessionId: 's1' }), true);
 });
+
+test('AskUserQuestion renders a clickable card, not a generic tool bubble', () => {
+  const html = renderer.renderEvent({
+    kind: 'question',
+    toolUseId: 'toolu_1',
+    messageKey: 'k1',
+    questions: [
+      { question: '接下来怎么走？', header: 'H', multiSelect: false, options: [
+        { label: '方案 A', description: '<script>危险</script>' },
+        { label: '方案 B', description: '备选' }
+      ] },
+      { question: '要不要顺带测试？', header: 'QA', multiSelect: true, options: [
+        { label: '加单测' }
+      ] }
+    ]
+  }, {});
+
+  assert.match(html, /class="question-card"/);
+  assert.doesNotMatch(html, /class="event tool-event"/);
+  assert.match(html, /data-tool-use-id="toolu_1"/);
+  assert.match(html, /data-question-index="0" data-multi="0"/);
+  assert.match(html, /data-question-index="1" data-multi="1"/);
+  assert.match(html, /class="question-submit"/);
+  assert.match(html, /class="question-custom-input"/);
+  assert.match(html, /class="question-option-mark"/);
+  assert.match(html, /class="question-option-check"/);
+  assert.match(html, /class="question-submit-arrow"/);
+  assert.match(html, /aria-pressed="false"/);
+  // 危险字符必须被转义，不能原样注入 DOM
+  assert.doesNotMatch(html, /<script>危险<\/script>/);
+  assert.match(html, /&lt;script&gt;危险&lt;\/script&gt;/);
+});
+
+test('an already-answered question renders read-only with no options', () => {
+  const html = renderer.renderEvent({
+    kind: 'question',
+    answered: true,
+    answerText: '接下来怎么走？：方案 A'
+  }, {});
+
+  assert.match(html, /class="question-card answered"/);
+  assert.match(html, /方案 A/);
+  assert.doesNotMatch(html, /question-option/);
+  assert.doesNotMatch(html, /question-submit/);
+});

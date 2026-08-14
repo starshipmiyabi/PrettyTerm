@@ -30,7 +30,8 @@ test('the floating conversation uses the shared message path and closes cleanly'
   assert.match(buildMethod[0], /PTComposerTextView/);
   assert.match(buildMethod[0], /sendFloatingMessage:/);
   assert.match(buildMethod[0], /imagePasteHandler/);
-  assert.match(buildMethod[0], /chooseFloatingImages:/);
+  assert.match(buildMethod[0], /fileDropHandler/);
+  assert.match(buildMethod[0], /chooseFloatingAttachments:/);
   assert.match(source, /sendOutgoingMessage:[\s\S]*forSessionID:/);
   assert.match(source, /_bridge\.sessionID isEqual:sessionID/);
   assert.match(source, /sendFloatingMessage:[\s\S]*floatingPendingImagesForClaude/);
@@ -142,11 +143,49 @@ test('Git publishing requires a manually entered commit message and never shells
   assert.doesNotMatch(source, /git commit[^\n]*\$|git push[^\n]*\$/);
 });
 
-test('both composers are taller and keep slightly wider side margins', () => {
-  assert.match(source, /_composerHeightConstraint\s*=\s*\[composerBar\.heightAnchor constraintEqualToConstant:116\]/);
-  assert.match(source, /_floatingComposerHeightConstraint\s*=\s*\[composerBar\.heightAnchor constraintEqualToConstant:110\]/);
-  assert.match(source, /_composerHeightConstraint\.constant\s*=\s*hasImages\s*\?\s*160\s*:\s*116/);
-  assert.match(source, /_floatingComposerHeightConstraint\.constant\s*=\s*hasImages\s*\?\s*158\s*:\s*110/);
+test('both composers use custom rounded surfaces and animate attachment expansion', () => {
+  assert.match(source, /PTComposerDropSurfaceView/);
+  assert.match(source, /PTAnimatedButton/);
+  assert.match(source, /_composerHeightConstraint\s*=\s*\[composerBar\.heightAnchor constraintEqualToConstant:112\]/);
+  assert.match(source, /_floatingComposerHeightConstraint\s*=\s*\[composerBar\.heightAnchor constraintEqualToConstant:108\]/);
+  assert.match(source, /CGFloat composerHeight = hasAttachments \? 160 : 112/);
+  assert.match(source, /_floatingComposerHeightConstraint\.constant\s*=\s*hasAttachments\s*\?\s*156\s*:\s*108/);
+  assert.match(source, /CATransform3DMakeScale\(0\.955, 0\.955, 1\)/);
+});
+
+test('composer options drive real Claude model and effort commands', () => {
+  assert.match(source, /showComposerOptions:/);
+  assert.match(source, /PTEffortSlider/);
+  assert.match(source, /@"\/effort %@"/);
+  assert.match(source, /@"\/model %@"/);
+  assert.match(source, /PTMessageByAppendingClaudeFileReferences/);
+  assert.doesNotMatch(source, /_composerEffortButton\.bezelStyle\s*=/);
+  const slider = source.match(/@implementation PTEffortSlider[\s\S]*?@end/)?.[0] || '';
+  assert.match(slider, /NSPanGestureRecognizer/);
+  assert.match(slider, /NSClickGestureRecognizer/);
+  assert.match(slider, /shouldRequireFailureOfGestureRecognizer:/);
+  assert.match(slider, /handleEffortPan:/);
+  assert.match(slider, /handleEffortClick:/);
+  assert.match(slider, /dispatch_async\(dispatch_get_main_queue\(\)/);
+  assert.doesNotMatch(slider, /nextEventMatchingMask/);
+  const changeEffort = source.match(/- \(void\)changeComposerEffort:[\s\S]*?(?=\n- \([^\n]+\))/)?.[0] || '';
+  assert.doesNotMatch(changeEffort, /showComposerEffortPage:/);
+});
+
+test('the MCP question panel contains no native AppKit button or text-field chrome', () => {
+  assert.match(source, /@interface PTQuestionOptionButton\s*:\s*PTAnimatedButton/);
+  assert.match(source, /@implementation PTFlippedView[\s\S]*isFlipped\s*\{\s*return YES/);
+  const panel = source.match(/- \(void\)buildQuestionPanelIfNeeded[\s\S]*?(?=\n- \(void\)closeQuestionPanel:)/)?.[0] || '';
+  assert.match(panel, /NSWindowStyleMaskFullSizeContentView/);
+  assert.match(panel, /standardWindowButton:NSWindowCloseButton\]\.hidden\s*=\s*YES/);
+  assert.match(panel, /PTAnimatedButton \*submitButton/);
+  assert.match(panel, /PTFlippedView \*document/);
+  assert.doesNotMatch(panel, /bezelStyle\s*=\s*NSBezelStyleRounded/);
+  const block = source.match(/- \(NSView \*\)buildQuestionBlockForQuestion:[\s\S]*?(?=\n- \(void\)toggleQuestionOption:)/)?.[0] || '';
+  assert.match(block, /customField\.bordered\s*=\s*NO/);
+  assert.match(block, /customField\.focusRingType\s*=\s*NSFocusRingTypeNone/);
+  assert.match(block, /questionOptionButtonWithLabel:label description:description index:/);
+  assert.doesNotMatch(block, /NSTextFieldRoundedBezel/);
 });
 
 test('production sending keeps both single-line and multiline messages on the safe Terminal channel', () => {
@@ -177,6 +216,17 @@ test('the Compact control sends only the exact slash command through the safe br
   assert.match(compactMethod, /sendOutgoingMessage:@"\/compact"/);
   assert.match(compactMethod, /forSessionID:_selectedSession\.sessionID/);
   assert.doesNotMatch(compactMethod, /sendToTerminal:/);
+});
+
+test('context Details stays clickable without sending a slash command when categories are missing', () => {
+  const contextMethod = source.match(
+    /- \(void\)toggleContextDetail:[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(source, /_contextDisclosureButton\.enabled\s*=\s*YES/);
+  assert.doesNotMatch(contextMethod, /if\s*\(!_contextDisclosureButton\.enabled\)\s*return/);
+  assert.doesNotMatch(contextMethod, /sendOutgoingMessage:|sendMessage:|@"\/context"/);
+  assert.match(contextMethod, /_selectedSession\.contextBreakdown\.count\s*>\s*0/);
+  assert.doesNotMatch(source, /PTEstimateContextBreakdown|PTEstimateMemoryFileTokens|PTEstimateSkillsTokens/);
 });
 
 test('the top-left app identity shows the running bundle version and build', () => {

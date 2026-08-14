@@ -1,6 +1,34 @@
 #import <Cocoa/Cocoa.h>
 #import <objc/message.h>
 
+@interface PTEffortSlider : NSControl
+@property(nonatomic) NSInteger selectedIndex;
+- (void)handleEffortClick:(NSClickGestureRecognizer *)recognizer;
+- (void)handleEffortPan:(NSPanGestureRecognizer *)recognizer;
+@end
+
+@interface PTTestGestureRecognizer : NSGestureRecognizer
+@property(nonatomic) NSGestureRecognizerState reportedState;
+@property(nonatomic) NSPoint reportedLocation;
+@end
+
+@implementation PTTestGestureRecognizer
+- (NSGestureRecognizerState)state { return self.reportedState; }
+- (NSPoint)locationInView:(NSView *)view { (void)view; return self.reportedLocation; }
+@end
+
+@interface PTEffortActionProbe : NSObject
+@property(nonatomic) NSUInteger count;
+@end
+
+
+@implementation PTEffortActionProbe
+- (void)changed:(id)sender {
+    (void)sender;
+    self.count += 1;
+}
+@end
+
 static void PTAssert(BOOL condition, NSString *message) {
     if (condition) return;
     NSLog(@"FAIL: %@", message);
@@ -13,6 +41,10 @@ static void PTCallNoArgument(id object, SEL selector) {
 
 static void PTCallOneObject(id object, SEL selector, id argument) {
     ((void (*)(id, SEL, id))objc_msgSend)(object, selector, argument);
+}
+
+static id PTCallOneObjectReturningObject(id object, SEL selector, id argument) {
+    return ((id (*)(id, SEL, id))objc_msgSend)(object, selector, argument);
 }
 
 static void PTCallObjectAndUnsigned(id object, SEL selector, id argument, NSUInteger value) {
@@ -59,6 +91,19 @@ static NSButton *PTFirstButtonInStack(NSStackView *stack) {
     return nil;
 }
 
+static void PTCollectDescendants(NSView *root, NSMutableArray<NSView *> *views) {
+    for (NSView *view in root.subviews) {
+        [views addObject:view];
+        PTCollectDescendants(view, views);
+    }
+}
+
+static NSArray<NSView *> *PTAllDescendants(NSView *root) {
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    PTCollectDescendants(root, views);
+    return views;
+}
+
 static void PTAssertButtonHitTest(NSWindow *window, NSButton *button, NSString *stage) {
     [window.contentView layoutSubtreeIfNeeded];
     [button scrollRectToVisible:button.bounds];
@@ -69,21 +114,152 @@ static void PTAssertButtonHitTest(NSWindow *window, NSButton *button, NSString *
     NSPoint contentPoint = [button convertPoint:center toView:window.contentView];
     NSView *hit = [window.contentView hitTest:contentPoint];
     PTAssert(PTViewIsOrDescendsFromView(hit, button),
-        [NSString stringWithFormat:@"%@ hit %@ instead of the changed-file button",
+        [NSString stringWithFormat:@"%@ hit %@ instead of the target button",
             stage, NSStringFromClass(hit.class)]);
 }
 
 int main(void) {
     @autoreleasepool {
         (void)NSApplication.sharedApplication;
+        PTEffortSlider *effortSlider = [[PTEffortSlider alloc] initWithFrame:NSMakeRect(0, 0, 260, 62)];
+        PTEffortActionProbe *effortProbe = [[PTEffortActionProbe alloc] init];
+        effortSlider.target = effortProbe;
+        effortSlider.action = @selector(changed:);
+        BOOL hasClickRecognizer = NO;
+        BOOL hasPanRecognizer = NO;
+        for (NSGestureRecognizer *recognizer in effortSlider.gestureRecognizers) {
+            hasClickRecognizer |= [recognizer isKindOfClass:NSClickGestureRecognizer.class];
+            hasPanRecognizer |= [recognizer isKindOfClass:NSPanGestureRecognizer.class];
+        }
+        PTAssert(hasClickRecognizer && hasPanRecognizer,
+            @"effort slider must install real click and drag recognizers");
+
+        PTTestGestureRecognizer *click = [[PTTestGestureRecognizer alloc] init];
+        click.reportedState = NSGestureRecognizerStateEnded;
+        click.reportedLocation = NSMakePoint(238, 31);
+        effortSlider.selectedIndex = 1;
+        [effortSlider handleEffortClick:(id)click];
+        PTAssert(effortProbe.count == 0,
+            @"effort clicks must wait until gesture dispatch has fully returned");
+        PTPumpRunLoop(0.03);
+        PTAssert(effortProbe.count == 1 && effortSlider.selectedIndex == 4,
+            @"one click must select its stop and emit exactly one deferred effort command");
+
+        PTTestGestureRecognizer *pan = [[PTTestGestureRecognizer alloc] init];
+        effortSlider.selectedIndex = 1;
+        pan.reportedState = NSGestureRecognizerStateBegan;
+        pan.reportedLocation = NSMakePoint(70, 31);
+        [effortSlider handleEffortPan:(id)pan];
+        pan.reportedState = NSGestureRecognizerStateChanged;
+        pan.reportedLocation = NSMakePoint(238, 31);
+        [effortSlider handleEffortPan:(id)pan];
+        pan.reportedState = NSGestureRecognizerStateEnded;
+        [effortSlider handleEffortPan:(id)pan];
+        PTAssert(effortProbe.count == 1,
+            @"effort drags must not submit while pointer tracking is active");
+        PTPumpRunLoop(0.03);
+        PTAssert(effortProbe.count == 2 && effortSlider.selectedIndex == 4,
+            @"one drag must emit exactly one deferred effort command");
         [NSUserDefaults.standardUserDefaults setObject:@"zh-Hans" forKey:@"PTInterfaceLanguage"];
         [NSUserDefaults.standardUserDefaults removeObjectForKey:@"PTGitObservedDirectories"];
         [NSUserDefaults.standardUserDefaults removeObjectForKey:@"PTGitSuppressedDirectories"];
         id delegate = [[NSClassFromString(@"PTAppDelegate") alloc] init];
         PTAssert(delegate != nil, @"PTAppDelegate must be loadable");
         PTCallNoArgument(delegate, NSSelectorFromString(@"buildWindow"));
+        PTCallNoArgument(delegate, NSSelectorFromString(@"buildQuestionPanelIfNeeded"));
 
         NSWindow *window = [delegate valueForKey:@"window"];
+        NSPanel *questionPanel = [delegate valueForKey:@"questionPanel"];
+        PTAssert(questionPanel != nil && questionPanel.movableByWindowBackground,
+            @"MCP question panel must use its custom draggable surface");
+        PTAssert([questionPanel standardWindowButton:NSWindowCloseButton].hidden &&
+            [questionPanel standardWindowButton:NSWindowMiniaturizeButton].hidden &&
+            [questionPanel standardWindowButton:NSWindowZoomButton].hidden,
+            @"MCP question panel must hide all native traffic-light buttons");
+        NSButton *customSubmit = nil;
+        NSButton *customClose = nil;
+        for (NSView *view in PTAllDescendants(questionPanel.contentView)) {
+            if ([view isKindOfClass:NSButton.class] &&
+                [((NSButton *)view).title hasPrefix:@"提交回答"]) {
+                customSubmit = (NSButton *)view;
+            }
+            if ([view isKindOfClass:NSButton.class] &&
+                [((NSButton *)view).title isEqual:@"×"]) {
+                customClose = (NSButton *)view;
+            }
+        }
+        PTAssert(customSubmit != nil && [customSubmit isKindOfClass:NSClassFromString(@"PTAnimatedButton")] &&
+            !customSubmit.bordered && customSubmit.focusRingType == NSFocusRingTypeNone,
+            @"MCP submit control must be a borderless custom animated button");
+        PTAssert(customClose != nil && [customClose isKindOfClass:NSClassFromString(@"PTAnimatedButton")],
+            @"MCP panel must expose its custom close control");
+
+        NSDictionary *questionFixture = @{
+            @"question": @"选择哪一种？", @"header": @"方式", @"multiSelect": @NO,
+            @"options": @[
+                @{ @"label": @"甲", @"description": @"第一种方案" },
+                @{ @"label": @"乙", @"description": @"第二种方案" }
+            ]
+        };
+        NSView *questionCard = PTCallOneObjectReturningObject(delegate,
+            NSSelectorFromString(@"buildQuestionBlockForQuestion:"), questionFixture);
+        NSUInteger customOptionCount = 0;
+        NSTextField *customAnswerField = nil;
+        for (NSView *view in PTAllDescendants(questionCard)) {
+            if ([view isKindOfClass:NSClassFromString(@"PTQuestionOptionButton")]) {
+                customOptionCount++;
+                NSButton *button = (NSButton *)view;
+                PTAssert(!button.bordered && button.focusRingType == NSFocusRingTypeNone,
+                    @"MCP options must not expose native AppKit button chrome");
+            }
+            if ([view isKindOfClass:NSTextField.class] &&
+                [((NSTextField *)view).placeholderString containsString:@"没有符合的选项"]) {
+                customAnswerField = (NSTextField *)view;
+            }
+        }
+        PTAssert(customOptionCount == 2,
+            @"every MCP answer option must use the custom vertical option control");
+        PTAssert(customAnswerField != nil && !customAnswerField.bordered &&
+            !customAnswerField.bezeled && customAnswerField.focusRingType == NSFocusRingTypeNone,
+            @"MCP custom-answer input must have no native bezel or focus ring");
+
+        NSDictionary *questionRequest = @{
+            @"id": @"interaction-test",
+            @"questions": @[ questionFixture ]
+        };
+        PTCallOneObject(delegate, NSSelectorFromString(@"presentQuestionRequest:"), questionRequest);
+        [questionPanel.contentView layoutSubtreeIfNeeded];
+        NSArray<NSView *> *panelViews = PTAllDescendants(questionPanel.contentView);
+        NSMutableArray<NSButton *> *questionButtons = [NSMutableArray array];
+        for (NSView *view in panelViews) {
+            if ([view isKindOfClass:NSClassFromString(@"PTQuestionOptionButton")]) {
+                [questionButtons addObject:(NSButton *)view];
+            }
+        }
+        PTAssert(questionButtons.count == 2,
+            @"the presented MCP panel must contain both custom answer buttons");
+        for (NSButton *button in questionButtons) {
+            [button scrollRectToVisible:button.bounds];
+            [questionPanel.contentView layoutSubtreeIfNeeded];
+            NSPoint center = NSMakePoint(NSMidX(button.bounds), NSMidY(button.bounds));
+            NSPoint panelPoint = [button convertPoint:center toView:questionPanel.contentView];
+            NSView *hit = [questionPanel.contentView hitTest:panelPoint];
+            PTAssert(PTViewIsOrDescendsFromView(hit, button),
+                [NSString stringWithFormat:@"MCP answer button hit %@ instead of itself",
+                    NSStringFromClass(hit.class)]);
+            PTAssert([button acceptsFirstMouse:nil],
+                @"MCP answer buttons must react on the click that activates the floating panel");
+        }
+        [questionButtons[0] performClick:nil];
+        PTAssert(questionButtons[0].state == NSControlStateValueOn,
+            @"clicking a custom MCP option must select it");
+        [questionButtons[1] performClick:nil];
+        PTAssert(questionButtons[0].state == NSControlStateValueOff &&
+            questionButtons[1].state == NSControlStateValueOn,
+            @"clicking another single-choice option must move the selection");
+        PTAssertButtonHitTest(questionPanel, customSubmit, @"MCP submit control");
+        PTAssertButtonHitTest(questionPanel, customClose, @"MCP close control");
+        [questionPanel orderOut:nil];
         NSStackView *changedFiles = [delegate valueForKey:@"changedFilesStack"];
         NSSplitView *splitView = [delegate valueForKey:@"splitView"];
         NSView *inspector = [delegate valueForKey:@"inspectorView"];
@@ -199,6 +375,36 @@ int main(void) {
         PTCallOneObject(delegate, NSSelectorFromString(@"toggleContextDetail:"), nil);
         PTAssert(contextDetailStack.hidden && !contextMeter.hidden,
             @"collapsing context details must never hide the persistent status meter");
+
+        [session setValue:@[] forKey:@"contextBreakdown"];
+        PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), session);
+        PTAssert(contextDisclosure.enabled,
+            @"Details must remain clickable when total usage exists before /context categories arrive");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleContextDetail:"), nil);
+        PTAssert(!contextDetailStack.hidden && contextDetailStack.arrangedSubviews.count == 1,
+            @"clicking Details without a breakdown must reveal a synchronization hint");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleContextDetail:"), nil);
+
+        id secondSession = [[NSClassFromString(@"PTSessionInfo") alloc] init];
+        [secondSession setValue:@42000 forKey:@"contextUsed"];
+        [secondSession setValue:@1000000 forKey:@"contextWindow"];
+        [secondSession setValue:@[] forKey:@"contextBreakdown"];
+        [secondSession setValue:@"session-second-page" forKey:@"sessionID"];
+        [secondSession setValue:@"/tmp" forKey:@"cwd"];
+        [secondSession setValue:@[] forKey:@"accessedDirectories"];
+        [secondSession setValue:@[] forKey:@"changedFiles"];
+        [secondSession setValue:@[] forKey:@"tasks"];
+        [secondSession setValue:@[] forKey:@"assistantMessages"];
+        [delegate setValue:secondSession forKey:@"selectedSession"];
+        PTCallOneObject(delegate, NSSelectorFromString(@"updateInspectorForSession:"), secondSession);
+        PTAssert(contextDisclosure.enabled,
+            @"Details must remain clickable after switching to another conversation page");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleContextDetail:"), nil);
+        PTAssert(!contextDetailStack.hidden,
+            @"Details must expand on every conversation page, not only the first selected session");
+        PTCallOneObject(delegate, NSSelectorFromString(@"toggleContextDetail:"), nil);
+        [delegate setValue:session forKey:@"selectedSession"];
+        [delegate setValue:@[session, secondSession] forKey:@"sessions"];
 
         NSArray *waitingBaseline = [[session valueForKey:@"assistantMessages"] copy];
         PTCallOneObject(delegate,
@@ -327,9 +533,12 @@ int main(void) {
         CGFloat compactInspectorWidth = NSWidth(inspector.frame);
         PTCallOneObject(delegate, NSSelectorFromString(@"toggleGitDiff:"), nil);
         [window.contentView layoutSubtreeIfNeeded];
+        PTPumpRunLoop(0.24);
+        [window.contentView layoutSubtreeIfNeeded];
         CGFloat expandedInspectorWidth = NSWidth(inspector.frame);
         PTAssert(!gitDiffScroll.hidden && expandedInspectorWidth > compactInspectorWidth + 100.0,
-            @"clicking Git diff must reveal it and widen the inspector");
+            [NSString stringWithFormat:@"clicking Git diff must reveal it and widen the inspector (hidden=%d compact=%.1f expanded=%.1f)",
+                gitDiffScroll.hidden, compactInspectorWidth, expandedInspectorWidth]);
         PTPumpRunLoop(0.24);
         PTAssert(gitDiffScroll.alphaValue > 0.95,
             @"the Git review must finish its expansion fade at full opacity");
@@ -392,7 +601,7 @@ int main(void) {
         PTAssert(englishWindow != window &&
                  [englishComposer.string isEqual:@"unsent draft survives language switch"],
             @"switching interface language must rebuild presentation without dropping the draft");
-        PTAssert([englishSend.title isEqual:@"Send ↗"],
+        PTAssert([englishSend.title isEqual:@"↑"],
             @"English mode must localize native controls");
         NSButton *englishCompact = [delegate valueForKey:@"compactButton"];
         PTAssert([englishCompact.title isEqual:@"Compact"] &&
@@ -401,7 +610,7 @@ int main(void) {
         NSPopUpButton *englishPicker = [delegate valueForKey:@"languagePicker"];
         [englishPicker selectItemAtIndex:0];
         PTCallOneObject(delegate, NSSelectorFromString(@"changeInterfaceLanguage:"), englishPicker);
-        PTAssert([[[delegate valueForKey:@"sendButton"] title] isEqual:@"发送 ↗"],
+        PTAssert([[[delegate valueForKey:@"sendButton"] title] isEqual:@"↑"],
             @"Chinese mode must remain selectable after switching to English");
         NSLog(@"PTWindowInteractionTests passed");
     }

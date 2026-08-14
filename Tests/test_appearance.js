@@ -69,3 +69,14 @@ test('the waiting signal has warm motion, dark styling, and reduced-motion behav
   assert.match(html, /@media[\s\S]*\.claude-waiting\s*\{/);
   assert.match(html, /prefers-reduced-motion[\s\S]*animation-duration:\s*\.001ms/);
 });
+
+test('AskUserQuestion uses fully custom warm controls with smooth interaction states', () => {
+  assert.match(html, /\.question-card\s*\{[\s\S]*border-radius:\s*22px/);
+  assert.match(html, /\.question-option\s*\{[\s\S]*-webkit-appearance:\s*none/);
+  assert.match(html, /\.question-submit\s*\{[\s\S]*-webkit-appearance:\s*none/);
+  assert.match(html, /\.question-custom-input\s*\{[\s\S]*-webkit-appearance:\s*none/);
+  assert.match(html, /\.question-options\s*\{[^}]*flex-direction:\s*column/);
+  assert.match(html, /@keyframes\s+option-select/);
+  assert.match(html, /\.question-option:focus-visible/);
+  assert.match(html, /\.question-submit:focus-visible/);
+});

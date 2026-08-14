@@ -1,3 +1,46 @@
+# PrettyTerm Beta 0.9.1 (Build 28)
+
+Build 28 is an in-place upgrade package for PrettyTerm Beta 0.9.1. It does not change the marketing version; it replaces Build 27 with the completed composer, question, inspector, and interaction work from this development cycle.
+
+## Download
+
+Download `PrettyTerm-Beta-0.9.1-build28-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+
+## Composer and Attachments
+
+- Replaces the main and floating composers with custom warm, rounded surfaces and motion-aware controls instead of native button chrome.
+- Adds file and image selection plus drag-and-drop. Images remain native Claude Code image attachments; other files are sent as exact, deduplicated `@/absolute/path` references.
+- Adds custom model and reasoning-effort controls. Model and effort changes use the verified Terminal session and the exact `/model` and `/effort` commands.
+- Fixes the effort slider twice at the event-source level: it no longer blocks the AppKit event loop, and its click/drag recognizers now submit exactly once after the gesture ends.
+
+## Questions and Waiting Feedback
+
+- Renders transcript `AskUserQuestion` calls as custom inline single-choice, multiple-choice, and free-text cards, then turns them into read-only answered cards when the matching tool result arrives.
+- Adds the independent `ask_via_prettyterm` MCP request bridge with a custom borderless native panel, vertically arranged options, a custom input surface, and smooth selection and submission feedback.
+- Removes native traffic-light, button-bezel, and blue focus-ring chrome from the MCP panel.
+- Fixes the custom option hit testing so the first click, selection changes, submit control, and close control all receive the intended pointer event.
+- Shows the warm Terminal-to-Claude waiting route only after Terminal accepts a message and removes it on the first real assistant or tool event.
+
+## Inspector, Context, and Git
+
+- Keeps context total, percentage, and progress visible while allowing real transcript `/context` categories to expand and collapse. Missing categories are never estimated and opening Details never sends a command.
+- Presents plan limits as five-hour and seven-day meters using UTC requests and locale-neutral countdowns.
+- Refines the native Git review, preserves the conversation reading anchor while the inspector resizes, and opens turn-local `Edit` / `Write` review without requesting `git diff`.
+- Remembers Git observation directories from successful `/add-dir` records, manually entered paths, and directories Claude actually visits, while preserving explicit user deletions.
+
+## Reliability and Localization
+
+- Preserves drafts and attachments while switching between Simplified Chinese and English.
+- Clears both composers only after a successful send and keeps the main and floating attachment states independent.
+- Uses an explicit WebView session handshake for incremental transcript appends and retains full-snapshot recovery after a WebView reload.
+- Keeps Claude.ai Remote Control disabled and retains the verified Terminal-only execution path.
+
+## Validation
+
+Build 28 passed renderer, custom appearance, AskUserQuestion parsing, MCP panel hit-testing, composer click/drag, attachment, model/effort, context disclosure, UTC plan-usage, Git review, viewport anchoring, incremental-render, Terminal-safety, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+
+---
+
 # PrettyTerm Beta 0.9.1 (Build 27)
 
 This beta turns the inspector into a clearer live status surface, adds transcript-grounded context breakdowns, and gives visible feedback while Claude is preparing a response.

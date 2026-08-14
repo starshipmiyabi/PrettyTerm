@@ -123,6 +123,26 @@ NSString *PTMessageForClaudeAttachments(NSString *message, NSUInteger imageCount
     return @" ";
 }
 
+NSString *PTMessageByAppendingClaudeFileReferences(
+    NSString *message,
+    NSArray<NSString *> *filePaths
+) {
+    NSString *trimmed = [[message ?: @"" stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
+    NSMutableOrderedSet<NSString *> *references = [NSMutableOrderedSet orderedSet];
+    for (NSString *path in filePaths ?: @[]) {
+        if (![path isKindOfClass:NSString.class] || path.length == 0 || ![path hasPrefix:@"/"]) continue;
+        NSString *standardized = path.stringByStandardizingPath;
+        if (standardized.length == 0) continue;
+        [references addObject:[@"@" stringByAppendingString:standardized]];
+    }
+    if (references.count == 0) return trimmed;
+    NSString *fileBlock = [references.array componentsJoinedByString:@"\n"];
+    return trimmed.length
+        ? [NSString stringWithFormat:@"%@\n\n%@", trimmed, fileBlock]
+        : fileBlock;
+}
+
 NSString *PTNormalizedTerminalPasteText(NSString *message) {
     NSString *value = message ?: @"";
     NSString *normalized = [[value stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
@@ -406,9 +426,34 @@ NSDictionary *PTEventFromAssistantBlock(
             return event;
         }
     }
+    if ([toolName isEqual:@"AskUserQuestion"]) {
+        NSArray *questions = [input[@"questions"] isKindOfClass:NSArray.class] ? input[@"questions"] : @[];
+        NSString *toolUseId = [block[@"id"] isKindOfClass:NSString.class] ? block[@"id"] : @"";
+        if (questions.count > 0 && toolUseId.length > 0) {
+            event[@"kind"] = @"question";
+            event[@"toolUseId"] = toolUseId;
+            event[@"questions"] = questions;
+            event[@"answered"] = @NO;
+            event[@"answerText"] = @"";
+            return event;
+        }
+    }
     event[@"kind"] = @"tool";
     event[@"text"] = PTInspectableText(input);
     return event;
+}
+
+// transcript 里的答案落在 toolUseResult.answers（question 文本 -> 答案文本的字典），
+// 比 tool_result.content 里那段"The user answered..."的提示语干净，拼成多行展示文本。
+NSString *PTFormattedQuestionAnswers(NSDictionary *answers) {
+    if (![answers isKindOfClass:NSDictionary.class] || answers.count == 0) return @"";
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:answers.count];
+    [answers enumerateKeysAndObjectsUsingBlock:^(id question, id answer, BOOL *_Nonnull stop) {
+        (void)stop;
+        if (![question isKindOfClass:NSString.class] || ![answer isKindOfClass:NSString.class]) return;
+        [lines addObject:[NSString stringWithFormat:@"%@：%@", question, answer]];
+    }];
+    return [lines componentsJoinedByString:@"\n"];
 }
 
 NSDictionary *PTEventFromToolResultBlock(

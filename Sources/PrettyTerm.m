@@ -5470,13 +5470,11 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     [self buildHomeInPane:pane];
     NSView *toolWorkspace = [self buildToolWorkspace];
     [workspaceSplit addArrangedSubview:pane];
-    [workspaceSplit addArrangedSubview:toolWorkspace];
     _toolWorkspaceWidthConstraint = [toolWorkspace.widthAnchor constraintEqualToConstant:0.0];
     _toolWorkspaceWidthConstraint.priority = 999;
     _toolWorkspaceWidthConstraint.active = YES;
     toolWorkspace.hidden = YES;
     _toolWorkspaceWidthBeforeCollapse = 620.0;
-    [workspaceSplit setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
     [NSLayoutConstraint activateConstraints:@[
         [workspaceSplit.topAnchor constraintEqualToAnchor:workspace.topAnchor],
         [workspaceSplit.leadingAnchor constraintEqualToAnchor:workspace.leadingAnchor],
@@ -7334,6 +7332,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     NSUInteger generation = ++_toolWorkspaceAnimationGeneration;
     BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
     if (expanded) {
+        if (![_workspaceSplitView.arrangedSubviews containsObject:_toolWorkspaceView]) {
+            [_workspaceSplitView addArrangedSubview:_toolWorkspaceView];
+            [_workspaceSplitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
+        }
         CGFloat available = NSWidth(_workspaceSplitView.bounds);
         CGFloat desired = _toolWorkspaceWidthBeforeCollapse > 0
             ? _toolWorkspaceWidthBeforeCollapse : MAX(360.0, available * 0.58);
@@ -7372,6 +7374,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         _toolWorkspaceView.hidden = YES;
         _gitDiffScroll.hidden = YES;
         _filePreviewWebView.hidden = YES;
+        [_workspaceSplitView removeArrangedSubview:_toolWorkspaceView];
+        [_toolWorkspaceView removeFromSuperview];
         [_window.contentView layoutSubtreeIfNeeded];
         return;
     }
@@ -7388,6 +7392,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         self->_gitDiffScroll.hidden = YES;
         self->_filePreviewWebView.hidden = YES;
         self->_toolWorkspaceView.alphaValue = 1.0;
+        [self->_workspaceSplitView removeArrangedSubview:self->_toolWorkspaceView];
+        [self->_toolWorkspaceView removeFromSuperview];
     }];
 }
 

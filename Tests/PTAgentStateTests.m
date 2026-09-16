@@ -139,6 +139,13 @@ int main(void) {
             @"an independent submit must use Terminal's one automatically appended Return");
         PTAssert(![singleReturnAutomation containsString:@"ASCII character 13"],
             @"an independent submit must not duplicate Return by supplying another CR");
+        NSString *imagePasteAutomation = PTTerminalAutomationScript(
+            @"/dev/ttys007", 4321, @"", PTTerminalAutomationActionPasteImage);
+        PTAssert([imagePasteAutomation containsString:
+            @"tell application \"System Events\" to key code 9 using control down"],
+            @"image paste must send Ctrl-V without an implicit Return");
+        PTAssert(![imagePasteAutomation containsString:@"do script (ASCII character 22)"],
+            @"image paste must not use Terminal do-script because it appends Return and submits the image separately");
         NSString *escapeAutomation = PTTerminalAutomationScript(
             @"/dev/ttys007", 4321, @"", PTTerminalAutomationActionInterruptEscape);
         PTAssert([escapeAutomation containsString:@"tell application \"System Events\" to key code 53"],

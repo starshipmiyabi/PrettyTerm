@@ -234,7 +234,14 @@ NSString *PTTerminalAutomationScript(
             writeCommand = @"do script \"\" in theTab";
             break;
         case PTTerminalAutomationActionPasteImage:
-            writeCommand = @"do script (ASCII character 22) in theTab";
+            // Terminal 会给 do script 自动追加 CR；若用它发送 Ctrl-V，图片会在
+            // 正文写入前被立即提交成独立回合。改为真实按键事件，只把图片放进
+            // Claude 当前输入缓冲区，最终由统一的正文提交动作发送整条消息。
+            writeCommand =
+                @"set selected tab of theWindow to theTab\n"
+                 "set index of theWindow to 1\n"
+                 "activate\n"
+                 "tell application \"System Events\" to key code 9 using control down";
             break;
         case PTTerminalAutomationActionInterruptEscape:
             writeCommand =

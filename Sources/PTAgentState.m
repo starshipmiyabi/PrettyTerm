@@ -201,6 +201,17 @@ NSInteger PTLatestTerminalPasteMarker(NSString *contents) {
     return latest;
 }
 
+NSUInteger PTTerminalImageMarkerCount(NSString *contents) {
+    static NSRegularExpression *pattern;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        pattern = [NSRegularExpression regularExpressionWithPattern:
+            @"\\[Image #[0-9]+\\]" options:0 error:nil];
+    });
+    return [pattern numberOfMatchesInString:contents ?: @"" options:0
+        range:NSMakeRange(0, contents.length)];
+}
+
 static NSString *PTAppleScriptEmbeddedText(NSString *value) {
     NSString *escaped = [value ?: @"" stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
     escaped = [escaped stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
@@ -241,6 +252,13 @@ NSString *PTTerminalAutomationScript(
                 @"set selected tab of theWindow to theTab\n"
                  "set index of theWindow to 1\n"
                  "activate\n"
+                 "tell application \"System Events\"\n"
+                 "repeat 100 times\n"
+                 "if frontmost of process \"Terminal\" then exit repeat\n"
+                 "delay 0.01\n"
+                 "end repeat\n"
+                 "if frontmost of process \"Terminal\" is false then error \"Terminal did not become active\"\n"
+                 "end tell\n"
                  "tell application \"System Events\" to key code 9 using control down";
             break;
         case PTTerminalAutomationActionInterruptEscape:

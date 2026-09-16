@@ -1,16 +1,18 @@
-# PrettyTerm Beta 0.9.8 (Build 37)
+# PrettyTerm Beta 0.9.8 (Build 38)
 
 PrettyTerm Beta 0.9.8 brings the new home and multi-conversation workflow, large Review and Files workspaces, complete transcript rendering improvements, direct file preview, refreshed app identity, and the accumulated composer, inspector, Terminal, and interaction work from this development cycle.
 
 ## Download
 
-Download `PrettyTerm-Beta-0.9.8-build37-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+Download `PrettyTerm-Beta-0.9.8-build38-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+
+For this update, remove and re-add PrettyTerm Beta in System Settings → Privacy & Security → Accessibility. Earlier local builds tied keyboard access to an older executable hash; Build 38 uses a stable application identity for subsequent local updates.
 
 ## Composer and Attachments
 
 - Replaces the main and floating composers with custom warm, rounded surfaces and motion-aware controls instead of native button chrome.
 - Adds file and image selection plus drag-and-drop. Images remain native Claude Code image attachments; other files use exact, deduplicated `<attach>/absolute/path</attach>` markers so sending never stops inside Claude Code's interactive `@` autocomplete.
-- Preserves source PNG bytes for selected and dropped images, removes the `NSImage -> TIFF -> PNG` corruption path, and submits the message body immediately without waiting on a parsed `[Image #N]` UI acknowledgement.
+- Preserves source PNG bytes for selected and dropped images and removes the `NSImage -> TIFF -> PNG` corruption path. Keeps each PNG on the clipboard until Claude completes its asynchronous image read, then advances to the next image and submits the accompanying text.
 - Adds custom model and reasoning-effort controls. Model and effort changes use the verified Terminal session and the exact `/model` and `/effort` commands.
 - Fixes the effort slider twice at the event-source level: it no longer blocks the AppKit event loop, and its click/drag recognizers now submit exactly once after the gesture ends.
 
@@ -56,13 +58,14 @@ Download `PrettyTerm-Beta-0.9.8-build37-macOS.dmg`, open it, and drag PrettyTerm
 - Preserves drafts and attachments while switching between Simplified Chinese and English.
 - Clears both composers only after a successful send and keeps the main and floating attachment states independent.
 - Keeps one or more pasted images in Claude's input buffer until the accompanying text is submitted as the same turn.
+- Sends Ctrl+V after Terminal becomes active, preserves image-transfer error details, and gives local builds a stable signing identity so keyboard access can survive rebuilding.
 - Fully removes the Files workspace before restoring the inspector, preventing competing width constraints from expanding the main interface.
 - Uses the WebView session identity to match incremental transcript appends to the loaded conversation.
 - Adds a Remote button that sends `/remote-control` through the selected Terminal session.
 
 ## Package
 
-Build 37 is distributed as a versioned macOS DMG with a matching SHA-256 checksum file.
+Build 38 is distributed as a versioned macOS DMG with a matching SHA-256 checksum file.
 
 ---
 

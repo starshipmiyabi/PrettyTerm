@@ -54,6 +54,10 @@ if [[ "$signing_identity" != "-" ]]; then
   codesign_args+=(--timestamp)
 else
   codesign_args+=(--timestamp=none)
+  # 本地 ad-hoc 的默认身份只含每次变化的 cdhash，重构建会使辅助功能授权失效。
+  # 指定稳定的 bundle 身份，使重新授予的权限继续匹配后续本地构建。
+  local_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$project_dir/Info.plist")"
+  codesign_args+=(--requirements "=designated => identifier \"$local_bundle_identifier\"")
   print -u2 "warning: ad-hoc signing is for local beta builds; Developer ID is required for stable distributed trust"
 fi
 codesign "${codesign_args[@]}" "$app_dir"

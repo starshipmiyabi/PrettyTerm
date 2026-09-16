@@ -64,6 +64,7 @@ FOUNDATION_EXPORT NSString *PTMessageByAppendingClaudeAttachMarkers(
 FOUNDATION_EXPORT NSString *PTNormalizedTerminalPasteText(NSString *message);
 FOUNDATION_EXPORT NSString *PTTerminalSubmissionPayload(NSString *message);
 FOUNDATION_EXPORT NSInteger PTLatestTerminalPasteMarker(NSString *contents);
+FOUNDATION_EXPORT NSUInteger PTTerminalImageMarkerCount(NSString *contents);
 
 typedef NS_ENUM(NSInteger, PTTerminalAutomationAction) {
     PTTerminalAutomationActionWriteText,

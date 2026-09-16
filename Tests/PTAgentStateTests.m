@@ -159,6 +159,10 @@ int main(void) {
             @"Terminal paste acknowledgement must use the newest visible marker");
         PTAssert(PTLatestTerminalPasteMarker(@"ordinary terminal contents") == -1,
             @"ordinary Terminal contents must not look like a paste acknowledgement");
+        PTAssert(PTTerminalImageMarkerCount(@"❯ [Image #1] [Image #2] 请比较") == 2,
+            @"image clipboard completion must count loaded native attachments");
+        PTAssert(PTTerminalImageMarkerCount(@"Pasting…") == 0,
+            @"asynchronous clipboard reads must not count as completed image attachments");
         PTAssert(PTComposerActionForKey(36, NO, NO, NO) == PTComposerKeyActionSubmit,
             @"Return should submit the composer");
         PTAssert(PTComposerActionForKey(76, NO, NO, NO) == PTComposerKeyActionSubmit,

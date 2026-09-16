@@ -230,7 +230,7 @@ test('file attachments use non-interactive attach markers in both composers', ()
   assert.doesNotMatch(floatingSend, /PTMessageByAppendingClaudeFileReferences/);
 });
 
-test('dragged and selected images preserve PNG pixels and submit without a confirmation gate', () => {
+test('dragged and selected images preserve PNG pixels until Claude completes each clipboard read', () => {
   assert.match(source, /PTPNGDataForImageFileURL/);
   assert.match(source, /if \(isPNG\) return source/);
   assert.match(source, /@"pngData": pngData/);
@@ -241,8 +241,8 @@ test('dragged and selected images preserve PNG pixels and submit without a confi
   )?.[0] || '';
   assert.match(imageSend, /PTRestorePasteboard[\s\S]*return sent/);
   assert.doesNotMatch(imageSend, /PTRestorePasteboard[\s\S]*if \(!attached\)[\s\S]*sendMessage/);
-  assert.doesNotMatch(imageSend,
-    /boundTerminalContents|PTRunLoopUntil|PTTerminalImageMarkerCount|未确认图片附件|acknowledged/);
+  assert.match(imageSend, /PTRunLoopUntil\(5\.0/);
+  assert.match(imageSend, /PTTerminalImageMarkerCount.*> markerBefore/);
 });
 
 test('composer options drive real Claude model and effort commands', () => {

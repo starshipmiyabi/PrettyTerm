@@ -1945,6 +1945,7 @@ static PTSessionInfo *PTParseSessionAppending(
 @property(nonatomic, copy) void (^outputObserved)(NSString *chunk);
 @property(nonatomic, readonly) NSString *sessionID;
 @property(nonatomic, readonly) BOOL running;
+@property(nonatomic, readonly) NSString *lastSendError;
 - (void)connectToSession:(PTSessionInfo *)session;
 - (void)startNewSession:(PTSessionInfo *)session prompt:(NSString *)prompt;
 - (void)startNewSessionInDirectory:(NSString *)directory;
@@ -2164,6 +2165,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     BOOL _running;
     NSUInteger _connectionGeneration;
     dispatch_queue_t _ioQueue;
+    NSString *_lastSendError;
 }
 
 - (instancetype)init {
@@ -2176,6 +2178,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 
 - (NSString *)sessionID { return _sessionID; }
 - (BOOL)running { return _running; }
+- (NSString *)lastSendError { return _lastSendError; }
 
 - (NSString *)launchTerminalCommand:(NSString *)command error:(NSString **)errorMessage {
     NSString *source = [NSString stringWithFormat:
@@ -2692,19 +2695,21 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     if ([outcome isEqual:@"ok"]) return YES;
 
     if ([outcome isEqual:@"mismatch"]) _running = NO;
-    if (self.statusChanged) {
-        NSNumber *number = error[NSAppleScriptErrorNumber];
-        NSString *detail = error[NSAppleScriptErrorMessage] ?: outcome ?: @"未知错误";
-        BOOL denied = number.integerValue == -1743;
-        self.statusChanged(denied
+    NSNumber *number = error[NSAppleScriptErrorNumber];
+    NSString *detail = error[NSAppleScriptErrorMessage] ?: outcome ?: @"未知错误";
+    NSLog(@"PrettyTerm image paste failed: outcome=%@ errorNumber=%@ error=%@",
+        outcome ?: @"(nil)", number ?: @0, detail);
+    BOOL denied = number.integerValue == -1743;
+    _lastSendError = denied
             ? @"Terminal 自动化权限未开启"
             : [NSString stringWithFormat:@"Claude 图片附件写入失败（%@）：%@",
-                number ?: @0, detail]);
-    }
+                number ?: @0, detail];
+    if (self.statusChanged) self.statusChanged(_lastSendError);
     return NO;
 }
 
 - (BOOL)sendMessage:(NSString *)message withImagePNGs:(NSArray<NSData *> *)imagePNGs {
+    _lastSendError = nil;
     if (imagePNGs.count == 0) return [self sendMessage:message];
     if (!_running || _terminalPID <= 0 || kill(_terminalPID, 0) != 0) {
         [self stop];
@@ -2716,13 +2721,26 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSArray<NSDictionary<NSString *, NSData *> *> *snapshot = PTSnapshotPasteboard(pasteboard);
     BOOL attached = YES;
     for (NSData *png in imagePNGs) {
+        NSUInteger markerBefore = PTTerminalImageMarkerCount([self boundTerminalContents]);
         if (!PTWritePNGDataToPasteboard(png, pasteboard) ||
             ![self pasteCurrentClipboardImageIntoTerminal]) {
             attached = NO;
             break;
         }
+        // Ctrl-V 只启动 Claude 的异步剪贴板读取。新附件出现之前保持当前 PNG，
+        // 不能覆盖成下一张、恢复原剪贴板或提交正文。
+        BOOL loaded = PTRunLoopUntil(5.0, ^BOOL{
+            return PTTerminalImageMarkerCount([self boundTerminalContents]) > markerBefore;
+        });
+        if (!loaded) {
+            _lastSendError = PTL(@"Claude 未完成图片读取，图片和文字尚未提交",
+                @"Claude did not finish reading the image; images and text have not been submitted");
+            if (self.statusChanged) self.statusChanged(_lastSendError);
+            attached = NO;
+            break;
+        }
     }
-    // 图片写入 Terminal 后立即提交正文，Clipboard 在整次同步发送结束后恢复。
+    // 全部图片已进入 Claude 输入缓冲区后，再统一提交正文并恢复剪贴板。
     BOOL sent = attached && [self sendMessage:message];
     PTRestorePasteboard(pasteboard, snapshot);
     [NSApp activateIgnoringOtherApps:YES];
@@ -9289,7 +9307,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     if (sent) {
         if (success) success();
     } else {
-        NSString *status = PTL(@"Terminal 未接受消息", @"Terminal did not accept the message");
+        NSString *status = targetBridge.lastSendError ?: PTL(@"Terminal 未接受消息", @"Terminal did not accept the message");
         if ([sessionID isEqual:_floatingSessionID]) {
             _floatingComposerLabel.stringValue = status;
         } else {

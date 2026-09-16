@@ -3002,6 +3002,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 @interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate, NSMenuDelegate, NSTextFieldDelegate>
 - (void)updateWorkspaceTabBar;
 - (PTSessionInfo *)sessionWithID:(NSString *)sessionID;
+- (CGFloat)adaptiveInspectorWidth;
+- (void)applyAdaptiveInspectorWidth;
 @end
 
 @implementation PTAppDelegate {
@@ -3468,6 +3470,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _window.titleVisibility = NSWindowTitleHidden;
     _window.titlebarAppearsTransparent = YES;
     _window.backgroundColor = PTWarmCanvasColor();
+    _window.delegate = self;
     [_window center];
 
     NSView *windowContent = _window.contentView;
@@ -3553,7 +3556,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     [root addSubview:inspector];
     // 检查器现在是根布局里真正占位的一栏：展开时靠下面的 _splitTrailingConstraint
     // 把 split 的右边缘往左收，把让出来的宽度留给检查器，而不是绝对定位盖在内容上面。
-    CGFloat inspectorWidth = _inspectorWidthBeforeCollapse > 0.0 ? _inspectorWidthBeforeCollapse : 340.0;
+    CGFloat inspectorWidth = [self adaptiveInspectorWidth];
     _inspectorWidthConstraint = [inspector.widthAnchor constraintEqualToConstant:inspectorWidth];
     _inspectorWidthConstraint.priority = 999;
     _inspectorWidthConstraint.active = YES;
@@ -3639,6 +3642,27 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [_languagePicker.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
         [_languagePicker.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:20]
     ]];
+}
+
+- (CGFloat)adaptiveInspectorWidth {
+    CGFloat preferred = _inspectorWidthBeforeCollapse > 0.0
+        ? _inspectorWidthBeforeCollapse : 340.0;
+    CGFloat available = NSWidth(_window.contentView.bounds);
+    if (available <= 0.0) return preferred;
+    CGFloat maximum = MIN(520.0, floor(available * 0.42));
+    maximum = MAX(240.0, maximum);
+    return MIN(preferred, maximum);
+}
+
+- (void)applyAdaptiveInspectorWidth {
+    if (!_inspectorWidthConstraint || !_splitTrailingConstraint) return;
+    CGFloat width = [self adaptiveInspectorWidth];
+    _inspectorWidthConstraint.constant = width;
+    if (!_inspectorView.hidden) _splitTrailingConstraint.constant = -width;
+}
+
+- (void)windowDidResize:(NSNotification *)notification {
+    if (notification.object == _window) [self applyAdaptiveInspectorWidth];
 }
 
 - (CGFloat)splitView:(NSSplitView *)splitView
@@ -7410,8 +7434,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
     NSUInteger generation = ++_inspectorAnimationGeneration;
     BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    CGFloat targetWidth = _inspectorWidthBeforeCollapse > 0.0
-        ? _inspectorWidthBeforeCollapse : 340.0;
+    CGFloat targetWidth = [self adaptiveInspectorWidth];
     _inspectorWidthConstraint.constant = targetWidth;
     if (expanded) {
         _inspectorView.hidden = NO;
@@ -8002,10 +8025,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             widestButton = MAX(widestButton, button.intrinsicContentSize.width);
         }
         _inspectorWidthBeforeCollapse = MAX(340.0, widestButton + 80.0);
-        _inspectorWidthConstraint.constant = _inspectorWidthBeforeCollapse;
-        if (!_inspectorView.hidden) {
-            _splitTrailingConstraint.constant = -_inspectorWidthBeforeCollapse;
-        }
+        [self applyAdaptiveInspectorWidth];
     }
 
     // 任务也按值更新，使 transcript 修订只重建发生变化的检查器内容。

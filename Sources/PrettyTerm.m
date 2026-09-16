@@ -7325,11 +7325,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     if (!_toolWorkspaceView || !_toolWorkspaceWidthConstraint) return;
     if (expanded && !_inspectorView.hidden) {
         _restoreInspectorAfterTools = YES;
-        __weak typeof(self) weakSelf = self;
-        [self setInspectorExpanded:NO animated:animated completion:^{
-            [weakSelf setToolWorkspaceExpanded:YES animated:animated];
-        }];
-        return;
+        [self setInspectorExpanded:NO animated:NO];
     }
     if (!expanded && _restoreInspectorAfterTools) {
         _restoreInspectorAfterTools = NO;

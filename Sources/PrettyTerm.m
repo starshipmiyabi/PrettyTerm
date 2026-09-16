@@ -3146,7 +3146,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     BOOL _inspectorExpanded;
     BOOL _inspectorFloating;
     BOOL _updatingInspectorPresentation;
-    NSPanel *_inspectorPanel;
+    NSView *_workspaceRootView;
+    NSArray<NSLayoutConstraint *> *_inspectorOverlayConstraints;
     NSLayoutConstraint *_sidebarWidthConstraint;
     NSLayoutConstraint *_inspectorWidthConstraint;
     CGFloat _inspectorWidthBeforeCollapse;
@@ -3281,8 +3282,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSRect previousFrame = _window.frame;
     CGFloat sidebarWidth = _splitView.subviews.count >= 2
         ? NSWidth(_splitView.subviews[0].frame) : 270.0;
-    CGFloat inspectorWidth = _inspectorFloating && _inspectorPanel
-        ? NSWidth(_inspectorPanel.contentView.bounds) : NSWidth(_inspectorView.frame);
+    CGFloat inspectorWidth = NSWidth(_inspectorView.frame);
     if (inspectorWidth <= 0.0) inspectorWidth = 340.0;
     BOOL inspectorWasHidden = !_inspectorExpanded;
     BOOL toolWasExpanded = !_toolWorkspaceView.hidden;
@@ -3328,9 +3328,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingPanel = nil;
     _floatingConversationView = nil;
     _floatingWebReady = NO;
-    [_inspectorPanel orderOut:nil];
-    _inspectorPanel.contentView = [[NSView alloc] initWithFrame:NSZeroRect];
-    _inspectorPanel = nil;
+    _inspectorOverlayConstraints = nil;
+    _workspaceRootView = nil;
     _inspectorFloating = NO;
     [previousWindow orderOut:nil];
 
@@ -3485,6 +3484,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     PTWorkspaceRootView *root = [[PTWorkspaceRootView alloc] initWithFrame:NSZeroRect];
     root.translatesAutoresizingMaskIntoConstraints = NO;
     [windowContent addSubview:root];
+    _workspaceRootView = root;
     [NSLayoutConstraint activateConstraints:@[
         [root.topAnchor constraintEqualToAnchor:windowContent.topAnchor],
         [root.leadingAnchor constraintEqualToAnchor:windowContent.leadingAnchor],
@@ -3657,8 +3657,14 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)applyAdaptiveInspectorWidth {
-    if (_inspectorFloating || !_inspectorWidthConstraint) return;
-    _inspectorWidthConstraint.constant = [self adaptiveInspectorWidth];
+    if (!_inspectorWidthConstraint) return;
+    if (_inspectorFloating) {
+        CGFloat available = NSWidth(_window.contentView.bounds);
+        CGFloat preferred = MIN(420.0, MAX(280.0, _inspectorWidthBeforeCollapse));
+        _inspectorWidthConstraint.constant = MIN(preferred, MAX(260.0, available - 28.0));
+    } else {
+        _inspectorWidthConstraint.constant = [self adaptiveInspectorWidth];
+    }
 }
 
 - (BOOL)shouldFloatInspector {
@@ -3676,55 +3682,31 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _inspectorWidthConstraint.active = NO;
     [_splitView removeArrangedSubview:_inspectorView];
     [_inspectorView removeFromSuperview];
-
-    if (!_inspectorPanel) {
-        CGFloat width = MIN(520.0, MAX(300.0, _inspectorWidthBeforeCollapse));
-        CGFloat height = MIN(700.0, MAX(420.0, NSHeight(_window.frame) - 80.0));
-        NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-            NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow;
-        _inspectorPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
-                                                    styleMask:style
-                                                      backing:NSBackingStoreBuffered
-                                                        defer:NO];
-        _inspectorPanel.delegate = self;
-        _inspectorPanel.title = PTL(@"检查器", @"Inspector");
-        _inspectorPanel.level = NSFloatingWindowLevel;
-        _inspectorPanel.floatingPanel = YES;
-        _inspectorPanel.hidesOnDeactivate = NO;
-        _inspectorPanel.releasedWhenClosed = NO;
-        _inspectorPanel.minSize = NSMakeSize(260.0, 320.0);
-        NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
-        if (screen) _inspectorPanel.maxSize = NSMakeSize(520.0, NSHeight(screen.visibleFrame));
-        _inspectorPanel.backgroundColor = PTWarmCanvasColor();
-
-        NSRect visible = screen ? screen.visibleFrame : NSZeroRect;
-        NSRect mainFrame = _window.frame;
-        NSRect panelFrame = _inspectorPanel.frame;
-        panelFrame.origin.x = NSMaxX(mainFrame) + 8.0;
-        if (screen && NSMaxX(panelFrame) > NSMaxX(visible)) {
-            panelFrame.origin.x = NSMaxX(visible) - NSWidth(panelFrame) - 12.0;
-        }
-        panelFrame.origin.y = NSMaxY(mainFrame) - NSHeight(panelFrame);
-        if (screen) panelFrame.origin.y = MAX(NSMinY(visible),
-            MIN(panelFrame.origin.y, NSMaxY(visible) - NSHeight(panelFrame)));
-        [_inspectorPanel setFrame:panelFrame display:NO];
-    }
-
-    _inspectorView.translatesAutoresizingMaskIntoConstraints = YES;
-    _inspectorView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    _inspectorPanel.contentView = _inspectorView;
-    _inspectorView.frame = _inspectorPanel.contentView.bounds;
-    _inspectorView.hidden = NO;
+    _inspectorView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_workspaceRootView addSubview:_inspectorView positioned:NSWindowAbove relativeTo:_splitView];
+    _inspectorWidthConstraint = [_inspectorView.widthAnchor constraintEqualToConstant:340.0];
+    _inspectorWidthConstraint.priority = 999;
+    _inspectorOverlayConstraints = @[
+        [_inspectorView.topAnchor constraintEqualToAnchor:_workspaceRootView.topAnchor constant:64.0],
+        [_inspectorView.trailingAnchor constraintEqualToAnchor:_workspaceRootView.trailingAnchor],
+        [_inspectorView.bottomAnchor constraintEqualToAnchor:_workspaceRootView.bottomAnchor]
+    ];
+    [NSLayoutConstraint activateConstraints:_inspectorOverlayConstraints];
+    _inspectorWidthConstraint.active = YES;
     _inspectorFloating = YES;
-    if (_inspectorExpanded) [_inspectorPanel orderFront:nil];
+    _inspectorView.hidden = !_inspectorExpanded;
+    [self applyAdaptiveInspectorWidth];
+    [_window.contentView layoutSubtreeIfNeeded];
 }
 
 - (void)dockInspector {
     if (!_inspectorFloating || !_inspectorView) return;
-    CGFloat floatingWidth = NSWidth(_inspectorPanel.contentView.bounds);
+    CGFloat floatingWidth = NSWidth(_inspectorView.frame);
     if (floatingWidth > 0.0) _inspectorWidthBeforeCollapse = floatingWidth;
-    [_inspectorPanel orderOut:nil];
-    _inspectorPanel.contentView = [[NSView alloc] initWithFrame:NSZeroRect];
+    _inspectorWidthConstraint.active = NO;
+    [NSLayoutConstraint deactivateConstraints:_inspectorOverlayConstraints ?: @[]];
+    _inspectorOverlayConstraints = nil;
+    [_inspectorView removeFromSuperview];
     _inspectorView.translatesAutoresizingMaskIntoConstraints = NO;
     [_splitView addArrangedSubview:_inspectorView];
     _inspectorWidthConstraint = [_inspectorView.widthAnchor
@@ -3749,9 +3731,6 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (void)windowDidResize:(NSNotification *)notification {
     if (notification.object == _window) {
         [self updateInspectorPresentation];
-    } else if (notification.object == _inspectorPanel && _inspectorFloating) {
-        CGFloat width = NSWidth(_inspectorPanel.contentView.bounds);
-        if (width > 0.0) _inspectorWidthBeforeCollapse = width;
     }
 }
 
@@ -6301,11 +6280,6 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
-    if (notification.object == _inspectorPanel) {
-        _inspectorExpanded = NO;
-        _inspectorToggleButton.state = NSControlStateValueOff;
-        return;
-    }
     if (notification.object != _floatingPanel) return;
     _floatingRenderGeneration += 1;
     _floatingSessionID = nil;
@@ -7572,10 +7546,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _inspectorExpanded = expanded;
     [self updateInspectorPresentation];
     if (_inspectorFloating) {
-        _inspectorView.hidden = NO;
+        _inspectorView.hidden = !expanded;
         _inspectorView.alphaValue = 1.0;
-        if (expanded) [_inspectorPanel orderFront:nil];
-        else [_inspectorPanel orderOut:nil];
         _inspectorToggleButton.state = expanded
             ? NSControlStateValueOn : NSControlStateValueOff;
         if (completion) completion();

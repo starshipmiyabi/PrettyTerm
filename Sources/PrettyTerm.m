@@ -106,6 +106,10 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
     self.mouseDraggingDivider = YES;
     [super mouseDown:event];
     self.mouseDraggingDivider = NO;
+    if ([self.delegate respondsToSelector:@selector(splitViewDidResizeSubviews:)]) {
+        [self.delegate splitViewDidResizeSubviews:
+            [NSNotification notificationWithName:NSSplitViewDidResizeSubviewsNotification object:self]];
+    }
     self.changingDivider = NO;
 }
 @end
@@ -2995,6 +2999,10 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (CGFloat)adaptiveInspectorWidth;
 - (void)applyAdaptiveInspectorWidth;
 - (void)updateWindowMaximumSize;
+- (BOOL)shouldFloatInspector;
+- (void)updateInspectorPresentation;
+- (void)dockInspector;
+- (void)floatInspector;
 @end
 
 @implementation PTAppDelegate {
@@ -3135,9 +3143,12 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSView *_inspectorCard;
     NSButton *_sidePanelToggleButton;
     BOOL _restoreInspectorAfterTools;
+    BOOL _inspectorExpanded;
+    BOOL _inspectorFloating;
+    BOOL _updatingInspectorPresentation;
+    NSPanel *_inspectorPanel;
     NSLayoutConstraint *_sidebarWidthConstraint;
     NSLayoutConstraint *_inspectorWidthConstraint;
-    NSLayoutConstraint *_splitTrailingConstraint;
     CGFloat _inspectorWidthBeforeCollapse;
     NSUInteger _inspectorAnimationGeneration;
     BOOL _committingSplitWidths;
@@ -3270,9 +3281,10 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSRect previousFrame = _window.frame;
     CGFloat sidebarWidth = _splitView.subviews.count >= 2
         ? NSWidth(_splitView.subviews[0].frame) : 270.0;
-    CGFloat inspectorWidth = NSWidth(_inspectorView.frame) > 0.0
-        ? NSWidth(_inspectorView.frame) : 340.0;
-    BOOL inspectorWasHidden = _inspectorView.hidden;
+    CGFloat inspectorWidth = _inspectorFloating && _inspectorPanel
+        ? NSWidth(_inspectorPanel.contentView.bounds) : NSWidth(_inspectorView.frame);
+    if (inspectorWidth <= 0.0) inspectorWidth = 340.0;
+    BOOL inspectorWasHidden = !_inspectorExpanded;
     BOOL toolWasExpanded = !_toolWorkspaceView.hidden;
     CGFloat toolWidth = NSWidth(_toolWorkspaceView.frame) > 0.0
         ? NSWidth(_toolWorkspaceView.frame) : _toolWorkspaceWidthBeforeCollapse;
@@ -3316,6 +3328,10 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingPanel = nil;
     _floatingConversationView = nil;
     _floatingWebReady = NO;
+    [_inspectorPanel orderOut:nil];
+    _inspectorPanel.contentView = [[NSView alloc] initWithFrame:NSZeroRect];
+    _inspectorPanel = nil;
+    _inspectorFloating = NO;
     [previousWindow orderOut:nil];
 
     _webReady = NO;
@@ -3544,29 +3560,20 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSView *inspector = [self buildInspector];
     [split addArrangedSubview:sidebar];
     [split addArrangedSubview:conversation];
-    inspector.translatesAutoresizingMaskIntoConstraints = NO;
-    [root addSubview:inspector];
-    // 检查器现在是根布局里真正占位的一栏：展开时靠下面的 _splitTrailingConstraint
-    // 把 split 的右边缘往左收，把让出来的宽度留给检查器，而不是绝对定位盖在内容上面。
+    [split addArrangedSubview:inspector];
+    _inspectorExpanded = YES;
+    _inspectorFloating = NO;
+    if (_inspectorWidthBeforeCollapse <= 0.0) _inspectorWidthBeforeCollapse = 340.0;
     CGFloat inspectorWidth = [self adaptiveInspectorWidth];
     _inspectorWidthConstraint = [inspector.widthAnchor constraintEqualToConstant:inspectorWidth];
     _inspectorWidthConstraint.priority = 999;
     _inspectorWidthConstraint.active = YES;
-    [NSLayoutConstraint activateConstraints:@[
-        [inspector.topAnchor constraintEqualToAnchor:root.topAnchor constant:64],
-        [inspector.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [inspector.bottomAnchor constraintEqualToAnchor:root.bottomAnchor]
-    ]];
     _sidebarWidthConstraint = [sidebar.widthAnchor constraintEqualToConstant:270.0];
     _sidebarWidthConstraint.priority = 999;
     _sidebarWidthConstraint.active = YES;
     [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:0];
     [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
-    // 检查器默认可见（inspector.hidden 初值为 NO），这里让挤压量从一开始就对齐，
-    // 避免第一帧出现"可见但没挤压"的闪烁。
-    _splitTrailingConstraint = [split.trailingAnchor constraintEqualToAnchor:root.trailingAnchor
-                                                                      constant:-inspectorWidth];
-    _splitTrailingConstraint.active = YES;
+    [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:2];
 
     [_inspectorToggleButton removeFromSuperview];
     [topBar addSubview:_inspectorToggleButton];
@@ -3604,6 +3611,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [topBar.heightAnchor constraintEqualToConstant:64],
         [split.topAnchor constraintEqualToAnchor:topBar.bottomAnchor],
         [split.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [split.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
         [split.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
 
         [logo.leadingAnchor constraintEqualToAnchor:topBar.leadingAnchor constant:76],
@@ -3637,36 +3645,120 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (CGFloat)adaptiveInspectorWidth {
-    CGFloat preferred = _inspectorWidthBeforeCollapse > 0.0
-        ? _inspectorWidthBeforeCollapse : 340.0;
+    CGFloat preferred = MIN(520.0, MAX(260.0,
+        _inspectorWidthBeforeCollapse > 0.0 ? _inspectorWidthBeforeCollapse : 340.0));
     CGFloat available = NSWidth(_window.contentView.bounds);
-    NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
-    if (screen) available = MIN(available, NSWidth(screen.visibleFrame));
     if (available <= 0.0) return preferred;
     CGFloat sidebarWidth = _splitView.subviews.count > 0
         ? NSWidth(_splitView.subviews[0].frame) : _sidebarWidthConstraint.constant;
-    sidebarWidth = MAX(0.0, sidebarWidth);
-    CGFloat maximumForConversation = available - sidebarWidth - 420.0;
-    CGFloat maximum = MIN(460.0, MIN(floor(available * 0.34), maximumForConversation));
-    maximum = MAX(220.0, maximum);
-    return MIN(preferred, maximum);
+    CGFloat maximum = available - MAX(0.0, sidebarWidth) - 520.0 -
+        (2.0 * _splitView.dividerThickness);
+    return MIN(preferred, MAX(260.0, maximum));
 }
 
 - (void)applyAdaptiveInspectorWidth {
-    if (!_inspectorWidthConstraint || !_splitTrailingConstraint) return;
-    CGFloat width = [self adaptiveInspectorWidth];
-    _inspectorWidthConstraint.constant = width;
-    if (!_inspectorView.hidden) _splitTrailingConstraint.constant = -width;
+    if (_inspectorFloating || !_inspectorWidthConstraint) return;
+    _inspectorWidthConstraint.constant = [self adaptiveInspectorWidth];
+}
+
+- (BOOL)shouldFloatInspector {
+    CGFloat available = NSWidth(_window.contentView.bounds);
+    CGFloat sidebarWidth = _splitView.subviews.count > 0
+        ? NSWidth(_splitView.subviews[0].frame) : _sidebarWidthConstraint.constant;
+    return available < MAX(0.0, sidebarWidth) + 520.0 + 260.0 +
+        (2.0 * _splitView.dividerThickness);
+}
+
+- (void)floatInspector {
+    if (_inspectorFloating || !_inspectorView) return;
+    CGFloat dockedWidth = NSWidth(_inspectorView.frame);
+    if (dockedWidth > 0.0) _inspectorWidthBeforeCollapse = dockedWidth;
+    _inspectorWidthConstraint.active = NO;
+    [_splitView removeArrangedSubview:_inspectorView];
+    [_inspectorView removeFromSuperview];
+
+    if (!_inspectorPanel) {
+        CGFloat width = MIN(520.0, MAX(300.0, _inspectorWidthBeforeCollapse));
+        CGFloat height = MIN(700.0, MAX(420.0, NSHeight(_window.frame) - 80.0));
+        NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+            NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow;
+        _inspectorPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, width, height)
+                                                    styleMask:style
+                                                      backing:NSBackingStoreBuffered
+                                                        defer:NO];
+        _inspectorPanel.delegate = self;
+        _inspectorPanel.title = PTL(@"检查器", @"Inspector");
+        _inspectorPanel.level = NSFloatingWindowLevel;
+        _inspectorPanel.floatingPanel = YES;
+        _inspectorPanel.hidesOnDeactivate = NO;
+        _inspectorPanel.releasedWhenClosed = NO;
+        _inspectorPanel.minSize = NSMakeSize(260.0, 320.0);
+        NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
+        if (screen) _inspectorPanel.maxSize = NSMakeSize(520.0, NSHeight(screen.visibleFrame));
+        _inspectorPanel.backgroundColor = PTWarmCanvasColor();
+
+        NSRect visible = screen ? screen.visibleFrame : NSZeroRect;
+        NSRect mainFrame = _window.frame;
+        NSRect panelFrame = _inspectorPanel.frame;
+        panelFrame.origin.x = NSMaxX(mainFrame) + 8.0;
+        if (screen && NSMaxX(panelFrame) > NSMaxX(visible)) {
+            panelFrame.origin.x = NSMaxX(visible) - NSWidth(panelFrame) - 12.0;
+        }
+        panelFrame.origin.y = NSMaxY(mainFrame) - NSHeight(panelFrame);
+        if (screen) panelFrame.origin.y = MAX(NSMinY(visible),
+            MIN(panelFrame.origin.y, NSMaxY(visible) - NSHeight(panelFrame)));
+        [_inspectorPanel setFrame:panelFrame display:NO];
+    }
+
+    _inspectorView.translatesAutoresizingMaskIntoConstraints = YES;
+    _inspectorView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _inspectorPanel.contentView = _inspectorView;
+    _inspectorView.frame = _inspectorPanel.contentView.bounds;
+    _inspectorView.hidden = NO;
+    _inspectorFloating = YES;
+    if (_inspectorExpanded) [_inspectorPanel orderFront:nil];
+}
+
+- (void)dockInspector {
+    if (!_inspectorFloating || !_inspectorView) return;
+    CGFloat floatingWidth = NSWidth(_inspectorPanel.contentView.bounds);
+    if (floatingWidth > 0.0) _inspectorWidthBeforeCollapse = floatingWidth;
+    [_inspectorPanel orderOut:nil];
+    _inspectorPanel.contentView = [[NSView alloc] initWithFrame:NSZeroRect];
+    _inspectorView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_splitView addArrangedSubview:_inspectorView];
+    _inspectorWidthConstraint = [_inspectorView.widthAnchor
+        constraintEqualToConstant:[self adaptiveInspectorWidth]];
+    _inspectorWidthConstraint.priority = 999;
+    _inspectorWidthConstraint.active = YES;
+    [_splitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:2];
+    _inspectorView.hidden = !_inspectorExpanded;
+    _inspectorFloating = NO;
+    [_window.contentView layoutSubtreeIfNeeded];
+}
+
+- (void)updateInspectorPresentation {
+    if (_updatingInspectorPresentation || !_inspectorView) return;
+    _updatingInspectorPresentation = YES;
+    if ([self shouldFloatInspector]) [self floatInspector];
+    else [self dockInspector];
+    if (!_inspectorFloating) [self applyAdaptiveInspectorWidth];
+    _updatingInspectorPresentation = NO;
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
-    if (notification.object == _window) [self applyAdaptiveInspectorWidth];
+    if (notification.object == _window) {
+        [self updateInspectorPresentation];
+    } else if (notification.object == _inspectorPanel && _inspectorFloating) {
+        CGFloat width = NSWidth(_inspectorPanel.contentView.bounds);
+        if (width > 0.0) _inspectorWidthBeforeCollapse = width;
+    }
 }
 
 - (void)windowDidChangeScreen:(NSNotification *)notification {
     if (notification.object != _window) return;
     [self updateWindowMaximumSize];
-    [self applyAdaptiveInspectorWidth];
+    [self updateInspectorPresentation];
 }
 
 - (NSSize)windowWillResize:(NSWindow *)sender toSize:(NSSize)frameSize {
@@ -3686,8 +3778,16 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (CGFloat)splitView:(NSSplitView *)splitView
     constrainSplitPosition:(CGFloat)proposedPosition
            ofSubviewAt:(NSInteger)dividerIndex {
-    (void)splitView;
-    (void)dividerIndex;
+    if (splitView == _splitView && dividerIndex == 1 && !_inspectorFloating &&
+        splitView.subviews.count >= 3) {
+        CGFloat total = NSWidth(splitView.bounds);
+        CGFloat sidebarWidth = NSWidth(splitView.subviews[0].frame);
+        CGFloat maximum = MAX(260.0, total - sidebarWidth - 420.0 -
+            (2.0 * splitView.dividerThickness));
+        CGFloat inspectorWidth = total - proposedPosition - splitView.dividerThickness;
+        inspectorWidth = MIN(MIN(520.0, maximum), MAX(260.0, inspectorWidth));
+        return total - inspectorWidth - splitView.dividerThickness;
+    }
     return proposedPosition;
 }
 
@@ -3741,9 +3841,19 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     }
     if (divider == 0 && sidebarWidth > 0.0) {
         _sidebarWidthConstraint.constant = sidebarWidth;
+    } else if (divider == 1 && !_inspectorFloating && splitView.subviews.count >= 3) {
+        CGFloat inspectorWidth = NSWidth(splitView.subviews[2].frame);
+        if (inspectorWidth > 0.0) {
+            _inspectorWidthBeforeCollapse = MIN(520.0, MAX(260.0, inspectorWidth));
+            _inspectorWidthConstraint.constant = _inspectorWidthBeforeCollapse;
+        }
     }
-    _sidebarWidthConstraint.active = YES;
-    [self applyAdaptiveInspectorWidth];
+    BOOL dragging = [(PTWorkspaceSplitView *)splitView mouseDraggingDivider];
+    if (!dragging) {
+        _sidebarWidthConstraint.active = YES;
+        if (!_inspectorFloating) _inspectorWidthConstraint.active = YES;
+        [self updateInspectorPresentation];
+    }
     _committingSplitWidths = NO;
 }
 
@@ -3760,9 +3870,12 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     }
     if (notification.object != _splitView || _committingSplitWidths ||
         ![(PTWorkspaceSplitView *)_splitView changingDivider]) return;
-    // 左栏拖动期间释放旧宽度，拖动结束后记录新的 frame。
-    if ([(PTWorkspaceSplitView *)_splitView changingDividerIndex] == 0)
+    NSInteger divider = [(PTWorkspaceSplitView *)_splitView changingDividerIndex];
+    if (divider == 0) {
         _sidebarWidthConstraint.active = NO;
+    } else if (divider == 1 && !_inspectorFloating) {
+        _inspectorWidthConstraint.active = NO;
+    }
 }
 
 - (NSView *)buildSidebar {
@@ -6188,6 +6301,11 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object == _inspectorPanel) {
+        _inspectorExpanded = NO;
+        _inspectorToggleButton.state = NSControlStateValueOff;
+        return;
+    }
     if (notification.object != _floatingPanel) return;
     _floatingRenderGeneration += 1;
     _floatingSessionID = nil;
@@ -7364,7 +7482,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 
 - (void)setToolWorkspaceExpanded:(BOOL)expanded animated:(BOOL)animated {
     if (!_toolWorkspaceView || !_toolWorkspaceWidthConstraint) return;
-    if (expanded && !_inspectorView.hidden) {
+    if (expanded && _inspectorExpanded) {
         _restoreInspectorAfterTools = YES;
         [self setInspectorExpanded:NO animated:NO];
     }
@@ -7451,6 +7569,19 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         if (completion) completion();
         return;
     }
+    _inspectorExpanded = expanded;
+    [self updateInspectorPresentation];
+    if (_inspectorFloating) {
+        _inspectorView.hidden = NO;
+        _inspectorView.alphaValue = 1.0;
+        if (expanded) [_inspectorPanel orderFront:nil];
+        else [_inspectorPanel orderOut:nil];
+        _inspectorToggleButton.state = expanded
+            ? NSControlStateValueOn : NSControlStateValueOff;
+        if (completion) completion();
+        return;
+    }
+
     NSUInteger generation = ++_inspectorAnimationGeneration;
     BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
     CGFloat targetWidth = [self adaptiveInspectorWidth];
@@ -7459,7 +7590,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         _inspectorView.hidden = NO;
         _inspectorView.alphaValue = reduceMotion ? 1.0 : 0.0;
         if (!animated || reduceMotion) {
-            _splitTrailingConstraint.constant = -targetWidth;
             _inspectorView.alphaValue = 1.0;
             if (completion) completion();
         } else {
@@ -7467,7 +7597,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
                 context.duration = 0.22;
                 context.timingFunction = [CAMediaTimingFunction functionWithName:
                     kCAMediaTimingFunctionEaseInEaseOut];
-                self->_splitTrailingConstraint.animator.constant = -targetWidth;
                 self->_inspectorView.animator.alphaValue = 1.0;
             } completionHandler:^{
                 if (generation != self->_inspectorAnimationGeneration) return;
@@ -7479,7 +7608,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
 
     if (!animated || reduceMotion) {
-        _splitTrailingConstraint.constant = 0.0;
         _inspectorView.alphaValue = 1.0;
         _inspectorView.hidden = YES;
         if (completion) completion();
@@ -7488,7 +7616,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             context.duration = 0.22;
             context.timingFunction = [CAMediaTimingFunction functionWithName:
                 kCAMediaTimingFunctionEaseInEaseOut];
-            self->_splitTrailingConstraint.animator.constant = 0.0;
             self->_inspectorView.animator.alphaValue = 0.0;
         } completionHandler:^{
             if (generation != self->_inspectorAnimationGeneration) return;
@@ -8038,12 +8165,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             }
             _changedFileButtonsByPath = nextButtons;
         }
-        // 文件名不再截断，检查器宽度要跟着最长的那一条胶囊走，而不是锁死。
-        CGFloat widestButton = 0.0;
-        for (PTAnimatedButton *button in _changedFileButtonsByPath.allValues) {
-            widestButton = MAX(widestButton, button.intrinsicContentSize.width);
-        }
-        _inspectorWidthBeforeCollapse = MAX(340.0, widestButton + 80.0);
         [self applyAdaptiveInspectorWidth];
     }
 
@@ -8089,7 +8210,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         [self setToolWorkspaceExpanded:NO animated:YES];
         return;
     }
-    [self setInspectorExpanded:_inspectorView.hidden animated:YES];
+    [self setInspectorExpanded:!_inspectorExpanded animated:YES];
 }
 
 - (void)toggleSidePanel:(id)sender {

@@ -26,9 +26,9 @@
     <key>CFBundleShortVersionString</key>
     <string>0.9.8</string>
     <key>CFBundleVersion</key>
-    <string>32</string>
+    <string>33</string>
     <key>CFBundleGetInfoString</key>
-    <string>PrettyTerm Beta 0.9.8 (32)</string>
+    <string>PrettyTerm Beta 0.9.8 (33)</string>
     <key>PTReleaseChannel</key>
     <string>beta</string>
     <key>LSMinimumSystemVersion</key>

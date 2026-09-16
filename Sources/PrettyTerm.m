@@ -2994,6 +2994,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (PTSessionInfo *)sessionWithID:(NSString *)sessionID;
 - (CGFloat)adaptiveInspectorWidth;
 - (void)applyAdaptiveInspectorWidth;
+- (void)updateWindowMaximumSize;
 @end
 
 @implementation PTAppDelegate {
@@ -3462,6 +3463,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _window.backgroundColor = PTWarmCanvasColor();
     _window.delegate = self;
     [_window center];
+    [self updateWindowMaximumSize];
 
     NSView *windowContent = _window.contentView;
     PTWorkspaceRootView *root = [[PTWorkspaceRootView alloc] initWithFrame:NSZeroRect];
@@ -3641,8 +3643,12 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
     if (screen) available = MIN(available, NSWidth(screen.visibleFrame));
     if (available <= 0.0) return preferred;
-    CGFloat maximum = MIN(520.0, floor(available * 0.42));
-    maximum = MAX(240.0, maximum);
+    CGFloat sidebarWidth = _splitView.subviews.count > 0
+        ? NSWidth(_splitView.subviews[0].frame) : _sidebarWidthConstraint.constant;
+    sidebarWidth = MAX(0.0, sidebarWidth);
+    CGFloat maximumForConversation = available - sidebarWidth - 420.0;
+    CGFloat maximum = MIN(460.0, MIN(floor(available * 0.34), maximumForConversation));
+    maximum = MAX(220.0, maximum);
     return MIN(preferred, maximum);
 }
 
@@ -3655,6 +3661,26 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 
 - (void)windowDidResize:(NSNotification *)notification {
     if (notification.object == _window) [self applyAdaptiveInspectorWidth];
+}
+
+- (void)windowDidChangeScreen:(NSNotification *)notification {
+    if (notification.object != _window) return;
+    [self updateWindowMaximumSize];
+    [self applyAdaptiveInspectorWidth];
+}
+
+- (NSSize)windowWillResize:(NSWindow *)sender toSize:(NSSize)frameSize {
+    if (sender != _window) return frameSize;
+    NSScreen *screen = sender.screen ?: NSScreen.mainScreen;
+    if (!screen) return frameSize;
+    frameSize.width = MIN(frameSize.width, NSWidth(screen.visibleFrame));
+    frameSize.height = MIN(frameSize.height, NSHeight(screen.visibleFrame));
+    return frameSize;
+}
+
+- (void)updateWindowMaximumSize {
+    NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
+    if (screen) _window.maxSize = screen.visibleFrame.size;
 }
 
 - (CGFloat)splitView:(NSSplitView *)splitView
@@ -3717,6 +3743,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         _sidebarWidthConstraint.constant = sidebarWidth;
     }
     _sidebarWidthConstraint.active = YES;
+    [self applyAdaptiveInspectorWidth];
     _committingSplitWidths = NO;
 }
 

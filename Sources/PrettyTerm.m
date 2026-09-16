@@ -74,16 +74,6 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 @interface PTWorkspaceRootView : NSView
 @end
 
-@interface PTUnconstrainedWindow : NSWindow
-@end
-
-@implementation PTUnconstrainedWindow
-- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen {
-    (void)screen;
-    return frameRect;
-}
-@end
-
 @implementation PTWorkspaceRootView
 @end
 
@@ -3462,10 +3452,10 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         displayName, shortVersion, buildVersion];
     NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
         NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView;
-    _window = [[PTUnconstrainedWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
-                                                   styleMask:style
-                                                     backing:NSBackingStoreBuffered
-                                                       defer:NO];
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                         styleMask:style
+                                           backing:NSBackingStoreBuffered
+                                             defer:NO];
     _window.title = visibleAppVersion;
     _window.titleVisibility = NSWindowTitleHidden;
     _window.titlebarAppearsTransparent = YES;
@@ -3648,6 +3638,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     CGFloat preferred = _inspectorWidthBeforeCollapse > 0.0
         ? _inspectorWidthBeforeCollapse : 340.0;
     CGFloat available = NSWidth(_window.contentView.bounds);
+    NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
+    if (screen) available = MIN(available, NSWidth(screen.visibleFrame));
     if (available <= 0.0) return preferred;
     CGFloat maximum = MIN(520.0, floor(available * 0.42));
     maximum = MAX(240.0, maximum);

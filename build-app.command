@@ -20,6 +20,7 @@ clang \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTFilePreview.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Sources/PrettyTerm.m" \
@@ -29,6 +30,7 @@ cp "$project_dir/Info.plist" "$contents_dir/Info.plist"
 cp "$project_dir/Resources/tex-svg.js" "$resources_dir/tex-svg.js"
 cp "$project_dir/Resources/index.html" "$resources_dir/index.html"
 cp "$project_dir/Resources/PrettyTerm.icns" "$resources_dir/PrettyTerm.icns"
+cp "$project_dir/Resources/PrettyTermLogo.png" "$resources_dir/PrettyTermLogo.png"
 if [[ -f "$project_dir/Resources/app.js" ]]; then
   cp "$project_dir/Resources/app.js" "$resources_dir/app.js"
 fi

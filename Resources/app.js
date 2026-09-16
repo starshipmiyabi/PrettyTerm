@@ -22,29 +22,106 @@
     viewportRestoreFrame: 0,
     restoringViewport: false,
     viewportResizePending: false,
+    typesetQueue: Promise.resolve(),
+    renderedTurns: [],
     waiting: false
   };
+  const editStats = new WeakMap();
+  const virtualBodies = new Map();
+  let liveRendering = false;
+  let nextBodyID = 0;
+  let virtualUpdateTimer = null;
 
-  const MAX_QUOTE_LENGTH = 20000;
+  function renderLive(render) {
+    liveRendering = true;
+    try { return render(); }
+    finally { liveRendering = false; }
+  }
+
+  // Keep source text for every message; only the expensive rendered body has a
+  // viewport lifetime. The lightweight shell also preserves scroll reachability.
+  function contentBody(className, text, render, attributes = '') {
+    if (!liveRendering) return `<div class="${className}"${attributes}>${render()}</div>`;
+    const id = String(++nextBodyID);
+    const columns = Math.max(1, Math.floor(((scope.innerWidth || 720) - 100) / 8));
+    const lines = String(text).split('\n').reduce((total, line) => total + Math.max(1, Math.ceil(line.length / columns)), 0);
+    const height = Math.max(24, lines * 24);
+    virtualBodies.set(id, { render, mounted: false, height });
+    return `<div class="${className}"${attributes} data-virtual-body="${id}" style="min-height:${height}px;display:flow-root;box-sizing:border-box"></div>`;
+  }
+
+  function updateVirtualBodies(mathJax) {
+    const root = rootElement();
+    if (!root) return [];
+    const added = [];
+    const margin = scope.innerHeight;
+    const selection = scope.getSelection();
+    const nodes = Array.from(root.querySelectorAll('[data-virtual-body]'));
+    // Read geometry before changing it, so removals never alternate reads and
+    // writes and force a layout for each historical message.
+    const changes = nodes.map(node => {
+      const record = virtualBodies.get(node.dataset.virtualBody);
+      const rect = node.getBoundingClientRect();
+      const closed = Boolean(node.closest('details:not([open])'));
+      const selected = record.mounted && selection && !selection.isCollapsed && selection.containsNode(node, true);
+      return { node, record, rect, wanted: selected || (!closed && rect.bottom >= -margin && rect.top <= scope.innerHeight + margin) };
+    });
+    for (const { node, record, rect, wanted } of changes) {
+      if (wanted === record.mounted) continue;
+      if (wanted) {
+        node.style.minHeight = '';
+        node.innerHTML = record.render();
+        record.mounted = true;
+        added.push(node);
+      } else {
+        if (rect.height) record.height = rect.height;
+        if (mathJax) mathJax.typesetClear([node]);
+        node.replaceChildren();
+        node.style.minHeight = `${record.height}px`;
+        record.mounted = false;
+      }
+    }
+    return added;
+  }
+
+  function scheduleVirtualContent() {
+    if (virtualUpdateTimer !== null) return;
+    virtualUpdateTimer = scope.setTimeout(() => {
+      virtualUpdateTimer = null;
+      typeset([]);
+    }, 0);
+  }
+
+  function installVirtualContent() {
+    if (!scope || !scope.document || !scope.addEventListener) return;
+    scope.addEventListener('scroll', scheduleVirtualContent, { passive: true });
+    scope.addEventListener('resize', scheduleVirtualContent);
+    scope.document.addEventListener('toggle', scheduleVirtualContent, true);
+    scope.document.addEventListener('selectionchange', scheduleVirtualContent);
+  }
 
   const strings = {
     'zh-Hans': {
       quote: '引用选中内容', expandInput: '展开输入', lines: '行', codeChange: '代码改动',
+      copyOutput: '复制',
       showMoreFiles: '再显示 {count} 个文件', editedFiles: '已编辑 {count} 个文件',
-      review: '审阅', thinking: '思考过程', tool: '工具调用', error: '错误',
+      review: '审阅', thinking: '思考过程', tool: '工具调用',
+      toolActivity: '工具调用情况', toolCount: '{count} 次', error: '错误',
       empty: '这个会话还没有可显示的事件。', loading: '正在读取 Claude 的会话事件…',
       waitingTitle: 'Claude 正在组织思路', waitingDetail: 'Terminal 信号已送达，回复会在这里出现',
-      askUserTitle: 'Claude 想确认一下', askUserCustomPlaceholder: '没有符合的选项？在这里说明',
+      askUserTitle: 'Claude 有个问题', askUserCustomPlaceholder: '没有符合的选项？在这里说明',
       askUserSubmit: '提交回答', askUserSent: '已发送', askUserAnswered: '已作答',
       askUserSingle: '单选', askUserMultiple: '可多选', askUserCustom: '补充说明'
     },
     en: {
       quote: 'Quote selection', expandInput: 'Expand input', lines: 'lines', codeChange: 'Code change',
+      copyOutput: 'Copy',
       showMoreFiles: 'Show {count} more files', editedFiles: 'Edited {count} files',
-      review: 'Review', thinking: 'Thinking', tool: 'Tool call', error: 'Error',
+      review: 'Review', thinking: 'Thinking', tool: 'Tool call',
+      toolActivity: 'Tool activity', toolCount: '{count} calls', error: 'Error',
       empty: 'This conversation has no events to display yet.', loading: 'Reading Claude conversation events…',
       waitingTitle: 'Claude is working through it', waitingDetail: 'Terminal signal delivered; the response will appear here',
-      askUserTitle: 'Claude wants to check with you', askUserCustomPlaceholder: 'None of these fit? Say what you want here',
+      askUserTitle: 'Claude has a question', askUserCustomPlaceholder: 'None of these fit? Say what you want here',
       askUserSubmit: 'Submit answers', askUserSent: 'Sent', askUserAnswered: 'Answered',
       askUserSingle: 'Choose one', askUserMultiple: 'Choose any', askUserCustom: 'Add a note'
     }
@@ -75,7 +152,7 @@
     applyDocumentLanguage();
     if (state.session) {
       const root = rootElement();
-      if (root) root.innerHTML = renderSession(state.session);
+      if (root) return setClaudeSession(state.session).then(() => state.language);
     }
     return state.language;
   }
@@ -117,7 +194,7 @@
     const text = String(selection.toString() || '')
       .replace(/\r\n?/g, '\n')
       .trim();
-    if (!text || text.length > MAX_QUOTE_LENGTH) return null;
+    if (!text) return null;
     const sessionId = String(session && (session.sessionId || session.id) || '');
     if (!sessionId) return null;
     return { container: startMessage, payload: { text, sessionId } };
@@ -188,11 +265,6 @@
     scope.addEventListener('scroll', hideQuoteMenu, true);
   }
 
-  function safeHref(value) {
-    const href = String(value || '').trim();
-    return /^(?:https?:|mailto:)/i.test(href) ? href : '';
-  }
-
   function inlineMarkup(value) {
     const tokens = [];
     const stash = html => {
@@ -205,12 +277,7 @@
     text = text.replace(/`([^`\n]+)`/g,
       (_, code) => stash(`<code>${escapeHTML(code)}</code>`));
     text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
-      (_, label, href) => {
-        const safe = safeHref(href);
-        return safe
-          ? stash(`<a href="${escapeHTML(safe)}" target="_blank" rel="noopener noreferrer">${escapeHTML(label)}</a>`)
-          : escapeHTML(label);
-      });
+      (_, label, href) => stash(`<a href="${escapeHTML(String(href).trim())}" target="_blank" rel="noopener noreferrer">${escapeHTML(label)}</a>`));
     text = text.replace(/(^|[^\\$])\$([^$\n]+?)\$(?!\$)/g,
       (whole, prefix, tex) => {
         if (!tex.trim() || tex.trim() !== tex) return whole;
@@ -389,36 +456,128 @@
     return html.join('');
   }
 
+  async function renderFilePreview(payload) {
+    const document = payload && typeof payload === 'object' ? payload : {};
+    const kind = document.kind === 'markdown' ? 'markdown' : 'source';
+    const title = String(document.title || '');
+    const path = String(document.path || '');
+    const text = String(document.text == null ? '' : document.text);
+    const header = `<header class="file-document-header"><h1>${escapeHTML(title)}</h1>` +
+      `<div class="file-document-path">${escapeHTML(path)}</div></header>`;
+    let body = '';
+    if (kind === 'markdown') {
+      body = `<div class="file-markdown-body">${renderMarkdown(text)}</div>`;
+    } else {
+      const lines = text.replace(/\r\n?/g, '\n').split('\n');
+      body = `<div class="file-source-body">${lines.map((line, index) =>
+        `<div class="source-line"><span class="line-number">${index + 1}</span><code>${escapeHTML(line)}</code></div>`
+      ).join('')}</div>`;
+    }
+    const html = `<article class="file-document ${kind}-document">${header}${body}</article>`;
+    const root = rootElement();
+    if (!root) return html;
+    await typeset([root], mathJax => {
+      if (mathJax && typeof mathJax.typesetClear === 'function') mathJax.typesetClear([root]);
+      virtualBodies.clear();
+      state.viewportAnchor = null;
+      root.innerHTML = html;
+      scope.document.body.classList.add('file-preview-mode');
+      scope.scrollTo(0, 0);
+    });
+    return html;
+  }
+
   function diffLines(oldValue, newValue) {
     const before = String(oldValue || '').replace(/\r\n?/g, '\n').split('\n');
     const after = String(newValue || '').replace(/\r\n?/g, '\n').split('\n');
-    if (before.length * after.length > 120000) {
-      return before.map(text => ({ type: 'remove', text }))
-        .concat(after.map(text => ({ type: 'add', text })));
-    }
-    const table = Array.from({ length: before.length + 1 },
-      () => new Uint32Array(after.length + 1));
-    for (let i = before.length - 1; i >= 0; i--) {
-      for (let j = after.length - 1; j >= 0; j--) {
-        table[i][j] = before[i] === after[j]
-          ? table[i + 1][j + 1] + 1
-          : Math.max(table[i + 1][j], table[i][j + 1]);
-      }
-    }
     const result = [];
-    let i = 0;
-    let j = 0;
-    while (i < before.length || j < after.length) {
-      if (i < before.length && j < after.length && before[i] === after[j]) {
-        result.push({ type: 'context', text: before[i++] });
-        j++;
-      } else if (i < before.length && (j >= after.length || table[i + 1][j] >= table[i][j + 1])) {
-        result.push({ type: 'remove', text: before[i++] });
-      } else {
-        result.push({ type: 'add', text: after[j++] });
-      }
+    let prefix = 0;
+    while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {
+      result.push({ type: 'context', text: before[prefix++] });
     }
-    return result;
+    let beforeEnd = before.length;
+    let afterEnd = after.length;
+    const suffix = [];
+    while (beforeEnd > prefix && afterEnd > prefix &&
+           before[beforeEnd - 1] === after[afterEnd - 1]) {
+      suffix.push({ type: 'context', text: before[--beforeEnd] });
+      afterEnd--;
+    }
+    suffix.reverse();
+    const left = before.slice(prefix, beforeEnd);
+    const right = after.slice(prefix, afterEnd);
+    if (!left.length) return result.concat(right.map(text => ({ type: 'add', text })), suffix);
+    if (!right.length) return result.concat(left.map(text => ({ type: 'remove', text })), suffix);
+
+    const rightValues = new Set(right);
+    if (!left.some(line => rightValues.has(line))) {
+      return result.concat(
+        left.map(text => ({ type: 'remove', text })),
+        right.map(text => ({ type: 'add', text })),
+        suffix
+      );
+    }
+
+    // Hirschberg reconstructs an exact LCS with two reusable score rows.
+    // Recursion retains indices only; no per-distance search history is stored.
+    const forward = new Uint32Array(right.length + 1);
+    const backward = new Uint32Array(right.length + 1);
+    const middle = [];
+    const emit = (type, text) => middle.push({ type, text });
+    const solve = (a0, a1, b0, b1) => {
+      while (a0 < a1 && b0 < b1 && left[a0] === right[b0]) {
+        emit('context', left[a0++]);
+        b0++;
+      }
+      let tail = 0;
+      while (a0 < a1 && b0 < b1 && left[a1 - 1] === right[b1 - 1]) {
+        a1--; b1--; tail++;
+      }
+      if (a0 === a1) {
+        for (let j = b0; j < b1; j++) emit('add', right[j]);
+      } else if (b0 === b1) {
+        for (let i = a0; i < a1; i++) emit('remove', left[i]);
+      } else if (a1 - a0 === 1) {
+        let match = b0;
+        while (match < b1 && right[match] !== left[a0]) match++;
+        if (match === b1) emit('remove', left[a0]);
+        for (let j = b0; j < b1; j++) emit(j === match ? 'context' : 'add', right[j]);
+      } else {
+        const mid = Math.floor((a0 + a1) / 2);
+        const width = b1 - b0;
+        forward.fill(0, 0, width + 1);
+        backward.fill(0, 0, width + 1);
+        for (let i = a0; i < mid; i++) {
+          let diagonal = 0;
+          for (let j = 1; j <= width; j++) {
+            const previous = forward[j];
+            forward[j] = left[i] === right[b0 + j - 1] ? diagonal + 1
+              : Math.max(forward[j], forward[j - 1]);
+            diagonal = previous;
+          }
+        }
+        for (let i = a1 - 1; i >= mid; i--) {
+          let diagonal = 0;
+          for (let j = 1; j <= width; j++) {
+            const previous = backward[j];
+            backward[j] = left[i] === right[b1 - j] ? diagonal + 1
+              : Math.max(backward[j], backward[j - 1]);
+            diagonal = previous;
+          }
+        }
+        let split = 0;
+        let best = -1;
+        for (let j = 0; j <= width; j++) {
+          const score = forward[j] + backward[width - j];
+          if (score > best) { best = score; split = j; }
+        }
+        solve(a0, mid, b0, b0 + split);
+        solve(mid, a1, b0 + split, b1);
+      }
+      for (let i = 0; i < tail; i++) emit('context', left[a1 + i]);
+    };
+    solve(0, left.length, 0, right.length);
+    return result.concat(middle, suffix);
   }
 
   function eventText(message) {
@@ -450,14 +609,12 @@
 
   function renderDiff(message) {
     const path = cleanTranscriptText(message.filePath || message.path || t('codeChange'));
-    const lines = diffLines(message.oldText, message.newText);
-    const added = lines.filter(line => line.type === 'add').length;
-    const removed = lines.filter(line => line.type === 'remove').length;
-    const body = lines.map(line => {
+    const { added, removed } = changedFileSummary([message])[0];
+    const body = () => diffLines(message.oldText, message.newText).map(line => {
       const mark = line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' ';
       return `<div class="diff-line ${line.type}"><span class="diff-mark">${mark}</span><code>${escapeHTML(line.text)}</code></div>`;
     }).join('');
-    return `<details class="event diff-event"><summary><span class="event-icon">Δ</span><span>${escapeHTML(message.toolName || 'Edit')}</span><code class="event-path">${escapeHTML(path)}</code><span class="diff-stats"><b>+${added}</b><i>−${removed}</i></span></summary><div class="diff-view">${body}</div></details>`;
+    return `<details class="event diff-event"><summary><span class="event-icon">Δ</span><span>${escapeHTML(message.toolName || 'Edit')}</span><code class="event-path">${escapeHTML(path)}</code><span class="diff-stats"><b>+${added}</b><i>−${removed}</i></span></summary>${contentBody('diff-view', message.newText || message.oldText || '', body)}</details>`;
   }
 
   function renderQuestionCard(message) {
@@ -542,9 +699,16 @@
     (Array.isArray(messages) ? messages : []).forEach(message => {
       if (eventKind(message || {}) !== 'diff') return;
       const path = cleanTranscriptText(message.filePath || message.path || t('codeChange'));
-      const lines = diffLines(message.oldText, message.newText);
-      const added = lines.filter(line => line.type === 'add').length;
-      const removed = lines.filter(line => line.type === 'remove').length;
+      let stats = editStats.get(message);
+      if (!stats || stats.oldText !== message.oldText || stats.newText !== message.newText) {
+        stats = { oldText: message.oldText, newText: message.newText, added: 0, removed: 0 };
+        for (const line of diffLines(message.oldText, message.newText)) {
+          if (line.type === 'add') stats.added++;
+          if (line.type === 'remove') stats.removed++;
+        }
+        editStats.set(message, stats);
+      }
+      const { added, removed } = stats;
       const existing = files.get(path) || { path, added: 0, removed: 0 };
       existing.added += added;
       existing.removed += removed;
@@ -558,13 +722,13 @@
     if (!files.length) return '';
     const added = files.reduce((sum, file) => sum + file.added, 0);
     const removed = files.reduce((sum, file) => sum + file.removed, 0);
-    const fileRow = file => `<div class="edit-file"><code title="${escapeHTML(file.path)}">${escapeHTML(file.path.split('/').pop() || file.path)}</code><span><b>+${file.added}</b><i>−${file.removed}</i></span></div>`;
+    const sessionId = String(session && (session.sessionId || session.id) || '');
+    const fileRow = file => `<button type="button" class="edit-file open-transcript-file" data-session-id="${escapeHTML(sessionId)}" data-file-path="${escapeHTML(file.path)}"><code title="${escapeHTML(file.path)}">${escapeHTML(file.path.split('/').pop() || file.path)}</code><span><b>+${file.added}</b><i>−${file.removed}</i></span></button>`;
     const first = files.slice(0, 3).map(fileRow).join('');
     const remaining = files.slice(3);
     const more = remaining.length
       ? `<details class="edit-more"><summary>${escapeHTML(t('showMoreFiles', { count: remaining.length }))}</summary>${remaining.map(fileRow).join('')}</details>`
       : '';
-    const sessionId = String(session && (session.sessionId || session.id) || '');
     return `<section class="edit-summary" data-edit-summary><button type="button" class="open-local-review" data-session-id="${escapeHTML(sessionId)}" data-turn-index="${Number.isInteger(turnIndex) ? turnIndex : 0}"><span class="edit-summary-icon" aria-hidden="true">▣</span><span class="edit-summary-title"><strong>${escapeHTML(t('editedFiles', { count: files.length }))}</strong><span class="edit-total"><b>+${added}</b><i>−${removed}</i></span></span><span class="edit-review-label">${escapeHTML(t('review'))}</span></button><div class="edit-files">${first}${more}</div></section>`;
   }
 
@@ -586,13 +750,11 @@
     return turns;
   }
 
-  function refreshTurnEditSummaries(root, session) {
+  function refreshTurnEditSummaries(root, session, dirtyTurns) {
     if (!root) return;
-    const turns = messageTurns(session && session.messages);
-    const nodes = Array.from(root.querySelectorAll('section.turn'));
-    nodes.forEach((turn, index) => {
+    dirtyTurns.forEach((index, turn) => {
       const existing = turn.querySelector(':scope > [data-edit-summary]');
-      const html = renderTurnEditSummary(turns[index] || [], session, index);
+      const html = renderTurnEditSummary(state.renderedTurns[index] || [], session, index);
       if (!html) {
         if (existing) existing.remove();
         return;
@@ -622,6 +784,40 @@
     });
   }
 
+  function installTranscriptFileBridge() {
+    if (!scope || !scope.document) return;
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      const button = target && typeof target.closest === 'function'
+        ? target.closest('.open-transcript-file') : null;
+      if (!button) return;
+      const bridge = scope.webkit && scope.webkit.messageHandlers &&
+        scope.webkit.messageHandlers.openTranscriptFile;
+      if (!bridge || typeof bridge.postMessage !== 'function') return;
+      bridge.postMessage({
+        sessionId: button.dataset.sessionId || '',
+        filePath: button.dataset.filePath || ''
+      });
+    });
+  }
+
+  function installAssistantCopyBridge() {
+    if (!scope || !scope.document) return;
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      const button = target && typeof target.closest === 'function'
+        ? target.closest('.assistant-copy-button') : null;
+      if (!button) return;
+      const bridge = scope.webkit && scope.webkit.messageHandlers &&
+        scope.webkit.messageHandlers.copyAssistantOutput;
+      if (!bridge || typeof bridge.postMessage !== 'function') return;
+      bridge.postMessage({
+        text: button.dataset.copyText || '',
+        sessionId: String(state.session && (state.session.sessionId || state.session.id) || '')
+      });
+    });
+  }
+
   function renderEvent(message, session) {
     message = message || {};
     const kind = eventKind(message);
@@ -631,22 +827,54 @@
     if (kind === 'diff') return renderDiff(message);
     if (kind === 'question') return renderQuestionCard(message);
     if (kind === 'thinking') {
-      return `<details class="event thinking-event"${anchorAttribute}><summary><span class="event-icon">◌</span>${escapeHTML(t('thinking'))}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
+      return `<details class="event thinking-event"${anchorAttribute}><summary><span class="event-icon">◌</span>${escapeHTML(t('thinking'))}</summary>${contentBody('event-body', text, () => renderMarkdown(text))}</details>`;
     }
     if (kind === 'tool') {
       const name = cleanTranscriptText(message.toolName || message.name || t('tool'));
-      return `<details class="event tool-event"${anchorAttribute}><summary><span class="event-icon">›_</span>${escapeHTML(name)}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
+      return `<details class="event tool-event"${anchorAttribute}><summary><span class="event-icon">›_</span>${escapeHTML(name)}</summary>${contentBody('event-body', text, () => renderMarkdown(text))}</details>`;
     }
     if (kind === 'error') {
       const name = cleanTranscriptText(message.title || message.toolName || t('error'));
-      return `<details class="event error-event" open${anchorAttribute}><summary><span class="event-icon">!</span>${escapeHTML(name)}</summary><div class="event-body">${renderMarkdown(text)}</div></details>`;
+      return `<details class="event error-event" open${anchorAttribute}><summary><span class="event-icon">!</span>${escapeHTML(name)}</summary>${contentBody('event-body', text, () => renderMarkdown(text))}</details>`;
     }
     if (kind === 'user') {
+      if (liveRendering) {
+        const lineCount = text.split('\n').length;
+        if (lineCount > 20) return `<div class="turn-prompt"${anchorAttribute}><details class="long-content"><summary>${escapeHTML(t('expandInput'))} · ${lineCount} ${escapeHTML(t('lines'))}</summary>${contentBody('long-content-body', text, () => renderMarkdown(text))}</details></div>`;
+        return contentBody('turn-prompt', text, () => renderMarkdown(text), anchorAttribute);
+      }
       return `<div class="turn-prompt"${anchorAttribute}>${longContent(renderMarkdown(text), text)}</div>`;
     }
     const model = cleanTranscriptText(message.model || (session && session.model) || 'Claude');
-    const content = renderMarkdown(text);
-    return `<div class="assistant-text" data-model="${escapeHTML(model)}"${anchorAttribute}>${content}</div>`;
+    return `<section class="assistant-output"><div class="assistant-output-toolbar"><button type="button" class="assistant-copy-button" data-copy-text="${escapeHTML(text)}"><span aria-hidden="true">⧉</span>${escapeHTML(t('copyOutput'))}</button></div>${contentBody('assistant-text', text, () => renderMarkdown(text), ` data-model="${escapeHTML(model)}"${anchorAttribute}`)}</section>`;
+  }
+
+  function renderToolGroup(messages, session) {
+    const tools = (Array.isArray(messages) ? messages : [])
+      .filter(message => eventKind(message || {}) === 'tool');
+    if (!tools.length) return '';
+    const body = tools.map(message => renderEvent(message, session)).join('');
+    return `<details class="tool-group" data-tool-count="${tools.length}"><summary><span class="event-icon">›_</span><span class="tool-group-title">${escapeHTML(t('toolActivity'))}</span><span class="tool-group-count">${escapeHTML(t('toolCount', { count: tools.length }))}</span></summary><div class="tool-group-events">${body}</div></details>`;
+  }
+
+  function renderEventSequence(messages, session) {
+    const html = [];
+    let toolRun = [];
+    const flushTools = () => {
+      if (!toolRun.length) return;
+      html.push(renderToolGroup(toolRun, session));
+      toolRun = [];
+    };
+    (Array.isArray(messages) ? messages : []).forEach(message => {
+      if (eventKind(message || {}) === 'tool') {
+        toolRun.push(message);
+        return;
+      }
+      flushTools();
+      html.push(renderEvent(message, session));
+    });
+    flushTools();
+    return html.join('');
   }
 
   function renderClaudeWaiting() {
@@ -703,7 +931,7 @@
     let current = null;
     const flush = () => {
       if (!current) return;
-      turns.push(`<section class="turn">${current.prompt}<div class="turn-events">${current.events.join('')}</div>${renderTurnEditSummary(current.messages, session, turns.length)}</section>`);
+      turns.push(`<section class="turn">${current.prompt}<div class="turn-events">${renderEventSequence(current.events, session)}</div>${renderTurnEditSummary(current.events, session, turns.length)}</section>`);
     };
 
     messages.forEach(message => {
@@ -711,13 +939,11 @@
         flush();
         current = {
           prompt: `<header class="turn-header"><span class="turn-label">TURN</span>${renderEvent(message, session)}</header>`,
-          events: [],
-          messages: []
+          events: []
         };
       } else {
-        if (!current) current = { prompt: '<header class="turn-header"><span class="turn-label">TURN</span></header>', events: [], messages: [] };
-        current.events.push(renderEvent(message, session));
-        current.messages.push(message);
+        if (!current) current = { prompt: '<header class="turn-header"><span class="turn-label">TURN</span></header>', events: [] };
+        current.events.push(message);
       }
     });
     flush();
@@ -730,7 +956,9 @@
 
   function nearBottom() {
     if (!scope || !scope.document) return true;
-    return scope.document.body.scrollHeight - scope.scrollY - scope.innerHeight < 120;
+    // Only rounding at the actual bottom counts as following. A reading
+    // position just above it must not be snapped back by a scroll refresh.
+    return scope.document.body.scrollHeight - scope.scrollY - scope.innerHeight < 1;
   }
 
   function viewportRangeAtPoint(x, y) {
@@ -866,13 +1094,37 @@
     scheduleCapture();
   }
 
-  async function typeset(targets) {
-    if (!scope || !scope.MathJax || typeof scope.MathJax.typesetPromise !== 'function') return;
-    try {
-      await scope.MathJax.typesetPromise(targets);
-    } catch (error) {
-      if (scope.console) scope.console.error(error);
-    }
+  function typeset(targets, updateDOM) {
+    state.typesetQueue = state.typesetQueue.then(async () => {
+      const mathJax = scope && scope.MathJax;
+      if (mathJax && mathJax.startup && mathJax.startup.promise) {
+        await mathJax.startup.promise;
+      }
+      if (updateDOM) updateDOM(mathJax);
+      const followBottom = rootElement() && nearBottom();
+      const anchor = rootElement() && (captureViewportAnchor() || state.viewportAnchor);
+      const mounted = updateVirtualBodies(mathJax);
+      if (!mathJax || typeof mathJax.typesetPromise !== 'function') return;
+      const requestedTargets = Array.from(new Set([...Array.from(typeof targets === 'function' ? targets() : targets || []), ...mounted]));
+      const connectedTargets = requestedTargets.filter(target =>
+        target && (typeof target.isConnected !== 'boolean' || target.isConnected) &&
+        !requestedTargets.some(parent => parent !== target && parent.contains(target)));
+      const scrollBeforeTypeset = scope.scrollY;
+      if (connectedTargets.length) await mathJax.typesetPromise(connectedTargets);
+      // The captured anchor belongs to the viewport before the asynchronous
+      // work. If it has moved meanwhile, leave the newer position alone.
+      if (scope.scrollY !== scrollBeforeTypeset) return;
+      if (followBottom) scope.scrollTo(0, scope.document.body.scrollHeight);
+      else if (anchor) {
+        const range = measurableRange(anchor.node, anchor.offset);
+        const rect = range ? range.getBoundingClientRect()
+          : anchor.element && anchor.element.isConnected && anchor.element.getBoundingClientRect();
+        if (rect) scope.scrollBy(0, rect.top - anchor.top);
+      }
+    }).catch(error => {
+      if (scope && scope.console) scope.console.error(error);
+    });
+    return state.typesetQueue;
   }
 
   async function setClaudeSession(session) {
@@ -883,18 +1135,22 @@
     state.waiting = Boolean(state.session.awaitingReply);
     state.renderedCount = state.session.messages.length;
     if (!root) return renderSession(state.session);
-    const shouldFollow = nearBottom();
-    root.innerHTML = renderSession(state.session);
-    await typeset([root]);
-    if (shouldFollow && typeof scope.scrollTo === 'function') {
-      scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: 'auto' });
-    }
+    const snapshot = state.session;
+    await typeset([root], mathJax => {
+      const shouldFollow = nearBottom();
+      if (mathJax && typeof mathJax.typesetClear === 'function') mathJax.typesetClear([root]);
+      state.viewportAnchor = null;
+      state.pendingQuote = null;
+      virtualBodies.clear();
+      state.renderedTurns = messageTurns(snapshot.messages);
+      root.innerHTML = renderLive(() => renderSession(snapshot));
+      if (shouldFollow) scope.scrollTo(0, scope.document.body.scrollHeight);
+    });
     captureViewportAnchor();
-    return root.innerHTML;
+    return state.renderedCount;
   }
 
-  // 原生侧在追加渲染时只发元数据（不含 messages），所以必须先同步确认这边
-  // 还持有同一个会话；不匹配就让原生改发完整快照，而不是拿空 messages 去渲染。
+  // 原生侧追加时只发元数据；会话标识一致才合并增量。
   function sessionMatches(session) {
     if (!state.session || !session) return false;
     const mine = state.session.sessionId || '';
@@ -905,8 +1161,6 @@
   async function appendClaudeMessages(session, newMessages) {
     const incoming = Array.isArray(newMessages) ? newMessages : [];
     if (!sessionMatches(session)) {
-      // 只有携带 messages 的完整快照才能安全重建；否则交回原生重发。
-      if (session && Array.isArray(session.messages)) return setClaudeSession(session);
       return null;
     }
     const metadata = Object.assign({}, session);
@@ -917,53 +1171,79 @@
     state.waiting = Boolean(state.session.awaitingReply);
     state.renderedCount = state.session.messages.length;
     const root = rootElement();
-    if (!root || !incoming.length) return renderSession(state.session);
+    if (!root) return renderSession(state.session);
+    if (!incoming.length) return state.renderedCount;
 
-    const shouldFollow = nearBottom();
-    root.querySelectorAll('.claude-waiting').forEach(node => node.remove());
+    const snapshot = state.session;
     const addedNodes = [];
-    const appendHTML = (parent, html) => {
-      const template = scope.document.createElement('template');
-      template.innerHTML = html;
-      const nodes = Array.from(template.content.childNodes);
-      nodes.forEach(node => parent.appendChild(node));
-      addedNodes.push(...nodes.filter(node => node.nodeType === 1));
-      return nodes.find(node => node.nodeType === 1) || null;
-    };
-    const emptyTurn = () => appendHTML(root,
-      '<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span></header><div class="turn-events"></div></section>');
+    await typeset(() => addedNodes, () => {
+      const shouldFollow = nearBottom();
+      root.querySelectorAll('.claude-waiting').forEach(node => node.remove());
+      const dirtyTurns = new Map();
+      const appendHTML = (parent, html) => {
+        const template = scope.document.createElement('template');
+        template.innerHTML = html;
+        const nodes = Array.from(template.content.childNodes);
+        nodes.forEach(node => parent.appendChild(node));
+        addedNodes.push(...nodes.filter(node => node.nodeType === 1));
+        return nodes.find(node => node.nodeType === 1) || null;
+      };
+      const emptyTurn = () => appendHTML(root,
+        '<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span></header><div class="turn-events"></div></section>');
+      const appendToolMessage = (events, message) => {
+        const previous = events.lastElementChild;
+        if (!previous || !previous.classList.contains('tool-group')) {
+          appendHTML(events, renderLive(() => renderToolGroup([message], snapshot)));
+          return;
+        }
+        const toolEvents = previous.querySelector(':scope > .tool-group-events');
+        appendHTML(toolEvents, renderLive(() => renderEvent(message, snapshot)));
+        const count = Number(previous.dataset.toolCount || 0) + 1;
+        previous.dataset.toolCount = String(count);
+        const countLabel = previous.querySelector(':scope > summary .tool-group-count');
+        if (countLabel) countLabel.textContent = t('toolCount', { count });
+      };
 
-    incoming.forEach(message => {
-      if (eventKind(message) === 'user') {
-        appendHTML(root,
-          `<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span>${renderEvent(message, state.session)}</header><div class="turn-events"></div></section>`);
-        return;
-      }
-      let turn = root.querySelector('section.turn:last-of-type');
-      if (!turn) turn = emptyTurn();
-      const events = turn.querySelector('.turn-events');
-      appendHTML(events, renderEvent(message, state.session));
+      incoming.forEach(message => {
+        if (eventKind(message) === 'user') {
+          state.renderedTurns.push([]);
+          appendHTML(root,
+            `<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span>${renderLive(() => renderEvent(message, snapshot))}</header><div class="turn-events"></div></section>`);
+          return;
+        }
+        let turn = root.querySelector('section.turn:last-of-type');
+        if (!turn) {
+          turn = emptyTurn();
+          state.renderedTurns.push([]);
+        }
+        const turnIndex = state.renderedTurns.length - 1;
+        state.renderedTurns[turnIndex].push(message);
+        if (eventKind(message) === 'diff') dirtyTurns.set(turn, turnIndex);
+        const events = turn.querySelector('.turn-events');
+        if (eventKind(message) === 'tool') appendToolMessage(events, message);
+        else appendHTML(events, renderLive(() => renderEvent(message, snapshot)));
+      });
+      refreshTurnEditSummaries(root, snapshot, dirtyTurns);
+      syncClaudeWaiting(root);
+      if (shouldFollow) scope.scrollTo(0, scope.document.body.scrollHeight);
     });
-    refreshTurnEditSummaries(root, state.session);
-    syncClaudeWaiting(root);
-    await typeset(addedNodes);
-    if (shouldFollow && typeof scope.scrollTo === 'function') {
-      const reduce = scope.matchMedia && scope.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: reduce ? 'auto' : 'smooth' });
-    }
     captureViewportAnchor();
-    return root.innerHTML;
+    return state.renderedCount;
   }
 
   installQuoteMenu();
   installGitReviewBridge();
+  installTranscriptFileBridge();
+  installAssistantCopyBridge();
   installQuestionCardBridge();
   installStableViewport();
+  installVirtualContent();
 
   return {
     cleanTranscriptText,
     inlineMarkup,
     renderMarkdown,
+    renderFilePreview,
     diffLines,
     changedFileSummary,
     renderTurnEditSummary,
@@ -975,6 +1255,7 @@
     renderClaudeWaiting,
     setPrettyTermLanguage,
     setClaudeWaiting,
+    typeset,
     setClaudeSession,
     appendClaudeMessages,
     sessionMatches

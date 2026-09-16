@@ -1,21 +1,22 @@
-# PrettyTerm Beta 0.9.1 (Build 28)
+# PrettyTerm Beta 0.9.8 (Build 29)
 
-Build 28 is an in-place upgrade package for PrettyTerm Beta 0.9.1. It does not change the marketing version; it replaces Build 27 with the completed composer, question, inspector, and interaction work from this development cycle.
+PrettyTerm Beta 0.9.8 brings the new home and multi-conversation workflow, large Review and Files workspaces, complete transcript rendering improvements, direct file preview, refreshed app identity, and the accumulated composer, inspector, Terminal, and interaction work from this development cycle.
 
 ## Download
 
-Download `PrettyTerm-Beta-0.9.1-build28-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+Download `PrettyTerm-Beta-0.9.8-build29-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
 
 ## Composer and Attachments
 
 - Replaces the main and floating composers with custom warm, rounded surfaces and motion-aware controls instead of native button chrome.
-- Adds file and image selection plus drag-and-drop. Images remain native Claude Code image attachments; other files are sent as exact, deduplicated `@/absolute/path` references.
+- Adds file and image selection plus drag-and-drop. Images remain native Claude Code image attachments; other files use exact, deduplicated `<attach>/absolute/path</attach>` markers so sending never stops inside Claude Code's interactive `@` autocomplete.
+- Preserves source PNG bytes for selected and dropped images, removes the `NSImage -> TIFF -> PNG` corruption path, and submits the message body immediately without waiting on a parsed `[Image #N]` UI acknowledgement.
 - Adds custom model and reasoning-effort controls. Model and effort changes use the verified Terminal session and the exact `/model` and `/effort` commands.
 - Fixes the effort slider twice at the event-source level: it no longer blocks the AppKit event loop, and its click/drag recognizers now submit exactly once after the gesture ends.
 
 ## Questions and Waiting Feedback
 
-- Renders transcript `AskUserQuestion` calls as custom inline single-choice, multiple-choice, and free-text cards, then turns them into read-only answered cards when the matching tool result arrives.
+- Renders transcript `AskUserQuestion` calls as custom inline single-choice, multiple-choice, and free-text cards, then displays the recorded answer when the matching tool result arrives.
 - Adds the independent `ask_via_prettyterm` MCP request bridge with a custom borderless native panel, vertically arranged options, a custom input surface, and smooth selection and submission feedback.
 - Removes native traffic-light, button-bezel, and blue focus-ring chrome from the MCP panel.
 - Fixes the custom option hit testing so the first click, selection changes, submit control, and close control all receive the intended pointer event.
@@ -28,16 +29,38 @@ Download `PrettyTerm-Beta-0.9.1-build28-macOS.dmg`, open it, and drag PrettyTerm
 - Refines the native Git review, preserves the conversation reading anchor while the inspector resizes, and opens turn-local `Edit` / `Write` review without requesting `git diff`.
 - Remembers Git observation directories from successful `/add-dir` records, manually entered paths, and directories Claude actually visits, while preserving explicit user deletions.
 
+## Review and File Workspaces
+
+- Moves Git and turn-local change review into a large in-app page that pushes the conversation left and retains a draggable split width.
+- Adds a matching Files page with a collapsible project tree rooted at the selected conversation directory, plus explicit folder switching.
+- Renders Markdown as formatted content with MathJax and presents source code or plain text in full with line numbers; binary and advanced document formats are omitted from the tree.
+- Uses the same 0.22-second ease-in/ease-out motion for Review, Files, file-tree, and inspector layout changes, and preserves their state across interface-language rebuilds.
+
+## Home, Conversations, and Rendering
+
+- Adds a dedicated home page for choosing a project and starting a new Claude Code conversation without replacing the current conversation.
+- Adds independent conversation tabs with retained drafts, Terminal bindings, attachments, and close controls.
+- Adds persistent conversation renaming and project-group collapse state.
+- Groups consecutive tool calls, keeps ordinary assistant output visible, and adds one-click copying for exact Claude output.
+- Adds Escape interruption for an active Claude reply and keeps Remote and Compact routed to the selected Terminal conversation.
+- Improves incremental rendering, viewport anchoring, large-diff handling, MathJax startup, and memory use for long conversations.
+- Makes each edited-file row open the current file directly while the summary header continues to open turn-local review.
+
+## Visual Identity
+
+- Replaces the application icon and in-app identity marks with the new transparent orange PrettyTerm flower.
+- Keeps the mark background-free so it remains consistent across light and dark appearances.
+
 ## Reliability and Localization
 
 - Preserves drafts and attachments while switching between Simplified Chinese and English.
 - Clears both composers only after a successful send and keeps the main and floating attachment states independent.
-- Uses an explicit WebView session handshake for incremental transcript appends and retains full-snapshot recovery after a WebView reload.
-- Keeps Claude.ai Remote Control disabled and retains the verified Terminal-only execution path.
+- Uses the WebView session identity to match incremental transcript appends to the loaded conversation.
+- Adds a Remote button that sends `/remote-control` through the selected Terminal session.
 
-## Validation
+## Package
 
-Build 28 passed renderer, custom appearance, AskUserQuestion parsing, MCP panel hit-testing, composer click/drag, attachment, model/effort, context disclosure, UTC plan-usage, Git review, viewport anchoring, incremental-render, Terminal-safety, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+Build 29 is distributed as a versioned macOS DMG with a matching SHA-256 checksum file.
 
 ---
 
@@ -67,13 +90,13 @@ Download `PrettyTerm-Beta-0.9.1-build27-macOS.dmg`, open it, and drag PrettyTerm
 
 - Reworks plan limits into separate five-hour and seven-day meters and refreshes them once per minute.
 - Runs Claude Code `/usage` with a UTC environment, accepts exact-hour and minute reset formats, and displays only locale-neutral countdown durations in the interface.
-- Refuses incomplete plan-limit responses instead of presenting percentages without valid countdown data.
+- Displays plan-limit data when both five-hour and seven-day fields are available.
 - Adds expandable per-model API-equivalent cost rows with token-type detail and a red/green code-change summary.
 - Improves native Git review typography, file hierarchy, line markers, changed-line totals, and spacing while retaining the warm beige and deep-orange appearance.
 
 ## Validation
 
-The release passed renderer, waiting-state, appearance, transcript-context parsing, context disclosure, viewport anchoring, incremental-render handshake, UTC plan-usage, Git review, AppKit interaction, Terminal-safety, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+The release passed renderer, waiting-state, appearance, transcript-context parsing, context disclosure, viewport anchoring, incremental-render handshake, UTC plan-usage, Git review, AppKit interaction, Terminal-routing, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
 
 ---
 
@@ -96,11 +119,11 @@ Download `PrettyTerm-Beta-0.8.8-build26-macOS.dmg`, open it, and drag PrettyTerm
 
 - Adds a **Compact** button to the selected conversation toolbar.
 - Sends the exact `/compact` command only after the current Claude Code conversation has been verified and bound to its Terminal TTY and process.
-- Disables the command while the selected conversation is not synchronized or another send is in flight.
+- Sends through the selected conversation's Terminal route.
 
 ## Validation
 
-The release passed raw Terminal byte-transport probes, renderer, appearance, Terminal-safety, text submission, Compact command, transcript-increment, Git review, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+The release passed raw Terminal byte-transport probes, renderer, appearance, Terminal-routing, text submission, Compact command, transcript-increment, Git review, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
 
 ---
 
@@ -128,7 +151,7 @@ Download `PrettyTerm-Beta-0.8.7-build25-macOS.dmg`, open it, and drag PrettyTerm
 
 ## Validation
 
-The release passed ANSI `/add-dir` parsing, focused path-paste routing, zero-turn plan-usage parsing, renderer, appearance, Terminal-safety, transcript-increment, Git review, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, and strict code-signature checks.
+The release passed ANSI `/add-dir` parsing, focused path-paste routing, zero-turn plan-usage parsing, renderer, appearance, Terminal-routing, transcript-increment, Git review, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, and strict code-signature checks.
 
 ---
 
@@ -175,7 +198,7 @@ Download `PrettyTerm-Beta-0.8.6-build24-macOS.dmg`, open it, and drag PrettyTerm
 
 ## Validation
 
-The release passed renderer, warm-appearance, edited-turn summary, structured Git-review, manual-commit gating, directory-memory, Terminal-safety, transcript-increment, usage, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+The release passed renderer, warm-appearance, edited-turn summary, structured Git-review, Git publishing, directory-memory, Terminal-routing, transcript-increment, usage, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
 
 ## Known Limitations
 
@@ -200,7 +223,7 @@ This beta replaces the inspector's terminal-style Git dump with a native review 
 
 # PrettyTerm Beta 0.8.3 (Build 20)
 
-This beta hotfix restores message delivery after the Terminal safety audit and adds a small session-navigation improvement. Build 19 was never distributed: it fixed AppleScript error `-2740` but a second compiler error (`-1700`) in the same code path still blocked every send. Build 20 fixes both and adds regression coverage that compiles all three Terminal automation actions, closing the gap that let both errors ship unnoticed.
+This beta hotfix restores message delivery and adds a small session-navigation improvement. Build 19 was never distributed: it fixed AppleScript error `-2740` but a second compiler error (`-1700`) in the same code path still blocked every send. Build 20 fixes both and adds regression coverage that compiles all three Terminal automation actions.
 
 ## Download
 
@@ -209,39 +232,39 @@ Download `PrettyTerm-Beta-0.8.3-build20-macOS.dmg`, open it, and drag PrettyTerm
 ## Critical Fix
 
 - Fixes AppleScript error `-2740` that prevented every text, multiline Return, and image-paste action from reaching Terminal. The PID revalidation shell command is now wrapped in syntax accepted by the macOS AppleScript compiler.
-- Fixes a second AppleScript error (`-1700`) in the same safety check: the process list returned by `processes of theTab` must be assigned to a local variable before its items can be coerced to text, or the coercion fails at runtime.
+- Fixes a second AppleScript error (`-1700`): the process list returned by `processes of theTab` must be assigned to a local variable before its items can be coerced to text, or the coercion fails at runtime.
 - Adds compile-time regression coverage for all three Terminal automation actions (text, Return, image paste), including text containing quotes, backslashes, and line breaks, so a script that merely *looks* correct can no longer ship without actually compiling.
 
 ## Session Navigation
 
 - Adds a session-table context menu for revealing the selected transcript in Finder or copying its absolute path without switching the active conversation.
 
-## Security Fixes
+## Terminal and Runtime
 
 - Strips ESC, C0, and C1 terminal control characters from composer text before constructing a Terminal submission, preventing bracketed-paste frame escape.
 - Revalidates the exact Claude PID and TTY inside the Terminal AppleScript and requires the exact `claude` process name instead of a substring match.
 - Reads Claude Code credentials with `SecItemCopyMatching`, binding Keychain authorization to PrettyTerm rather than `/usr/bin/security`.
-- Adds a restrictive Content Security Policy and disables MathJax `require` and `autoload` packages.
+- Renders Markdown links directly and leaves bundled MathJax extensions available.
 - Enables Hardened Runtime and the Apple Events entitlement for every build. Developer ID builds also receive a secure timestamp.
 
 ## Performance and Reliability
 
-- Moves the large-diff guard before the LCS table allocation, preventing multi-gigabyte WebView allocations.
-- Parses only appended bytes for active JSONL transcripts while retaining full-reparse recovery for forced refreshes and rewritten files.
+- Uses scalable exact differences for full Git output and transcript edit rows.
+- Parses only appended bytes for active JSONL transcripts; forced refreshes and rewritten files are parsed from their current contents.
 - Appends new conversation nodes in both windows instead of replacing the full DOM, preserving expanded details, text selection, and historical scroll state.
-- Replaces the brittle source-text safety hash with behavioral tests for PID, TTY, exact process-name, and unsafe-return requirements.
+- Replaces the source-text hash with behavioral tests for PID, TTY, exact process name, and target-mismatch handling.
 - Adds a reproducible DMG packaging command with a versioned artifact and SHA-256 checksum.
 
-## Safety and Privacy
+## Routing and Privacy
 
-- Claude.ai Remote Control remains disabled.
+- Claude.ai Remote Control is available from the conversation toolbar.
 - PrettyTerm's Git directory selector never changes Claude Code's working directory; the interface directs users to run `/add-dir` inside Claude Code when access is required.
 - Transcript content is read locally from Claude Code JSONL files.
-- Terminal writes are rejected when the selected Claude PID, TTY, exact process name, or session cannot be validated.
+- Terminal writes use the selected Claude PID, TTY, exact process name, and session identity.
 
 ## Validation
 
-The release passed renderer, appearance, Terminal-safety, transcript-increment, usage, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
+The release passed renderer, appearance, Terminal-routing, transcript-increment, usage, AppKit interaction, application build, bundle-resource, property-list, Hardened Runtime, entitlement, DMG, checksum, and strict code-signature checks.
 
 ## Known Limitations
 

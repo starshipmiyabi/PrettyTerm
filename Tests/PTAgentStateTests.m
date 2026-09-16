@@ -27,14 +27,16 @@ int main(void) {
         state.selectedSessionID = @"session-a";
         state.boundSessionID = @"session-a";
         state.bridgeRunning = YES;
-        PTAssert(state.commandsEnabled, @"matching selected and bound sessions should enable commands");
+        PTAssert(state.commandsEnabled, @"a selected conversation should enable commands");
 
         state.selectedSessionID = @"session-b";
-        PTAssert(!state.commandsEnabled, @"selecting another session must disable every command");
+        PTAssert(state.commandsEnabled, @"an unbound selected conversation must remain operable");
 
-        state.selectedSessionID = @"session-a";
+        state.bridgeRunning = NO;
+        PTAssert(state.commandsEnabled, @"a missing Terminal connection must not disable conversation controls");
+
         state.sendInFlight = YES;
-        PTAssert(!state.commandsEnabled, @"an in-flight send must block duplicate submissions");
+        PTAssert(state.commandsEnabled, @"a Terminal write must not make conversation controls unavailable");
 
         PTRefreshGate *gate = [[PTRefreshGate alloc] init];
         PTAssert([gate beginRefresh], @"the first refresh request should start immediately");
@@ -60,20 +62,21 @@ int main(void) {
             @"an image-only turn needs a harmless submit character after native paste");
         PTAssert([PTMessageForClaudeAttachments(@"", 0) isEqual:@""],
             @"an empty turn without attachments must remain unsendable");
-        PTAssert([PTMessageByAppendingClaudeFileReferences(@"检查这些文件", @[
+        PTAssert([PTMessageByAppendingClaudeAttachMarkers(@"检查这些文件", @[
             @"/tmp/a.swift", @"/tmp/folder with spaces/note.md", @"/tmp/a.swift"
-        ]) isEqual:@"检查这些文件\n\n@/tmp/a.swift\n@/tmp/folder with spaces/note.md"],
-            @"file attachments must become exact deduplicated Claude Code references");
-        PTAssert([PTMessageByAppendingClaudeFileReferences(@"", @[@"/tmp/a.swift"])
-            isEqual:@"@/tmp/a.swift"], @"file-only turns must remain sendable");
+        ]) isEqual:@"检查这些文件\n\n<attach>/tmp/a.swift</attach>\n<attach>/tmp/folder with spaces/note.md</attach>"],
+            @"file attachments must become exact deduplicated attach markers");
+        PTAssert([PTMessageByAppendingClaudeAttachMarkers(@"", @[@"/tmp/a&b.swift"])
+            isEqual:@"<attach>/tmp/a&amp;b.swift</attach>"],
+            @"file-only turns must remain sendable and XML-safe");
         PTAssert([PTNormalizedTerminalPasteText(@"单行消息") isEqual:@"单行消息"],
             @"single-line paste text must remain byte-for-byte stable");
         PTAssert([PTNormalizedTerminalPasteText(@"第一行\r\n第二行\r第三行") isEqual:
             @"第一行\n第二行\n第三行"],
             @"native multiline paste must normalize CRLF and CR without losing line breaks");
-        NSString *unsafeControls = [NSString stringWithFormat:@"安全%C[201~尾部%C",
+        NSString *controlText = [NSString stringWithFormat:@"正文%C[201~尾部%C",
             (unichar)0x1B, (unichar)0x07];
-        PTAssert([PTNormalizedTerminalPasteText(unsafeControls) isEqual:@"安全[201~尾部"],
+        PTAssert([PTNormalizedTerminalPasteText(controlText) isEqual:@"正文[201~尾部"],
             @"terminal messages must strip ESC and other executable control characters");
         PTAssert([PTTerminalSubmissionPayload(@"单行消息") isEqual:@"单行消息"],
             @"single-line Terminal submissions must not gain control sequences");
@@ -85,14 +88,14 @@ int main(void) {
             @"/dev/ttys007", 4321, @"hello", PTTerminalAutomationActionWriteText);
         PTAssert([automation containsString:@"my (do shell script \"/bin/ps -p 4321 -o tty="],
             @"Terminal automation must revalidate the exact Claude PID inside the AppleScript");
-        PTAssert([automation containsString:@"if liveTTY is not \"ttys007\" then return \"unsafe\""],
-            @"Terminal automation must reject a PID that moved away from the bound TTY");
-        PTAssert([automation containsString:@"if processName is \"claude\" then set isSafe to true"],
+        PTAssert([automation containsString:@"if liveTTY is not \"ttys007\" then return \"mismatch\""],
+            @"Terminal automation must report a PID that moved away from the bound TTY");
+        PTAssert([automation containsString:@"if processName is \"claude\" then set isClaudeProcess to true"],
             @"Terminal automation must use an exact Claude process-name check");
         PTAssert(![automation containsString:@"contains \"laude\""],
             @"Terminal automation must not accept substring process-name matches");
-        PTAssert([automation containsString:@"if isSafe is false then return \"unsafe\""],
-            @"Terminal automation must retain the unsafe early-return branch");
+        PTAssert([automation containsString:@"if isClaudeProcess is false then return \"mismatch\""],
+            @"Terminal automation must report a process-name mismatch");
         // containsString: 只能证明字符串拼对了，证明不了这是一段合法 AppleScript。
         // 0.8.1 的 `my do shell script`（-2740）和裸 repeat 引用（-1700）都是从这个
         // 缺口漏出去的，所以三种动作都必须真正过一遍编译器。
@@ -101,7 +104,8 @@ int main(void) {
         PTTerminalAutomationAction automationActions[] = {
             PTTerminalAutomationActionWriteText,
             PTTerminalAutomationActionSubmitReturn,
-            PTTerminalAutomationActionPasteImage
+            PTTerminalAutomationActionPasteImage,
+            PTTerminalAutomationActionInterruptEscape
         };
         for (size_t index = 0; index < sizeof(automationActions) / sizeof(automationActions[0]); index++) {
             NSString *candidate = PTTerminalAutomationScript(
@@ -115,6 +119,7 @@ int main(void) {
             @(PTTerminalAutomationActionWriteText),
             @(PTTerminalAutomationActionSubmitReturn),
             @(PTTerminalAutomationActionPasteImage),
+            @(PTTerminalAutomationActionInterruptEscape),
         ]) {
             PTTerminalAutomationAction action = actionValue.integerValue;
             NSString *compileMessage = action == PTTerminalAutomationActionWriteText
@@ -134,6 +139,12 @@ int main(void) {
             @"an independent submit must use Terminal's one automatically appended Return");
         PTAssert(![singleReturnAutomation containsString:@"ASCII character 13"],
             @"an independent submit must not duplicate Return by supplying another CR");
+        NSString *escapeAutomation = PTTerminalAutomationScript(
+            @"/dev/ttys007", 4321, @"", PTTerminalAutomationActionInterruptEscape);
+        PTAssert([escapeAutomation containsString:@"tell application \"System Events\" to key code 53"],
+            @"interrupt automation must send the exact Escape key to Terminal");
+        PTAssert(![escapeAutomation containsString:@"do script (ASCII character 27)"],
+            @"interrupt automation must not append Terminal's implicit Return to Escape");
         PTAssert(PTLatestTerminalPasteMarker(@"before\n[Pasted text #2 +4 lines]\nafter") == 2,
             @"Terminal paste acknowledgement must read Claude's visible marker number");
         PTAssert(PTLatestTerminalPasteMarker(
@@ -192,6 +203,26 @@ int main(void) {
         [watcher stopWatching];
         [NSFileManager.defaultManager removeItemAtPath:watchPath error:nil];
 
+        NSString *directoryWatchPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"prettyterm-rate-limits-%@", NSUUID.UUID.UUIDString]];
+        [NSFileManager.defaultManager createDirectoryAtPath:directoryWatchPath
+                                withIntermediateDirectories:YES attributes:nil error:nil];
+        dispatch_semaphore_t snapshotChanged = dispatch_semaphore_create(0);
+        PTTranscriptWatcher *directoryWatcher = [[PTTranscriptWatcher alloc] init];
+        PTAssert([directoryWatcher watchFileAtPath:directoryWatchPath onChange:^{
+            dispatch_semaphore_signal(snapshotChanged);
+        }], @"the per-response rate-limit snapshot directory should be watchable");
+        NSString *snapshotPath = [directoryWatchPath stringByAppendingPathComponent:@"session.json"];
+        [@"{\"rate_limits\":{}}" writeToFile:snapshotPath
+                                     atomically:YES
+                                       encoding:NSUTF8StringEncoding
+                                          error:nil];
+        PTAssert(dispatch_semaphore_wait(snapshotChanged,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC))) == 0,
+            @"writing a response snapshot must trigger an immediate usage refresh");
+        [directoryWatcher stopWatching];
+        [NSFileManager.defaultManager removeItemAtPath:directoryWatchPath error:nil];
+
         NSArray<NSDictionary *> *events = @[
             @{@"kind": @"diff", @"filePath": @"/tmp/PrettyTerm.m",
               @"oldText": @"a\nb\nc", @"newText": @"a\nB\nc\nd"},
@@ -209,6 +240,19 @@ int main(void) {
         PTAssert([file[@"added"] integerValue] == 3, @"added line count should use line diff");
         PTAssert([file[@"removed"] integerValue] == 1, @"removed line count should use line diff");
         PTAssert([file[@"changeCount"] integerValue] == 2, @"edits to the same file should merge");
+
+        NSMutableArray<NSString *> *largeBefore = [NSMutableArray array];
+        for (NSUInteger index = 0; index < 6001; index++) {
+            [largeBefore addObject:[NSString stringWithFormat:@"line %lu", (unsigned long)index]];
+        }
+        NSMutableArray<NSString *> *largeAfter = [largeBefore mutableCopy];
+        largeAfter[3000] = @"changed line";
+        NSDictionary *largeStats = PTDiffStats(
+            [largeBefore componentsJoinedByString:@"\n"],
+            [largeAfter componentsJoinedByString:@"\n"]);
+        PTAssert([largeStats[@"added"] integerValue] == 1 &&
+                 [largeStats[@"removed"] integerValue] == 1,
+            @"large line differences must retain their shared context");
 
         NSDictionary *thinking = PTEventFromAssistantBlock(
             @{@"type": @"thinking", @"thinking": @"先检查状态"}, @"k1", @"t", @"Claude");

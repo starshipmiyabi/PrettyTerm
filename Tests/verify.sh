@@ -19,6 +19,15 @@ fi
 
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework AppKit \
+  -framework UniformTypeIdentifiers \
+  -I"$project_dir/Sources" \
+  "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Tests/PTFilePreviewTests.m" \
+  -o "$project_dir/.build/PTFilePreviewTests"
+"$project_dir/.build/PTFilePreviewTests"
+
+clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
+  -framework AppKit \
   -I"$project_dir/Sources" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Tests/PTGitReviewTests.m" \
@@ -46,11 +55,45 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTFilePreview.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Tests/PTSessionParserTests.m" \
   -o "$project_dir/.build/PTSessionParserTests"
 "$project_dir/.build/PTSessionParserTests"
+
+clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
+  -Wno-nullability-completeness \
+  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers \
+  "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTGitReview.m" \
+  "$project_dir/Sources/PTUsageMetrics.m" \
+  "$project_dir/Tests/PTClaudeLaunchTests.m" \
+  -o "$project_dir/.build/PTClaudeLaunchTests"
+"$project_dir/.build/PTClaudeLaunchTests"
+
+clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
+  -Wno-nullability-completeness \
+  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers \
+  "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTGitReview.m" \
+  "$project_dir/Sources/PTUsageMetrics.m" \
+  "$project_dir/Tests/PTHomeTests.m" \
+  -o "$project_dir/.build/PTHomeTests"
+"$project_dir/.build/PTHomeTests"
+
+clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
+  -Wno-nullability-completeness \
+  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers \
+  "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTGitReview.m" \
+  "$project_dir/Sources/PTUsageMetrics.m" \
+  "$project_dir/Tests/PTRenameTests.m" \
+  -o "$project_dir/.build/PTRenameTests"
+"$project_dir/.build/PTRenameTests"
 
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -Dmain=PrettyTermApplicationMain \
@@ -66,6 +109,7 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   "$project_dir/.build/PrettyTermForInteractionTests.o" \
   "$project_dir/.build/PTWindowInteractionTests.o" \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTFilePreview.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   -o "$project_dir/.build/PTWindowInteractionTests"
@@ -93,7 +137,7 @@ cmp "$project_dir/Info.plist" "$contents_dir/Info.plist"
   exit 1
 }
 
-for resource in PrettyTerm.icns app.js; do
+for resource in PrettyTerm.icns PrettyTermLogo.png app.js; do
   packaged_resource="$resources_dir/$resource"
   [[ -s "$packaged_resource" ]] || {
     print -u2 "Missing packaged resource: $packaged_resource"
@@ -113,8 +157,8 @@ done
 
 [[ "$(plutil -extract CFBundleIdentifier raw -o - "$contents_dir/Info.plist")" == "com.yuuka.prettyterm.beta" ]]
 [[ "$(plutil -extract CFBundleDisplayName raw -o - "$contents_dir/Info.plist")" == "PrettyTerm Beta" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.9.1" ]]
-[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "28" ]]
+[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.9.8" ]]
+[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "29" ]]
 [[ "$(plutil -extract PTReleaseChannel raw -o - "$contents_dir/Info.plist")" == "beta" ]]
 [[ "$(plutil -extract CFBundleDevelopmentRegion raw -o - "$contents_dir/Info.plist")" == "zh-Hans" ]]
 [[ "$(plutil -extract CFBundleIconFile raw -o - "$contents_dir/Info.plist")" == "PrettyTerm.icns" ]]

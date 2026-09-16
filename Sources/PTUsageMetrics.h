@@ -14,11 +14,12 @@ FOUNDATION_EXPORT NSDate * _Nullable PTDateFromClaudeAPIString(NSString *value);
 FOUNDATION_EXPORT NSString *PTCountdownDescription(NSDate * _Nullable targetDate,
                                                    NSDate *now);
 
-/// Parses the zero-turn JSON result produced by `claude -p /usage`.
-/// PrettyTerm delegates authentication and token refresh to the installed Claude Code binary.
-FOUNDATION_EXPORT NSDictionary * _Nullable PTClaudePlanUsageFromCommandOutput(
-    NSString *output,
-    NSDate *now
+/// Parses the official `rate_limits` object delivered to Claude Code's status line
+/// after an API response. The snapshot must belong to `expectedSessionID` and
+/// contain both the five-hour and seven-day windows.
+FOUNDATION_EXPORT NSDictionary * _Nullable PTClaudePlanUsageFromStatusLineSnapshot(
+    NSDictionary *snapshot,
+    NSString *expectedSessionID
 );
 
 NS_ASSUME_NONNULL_END

@@ -4,6 +4,39 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const renderer = require('../Resources/app.js');
 
+test('mostly changed 1000-line diffs fit in a 64 MiB JavaScript heap', () => {
+  const { spawnSync } = require('node:child_process');
+  const script = `
+    const r = require(${JSON.stringify(require.resolve('../Resources/app.js'))});
+    const a = Array.from({length:1000}, (_, i) => 'old-' + i);
+    const b = Array.from({length:1000}, (_, i) => 'new-' + i);
+    a[500] = b[500] = 'shared';
+    const result = r.diffLines(a.join('\\n'), b.join('\\n'));
+    if (result.length !== 1999) process.exit(2);
+  `;
+  const child = spawnSync(process.execPath, ['--max-old-space-size=64', '-e', script], { encoding: 'utf8' });
+  assert.equal(child.status, 0, `diff exceeded heap budget or lost content (${child.signal})`);
+});
+
+test('diff reconstruction and edit counts match an independent LCS oracle', () => {
+  const values = ['a', 'b', 'c'];
+  let seed = 17;
+  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0);
+  for (let trial = 0; trial < 250; trial++) {
+    const a = Array.from({ length: 1 + random() % 20 }, () => values[random() % 3]);
+    const b = Array.from({ length: 1 + random() % 20 }, () => values[random() % 3]);
+    const table = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+      table[i][j] = a[i - 1] === b[j - 1] ? table[i - 1][j - 1] + 1
+        : Math.max(table[i - 1][j], table[i][j - 1]);
+    }
+    const diff = renderer.diffLines(a.join('\n'), b.join('\n'));
+    assert.deepEqual(diff.filter(x => x.type !== 'add').map(x => x.text), a);
+    assert.deepEqual(diff.filter(x => x.type !== 'remove').map(x => x.text), b);
+    assert.equal(diff.filter(x => x.type === 'context').length, table[a.length][b.length]);
+  }
+});
+
 test('assistant text is flat inside a Reasonix-style turn', () => {
   const html = renderer.renderSession({
     sessionId: 's1',
@@ -18,6 +51,20 @@ test('assistant text is flat inside a Reasonix-style turn', () => {
   assert.match(html, /class="turn-prompt"/);
   assert.match(html, /class="assistant-text"/);
   assert.doesNotMatch(html, /class="[^"]*assistant-text[^"]*card/);
+});
+
+test('every Claude text output exposes its exact text through a copy button', () => {
+  const html = renderer.renderSession({
+    sessionId: 'copy-session',
+    messages: [
+      { role: 'user', text: '给我结果' },
+      { role: 'assistant', text: '第一行\n第二行 <完成>' }
+    ]
+  });
+
+  assert.match(html, /class="assistant-copy-button"/);
+  assert.match(html, /data-copy-text="第一行\n第二行 &lt;完成&gt;"/);
+  assert.match(html, /<span aria-hidden="true">⧉<\/span>复制<\/button>/);
 });
 
 test('a real waiting state renders the animated Terminal-to-Claude signal route', () => {
@@ -55,6 +102,28 @@ test('thinking, tools, and per-file diffs start folded while errors start open',
   assert.match(tool, /^<details class="event tool-event"(?: data-message-key="[^"]*")?>/);
   assert.match(diff, /^<details class="event diff-event">/);
   assert.match(error, /^<details class="event error-event" open(?: data-message-key="[^"]*")?>/);
+});
+
+test('tool activity uses a closed outer group and closed per-call details', () => {
+  const html = renderer.renderSession({
+    sessionId: 'tool-groups',
+    messages: [
+      { role: 'user', text: '查一下' },
+      { kind: 'tool', toolName: 'ToolSearch', text: 'query one' },
+      { kind: 'tool', toolName: 'WebSearch', text: 'result one' },
+      { kind: 'tool', toolName: 'WebSearch', text: 'result two' },
+      { role: 'assistant', text: '继续检查。' },
+      { kind: 'tool', toolName: 'Read', text: '/tmp/a.md' }
+    ]
+  });
+
+  assert.equal((html.match(/<details class="tool-group"/g) || []).length, 2);
+  assert.equal((html.match(/<details class="event tool-event"/g) || []).length, 4);
+  assert.match(html, /class="tool-group" data-tool-count="3"><summary>/);
+  assert.match(html, /工具调用情况/);
+  assert.match(html, /class="tool-group-count">3 次</);
+  assert.doesNotMatch(html, /<details class="tool-group"[^>]* open/);
+  assert.doesNotMatch(html, /<details class="event tool-event"[^>]* open/);
 });
 
 test('each turn ends with one Codex-style edited-files summary', () => {
@@ -95,14 +164,17 @@ test('renderer switches conversation chrome between Chinese and English', () => 
   renderer.setPrettyTermLanguage('zh-Hans');
 });
 
-test('large diffs take the bounded fallback before allocating an LCS table', () => {
-  const before = Array.from({ length: 20000 }, (_, index) => `old ${index}`).join('\n');
-  const after = Array.from({ length: 20000 }, (_, index) => `new ${index}`).join('\n');
+test('large diffs retain exact shared context without a size cutoff', () => {
+  const beforeLines = Array.from({ length: 20000 }, (_, index) => `line ${index}`);
+  const afterLines = beforeLines.slice();
+  afterLines[10000] = 'changed line';
+  const before = beforeLines.join('\n');
+  const after = afterLines.join('\n');
   const lines = renderer.diffLines(before, after);
 
-  assert.equal(lines.length, 40000);
-  assert.equal(lines[0].type, 'remove');
-  assert.equal(lines.at(-1).type, 'add');
+  assert.equal(lines.filter(line => line.type === 'context').length, 19999);
+  assert.equal(lines.filter(line => line.type === 'remove').length, 1);
+  assert.equal(lines.filter(line => line.type === 'add').length, 1);
 });
 
 test('terminal residue is removed without deleting useful text', () => {
@@ -135,6 +207,71 @@ test('markdown supports links, ordered lists, inline math and multiline display 
   assert.match(html, /<li>第一项<\/li>/);
   assert.match(html, /<span class="inline-math">\\\(x\+1\\\)<\/span>。/);
   assert.match(html, /<div class="math-block">\\\[\nx\^2 \+ y\^2\n\\\]<\/div>/);
+});
+
+test('file preview compiles Markdown into a standalone rendered document', async () => {
+  const html = await renderer.renderFilePreview({
+    kind: 'markdown',
+    title: 'Guide.md',
+    path: '/tmp/Guide.md',
+    text: '# Heading\n\n- first\n- second\n\n```js\nconst value = 1;\n```\n\n$x+1$'
+  });
+
+  assert.match(html, /class="file-document markdown-document"/);
+  assert.match(html, /<h1>Heading<\/h1>/);
+  assert.match(html, /<ul><li>first<\/li><li>second<\/li><\/ul>/);
+  assert.match(html, /<pre><code class="language-js">const value = 1;<\/code><\/pre>/);
+  assert.match(html, /<span class="inline-math">\\\(x\+1\\\)<\/span>/);
+  assert.doesNotMatch(html, /># Heading</);
+});
+
+test('file preview renders complete escaped source with literal line numbers', async () => {
+  const html = await renderer.renderFilePreview({
+    kind: 'source',
+    title: 'Review.m',
+    path: '/tmp/Review.m',
+    text: 'if (a < b) {\n  return "<done>";\n}\n'
+  });
+
+  assert.match(html, /class="file-document source-document"/);
+  assert.equal((html.match(/class="source-line"/g) || []).length, 4);
+  assert.match(html, /class="line-number">1<\/span><code>if \(a &lt; b\) \{<\/code>/);
+  assert.match(html, /class="line-number">2<\/span><code>  return &quot;&lt;done&gt;&quot;;<\/code>/);
+  assert.match(html, /class="line-number">4<\/span><code><\/code>/);
+});
+
+test('live LaTeX waits for MathJax startup and serializes every incremental typeset', async () => {
+  let releaseStartup;
+  let active = 0;
+  let maximumActive = 0;
+  const calls = [];
+  const originalMathJax = globalThis.MathJax;
+  globalThis.MathJax = {
+    startup: {
+      promise: new Promise(resolve => { releaseStartup = resolve; })
+    },
+    typesetPromise: async targets => {
+      active++;
+      maximumActive = Math.max(maximumActive, active);
+      calls.push(targets.map(target => target.id));
+      await new Promise(resolve => setImmediate(resolve));
+      active--;
+    }
+  };
+
+  try {
+    const first = renderer.typeset([{ id: 'first-formula' }]);
+    const second = renderer.typeset([{ id: 'second-formula' }]);
+    await Promise.resolve();
+    assert.deepEqual(calls, [], 'typesetting must wait until MathJax startup completes');
+    releaseStartup();
+    await Promise.all([first, second]);
+    assert.deepEqual(calls, [['first-formula'], ['second-formula']]);
+    assert.equal(maximumActive, 1, 'incremental MathJax compilation must never overlap');
+  } finally {
+    if (originalMathJax === undefined) delete globalThis.MathJax;
+    else globalThis.MathJax = originalMathJax;
+  }
 });
 
 test('ordered lists keep numbering across indented continuation paragraphs', () => {
@@ -216,7 +353,7 @@ test('a short 53-line final reply is not mistaken for hidden long content', () =
   assert.match(html, /短分点 53/);
 });
 
-test('quote selection accepts one assistant message and rejects unsafe ranges', () => {
+test('quote selection accepts unlimited text from one assistant message', () => {
   const assistantA = { closest: selector => selector === '.assistant-text' ? assistantA : null };
   const assistantB = { closest: selector => selector === '.assistant-text' ? assistantB : null };
   const tool = { closest: () => null };
@@ -249,22 +386,21 @@ test('quote selection accepts one assistant message and rejects unsafe ranges', 
     ),
     null
   );
-  assert.equal(
+  assert.deepEqual(
     renderer.quotePayloadFromSelection(
       selection(textNode(assistantA), textNode(assistantA), 'x'.repeat(20001)),
       { sessionId: 'session-a' }
     ),
-    null
+    { text: 'x'.repeat(20001), sessionId: 'session-a' }
   );
 });
 
 // 追加渲染时原生只发元数据（不含 messages），省掉每次几 MB 的序列化。
-// 这条捷径的安全前提就是这个握手：JS 状态一旦不是同一个会话，必须拒绝，
-// 否则拿着空 messages 去渲染会把整个对话清空。
-test('metadata-only appends are gated by an explicit session handshake', async () => {
+// 会话标识一致时才合并增量。
+test('metadata-only appends require the loaded session identity', async () => {
   assert.equal(typeof renderer.sessionMatches, 'function');
 
-  // 尚未装载任何会话：拒绝，避免空 messages 覆盖。
+  // 尚未装载任何会话时没有合并目标。
   assert.equal(renderer.sessionMatches({ sessionId: 's1' }), false);
 
   await renderer.setClaudeSession({
@@ -278,8 +414,7 @@ test('metadata-only appends are gated by an explicit session handshake', async (
   assert.equal(renderer.sessionMatches({}), false);
   assert.equal(renderer.sessionMatches(null), false);
 
-  // 会话不匹配且没有 messages 时，必须原地不动等原生重发完整快照，
-  // 而不是把已渲染的内容清掉。
+  // 会话不匹配时保持当前内容，不触发整页重建。
   const before = renderer.renderSession;
   await renderer.appendClaudeMessages({ sessionId: 's2', model: 'Claude' }, [
     { role: 'assistant', text: '不该出现' }
@@ -327,7 +462,7 @@ test('AskUserQuestion renders a clickable card, not a generic tool bubble', () =
   assert.match(html, /&lt;script&gt;危险&lt;\/script&gt;/);
 });
 
-test('an already-answered question renders read-only with no options', () => {
+test('an already-answered question displays the recorded answer with no input controls', () => {
   const html = renderer.renderEvent({
     kind: 'question',
     answered: true,

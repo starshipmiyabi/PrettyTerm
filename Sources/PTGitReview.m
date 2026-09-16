@@ -178,56 +178,32 @@ static NSArray<NSDictionary *> *PTTranscriptReviewDiffRows(
     NSArray<NSString *> *after = PTTranscriptReviewLines(newText);
     NSUInteger beforeCount = before.count;
     NSUInteger afterCount = after.count;
-    BOOL large = beforeCount > 0 && afterCount > 120000 / beforeCount;
     NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
-    if (beforeCount == 0 || afterCount == 0 || large) {
-        NSUInteger oldLine = 1;
-        NSUInteger newLine = 1;
-        for (NSString *line in before) {
-            [rows addObject:@{@"type": @"remove", @"text": line, @"old": @(oldLine++)}];
-        }
-        for (NSString *line in after) {
-            [rows addObject:@{@"type": @"add", @"text": line, @"new": @(newLine++)}];
-        }
-        return rows;
+    NSOrderedCollectionDifference<NSString *> *difference = [after differenceFromArray:before];
+    NSMutableIndexSet *removals = [NSMutableIndexSet indexSet];
+    NSMutableIndexSet *insertions = [NSMutableIndexSet indexSet];
+    for (NSOrderedCollectionChange<NSString *> *change in difference.removals) {
+        [removals addIndex:change.index];
     }
-
-    NSUInteger columns = afterCount + 1;
-    NSUInteger *table = calloc((beforeCount + 1) * columns, sizeof(NSUInteger));
-    if (!table) {
-        for (NSUInteger index = 0; index < beforeCount; index++) {
-            [rows addObject:@{@"type": @"remove", @"text": before[index], @"old": @(index + 1)}];
-        }
-        for (NSUInteger index = 0; index < afterCount; index++) {
-            [rows addObject:@{@"type": @"add", @"text": after[index], @"new": @(index + 1)}];
-        }
-        return rows;
+    for (NSOrderedCollectionChange<NSString *> *change in difference.insertions) {
+        [insertions addIndex:change.index];
     }
-    for (NSInteger i = (NSInteger)beforeCount - 1; i >= 0; i--) {
-        for (NSInteger j = (NSInteger)afterCount - 1; j >= 0; j--) {
-            NSUInteger index = (NSUInteger)i * columns + (NSUInteger)j;
-            if ([before[(NSUInteger)i] isEqual:after[(NSUInteger)j]]) {
-                table[index] = table[((NSUInteger)i + 1) * columns + (NSUInteger)j + 1] + 1;
-            } else {
-                table[index] = MAX(
-                    table[((NSUInteger)i + 1) * columns + (NSUInteger)j],
-                    table[(NSUInteger)i * columns + (NSUInteger)j + 1]
-                );
-            }
-        }
-    }
-
     NSUInteger i = 0;
     NSUInteger j = 0;
     while (i < beforeCount || j < afterCount) {
-        if (i < beforeCount && j < afterCount && [before[i] isEqual:after[j]]) {
+        if (i < beforeCount && [removals containsIndex:i]) {
+            [rows addObject:@{@"type": @"remove", @"text": before[i], @"old": @(i + 1)}];
+            i++;
+        } else if (j < afterCount && [insertions containsIndex:j]) {
+            [rows addObject:@{@"type": @"add", @"text": after[j], @"new": @(j + 1)}];
+            j++;
+        } else if (i < beforeCount && j < afterCount) {
             [rows addObject:@{
                 @"type": @"context", @"text": before[i], @"old": @(i + 1), @"new": @(j + 1)
             }];
             i++;
             j++;
-        } else if (i < beforeCount &&
-                   (j >= afterCount || table[(i + 1) * columns + j] >= table[i * columns + j + 1])) {
+        } else if (i < beforeCount) {
             [rows addObject:@{@"type": @"remove", @"text": before[i], @"old": @(i + 1)}];
             i++;
         } else {
@@ -235,7 +211,6 @@ static NSArray<NSDictionary *> *PTTranscriptReviewDiffRows(
             j++;
         }
     }
-    free(table);
     return rows;
 }
 
@@ -327,8 +302,7 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
                         accentColor, foldBackground, PTGitReviewFoldSpec()));
             }
             NSArray<NSDictionary *> *rows = PTTranscriptReviewDiffRows(event[@"oldText"], event[@"newText"]);
-            NSUInteger limit = MIN((NSUInteger)5000, rows.count);
-            for (NSUInteger rowIndex = 0; rowIndex < limit; rowIndex++) {
+            for (NSUInteger rowIndex = 0; rowIndex < rows.count; rowIndex++) {
                 NSDictionary *row = rows[rowIndex];
                 NSString *type = row[@"type"];
                 NSString *oldField = row[@"old"]
@@ -360,12 +334,6 @@ NSAttributedString *PTTranscriptEditReviewAttributedString(
                     [output addAttribute:NSForegroundColorAttributeName value:markerColor range:markerRange];
                     [output addAttribute:NSFontAttributeName value:markerFont range:markerRange];
                 }
-            }
-            if (rows.count > limit) {
-                PTGitReviewAppend(output,
-                    [NSString stringWithFormat:PTL(@"      ⋯  片段过大，剩余 %lu 行未显示\n", @"      ⋯  Segment too large; %lu remaining lines hidden\n"),
-                        (unsigned long)(rows.count - limit)],
-                    PTGitReviewAttributes(bodyFont, mutedColor, foldBackground, PTGitReviewFoldSpec()));
             }
         }
         [output appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];

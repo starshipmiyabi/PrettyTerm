@@ -53,19 +53,42 @@ static id PTEvaluate(WKWebView *webView, NSString *script) {
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         (void)NSApplication.sharedApplication;
-        PTAssert(argc == 2, @"expected the project directory argument");
+        PTAssert(argc == 2 || argc == 3, @"expected project directory and optional resource directory");
         NSString *project = [NSString stringWithUTF8String:argv[1]];
         NSURL *htmlURL = [NSURL fileURLWithPath:
-            [project stringByAppendingPathComponent:@"Resources/index.html"]];
+            argc == 3 ? [[NSString stringWithUTF8String:argv[2]] stringByAppendingPathComponent:@"index.html"]
+                      : [project stringByAppendingPathComponent:@"Resources/index.html"]];
         WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
         configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
         WKWebView *webView = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 720, 520)
                                                 configuration:configuration];
+        NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(80, 80, 720, 520)
+            styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+        window.title = @"PrettyTerm renderer regression";
+        [window.contentView addSubview:webView];
+        [window orderFront:nil];
         PTViewportNavigationDelegate *delegate = [[PTViewportNavigationDelegate alloc] init];
         webView.navigationDelegate = delegate;
         [webView loadFileURL:htmlURL allowingReadAccessToURL:[htmlURL URLByDeletingLastPathComponent]];
         PTPumpUntil(^BOOL { return delegate.ready || delegate.error != nil; }, 8.0);
         PTAssert(delegate.ready && delegate.error == nil, @"conversation fixture must load");
+
+        if (NSProcessInfo.processInfo.environment[@"PT_MEMORY_BENCHMARK"]) {
+            NSString *fixture = [NSString stringWithContentsOfFile:
+                [project stringByAppendingPathComponent:@"Tests/renderer_memory_benchmark.js"]
+                encoding:NSUTF8StringEncoding error:nil];
+            PTAssert(fixture.length > 0, @"memory benchmark must load");
+            PTEvaluate(webView, [fixture stringByAppendingString:@"\nnull;"]);
+            __block id result = nil;
+            PTPumpUntil(^BOOL {
+                result = PTEvaluate(webView, @"window.__ptBenchmarkResult || null");
+                return [result isKindOfClass:NSDictionary.class];
+            }, 45.0);
+            PTAssert([result isKindOfClass:NSDictionary.class], @"memory benchmark must finish rendering");
+            NSLog(@"MEMORY_BENCHMARK_READY %@", result);
+            PTPumpUntil(^BOOL { return NO; }, 10.0);
+            return 0;
+        }
 
         NSMutableArray<NSDictionary *> *messages = [NSMutableArray array];
         for (NSUInteger index = 0; index < 48; index++) {
@@ -92,7 +115,8 @@ int main(int argc, const char *argv[]) {
         };
         NSData *jsonData = [NSJSONSerialization dataWithJSONObject:session options:0 error:nil];
         NSString *json = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-        PTEvaluate(webView, [NSString stringWithFormat:@"window.setClaudeSession(%@); true;", json]);
+        PTEvaluate(webView, [NSString stringWithFormat:@"window.setClaudeSession(%@).then(() => window.__initialRenderDone = true); true;", json]);
+        PTPumpUntil(^BOOL { return [PTEvaluate(webView, @"Boolean(window.__initialRenderDone)") boolValue]; }, 8.0);
         PTEvaluate(webView, @"window.scrollTo(0, document.body.scrollHeight * 0.46); true;");
         NSDate *captureSettle = [NSDate dateWithTimeIntervalSinceNow:0.12];
         while (captureSettle.timeIntervalSinceNow > 0) {
@@ -129,12 +153,27 @@ int main(int argc, const char *argv[]) {
              @"if (!n || !n.isConnected || n.nodeType !== 3 || !n.length) return {drift: 9999, scrollY: window.scrollY};"
              @"const o = Math.max(0, Math.min(Number(a.offset) || 0, n.length - 1));"
              @"r.setStart(n, o); r.setEnd(n, Math.min(n.length, o + 1));"
-             @"return {drift: r.getBoundingClientRect().top - a.top, scrollY: window.scrollY};"
+             @"return {drift: r.getBoundingClientRect().top - a.top, scrollY: window.scrollY, text:n.textContent, top:a.top, current:r.getBoundingClientRect().top};"
              @"})()");
         double drift = [after[@"drift"] doubleValue];
+        if (fabs(drift) >= 4.0) NSLog(@"Anchor diagnostic: %@ -> %@", before, after);
         PTAssert(fabs(drift) < 4.0,
             [NSString stringWithFormat:@"resizing must preserve the same reading character (drift %.2f, scroll %.2f -> %.2f)",
                 drift, [before[@"scrollY"] doubleValue], [after[@"scrollY"] doubleValue]]);
+        NSString *memoryFixture = [NSString stringWithContentsOfFile:
+            [project stringByAppendingPathComponent:@"Tests/renderer_memory_fixture.js"]
+            encoding:NSUTF8StringEncoding error:nil];
+        PTAssert(memoryFixture.length > 0, @"renderer memory fixture must load");
+        PTEvaluate(webView, [memoryFixture stringByAppendingString:@"\nnull;"]);
+        __block NSDictionary *memoryResult = nil;
+        PTPumpUntil(^BOOL {
+            memoryResult = PTEvaluate(webView, @"window.__ptMemoryResult || null;");
+            return [memoryResult isKindOfClass:NSDictionary.class];
+        }, 15.0);
+        PTAssert([memoryResult isKindOfClass:NSDictionary.class], @"renderer memory fixture timed out");
+        PTAssert([memoryResult[@"ok"] boolValue],
+            [NSString stringWithFormat:@"renderer memory regression: %@", memoryResult]);
+        NSLog(@"Renderer memory: %@", memoryResult);
         NSLog(@"PTViewportAnchorTests passed");
     }
     return 0;

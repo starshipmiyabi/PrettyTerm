@@ -113,56 +113,17 @@ NSString *PTCountdownDescription(NSDate *targetDate, NSDate *now) {
         : [NSString stringWithFormat:PTL(@"%lu 天", @"%lu d"), (unsigned long)days];
 }
 
-static NSDate *PTDateFromClaudeUsageResetText(NSString *text, NSDate *now) {
-    NSString *value = [[text stringByReplacingOccurrencesOfString:@"\u00a0" withString:@" "]
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    NSTimeZone *resetTimeZone = nil;
-    NSRange timezoneSuffix = [value rangeOfString:@" (" options:NSBackwardsSearch];
-    if (timezoneSuffix.location != NSNotFound) {
-        NSRange timezoneRange = NSMakeRange(NSMaxRange(timezoneSuffix),
-            value.length - NSMaxRange(timezoneSuffix));
-        NSString *timezoneName = [value substringWithRange:timezoneRange];
-        if ([timezoneName hasSuffix:@")"]) {
-            timezoneName = [timezoneName substringToIndex:timezoneName.length - 1];
-            resetTimeZone = [NSTimeZone timeZoneWithName:timezoneName];
-        }
-        value = [value substringToIndex:timezoneSuffix.location];
-    }
-
-    NSCalendar *calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
-    calendar.timeZone = resetTimeZone ?: NSTimeZone.localTimeZone;
-    NSInteger year = [calendar component:NSCalendarUnitYear fromDate:now ?: NSDate.date];
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    formatter.timeZone = calendar.timeZone;
-    NSString *datedValue = [NSString stringWithFormat:@"%@ %ld", value, (long)year];
-    NSDate *date = nil;
-    // Claude Code omits ":00" for exact-hour reset times (for example "1pm")
-    // but includes minutes for other windows (for example "12:49pm").
-    for (NSString *format in @[@"MMM d 'at' h:mma yyyy", @"MMM d 'at' ha yyyy"]) {
-        formatter.dateFormat = format;
-        date = [formatter dateFromString:datedValue];
-        if (date) break;
-    }
-    if (date && [date timeIntervalSinceDate:now ?: NSDate.date] < -3600.0) {
-        date = [calendar dateByAddingUnit:NSCalendarUnitYear value:1 toDate:date options:0];
-    }
-    return date;
-}
-
-static NSDictionary *PTClaudeUsageWindow(NSString *text, NSString *pattern, NSDate *now) {
-    NSRegularExpression *expression = [NSRegularExpression
-        regularExpressionWithPattern:pattern
-                             options:NSRegularExpressionCaseInsensitive
-                               error:nil];
-    NSTextCheckingResult *match = [expression firstMatchInString:text
-        options:0 range:NSMakeRange(0, text.length)];
-    if (!match || match.numberOfRanges < 3) return nil;
-    NSString *percentText = [text substringWithRange:[match rangeAtIndex:1]];
-    NSString *resetText = [text substringWithRange:[match rangeAtIndex:2]];
-    double percent = MIN(100.0, MAX(0.0, percentText.doubleValue));
-    NSDate *resetDate = PTDateFromClaudeUsageResetText(resetText, now);
-    if (!resetDate) return nil;
+static NSDictionary *PTClaudeUsageWindowFromStatusLine(NSDictionary *window) {
+    if (![window isKindOfClass:NSDictionary.class]) return nil;
+    NSNumber *percentage = [window[@"used_percentage"] isKindOfClass:NSNumber.class]
+        ? window[@"used_percentage"] : nil;
+    NSNumber *resetEpoch = [window[@"resets_at"] isKindOfClass:NSNumber.class]
+        ? window[@"resets_at"] : nil;
+    double percent = percentage.doubleValue;
+    NSTimeInterval resetSeconds = resetEpoch.doubleValue;
+    if (!percentage || !resetEpoch || !isfinite(percent) || !isfinite(resetSeconds) ||
+        percent < 0.0 || percent > 100.0 || resetSeconds <= 0.0) return nil;
+    NSDate *resetDate = [NSDate dateWithTimeIntervalSince1970:resetSeconds];
     NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
     formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
     return @{
@@ -171,20 +132,16 @@ static NSDictionary *PTClaudeUsageWindow(NSString *text, NSString *pattern, NSDa
     };
 }
 
-NSDictionary *PTClaudePlanUsageFromCommandOutput(NSString *output, NSDate *now) {
-    if (![output isKindOfClass:NSString.class] || output.length == 0) return nil;
-    NSData *data = [output dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *envelope = data
-        ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    if (![envelope isKindOfClass:NSDictionary.class] || [envelope[@"is_error"] boolValue]) {
-        return nil;
-    }
-    NSString *result = [envelope[@"result"] isKindOfClass:NSString.class]
-        ? envelope[@"result"] : @"";
-    NSDictionary *session = PTClaudeUsageWindow(result,
-        @"Current session:\\s*([0-9]+(?:\\.[0-9]+)?)% used[^\\n]*?resets\\s+([^\\n]+)", now);
-    NSDictionary *week = PTClaudeUsageWindow(result,
-        @"Current week(?: \\(all models\\))?:\\s*([0-9]+(?:\\.[0-9]+)?)% used[^\\n]*?resets\\s+([^\\n]+)", now);
+NSDictionary *PTClaudePlanUsageFromStatusLineSnapshot(NSDictionary *snapshot,
+                                                       NSString *expectedSessionID) {
+    if (![snapshot isKindOfClass:NSDictionary.class] || expectedSessionID.length == 0) return nil;
+    NSString *sessionID = [snapshot[@"session_id"] isKindOfClass:NSString.class]
+        ? snapshot[@"session_id"] : @"";
+    if (![sessionID isEqualToString:expectedSessionID]) return nil;
+    NSDictionary *rateLimits = [snapshot[@"rate_limits"] isKindOfClass:NSDictionary.class]
+        ? snapshot[@"rate_limits"] : nil;
+    NSDictionary *session = PTClaudeUsageWindowFromStatusLine(rateLimits[@"five_hour"]);
+    NSDictionary *week = PTClaudeUsageWindowFromStatusLine(rateLimits[@"seven_day"]);
     if (!session || !week) return nil;
     return @{ @"five_hour": session, @"seven_day": week };
 }

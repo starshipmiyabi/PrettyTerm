@@ -33,9 +33,27 @@ test('the floating conversation uses the shared message path and closes cleanly'
   assert.match(buildMethod[0], /fileDropHandler/);
   assert.match(buildMethod[0], /chooseFloatingAttachments:/);
   assert.match(source, /sendOutgoingMessage:[\s\S]*forSessionID:/);
-  assert.match(source, /_bridge\.sessionID isEqual:sessionID/);
-  assert.match(source, /sendFloatingMessage:[\s\S]*floatingPendingImagesForClaude/);
+  assert.match(source, /bridgeForSessionID:sessionID/);
+  assert.match(source, /sendFloatingMessage:[\s\S]*floatingPendingImagePNGsForClaude/);
   assert.match(source, /windowWillClose:[\s\S]*_floatingSessionID\s*=\s*nil/);
+});
+
+test('workspace tabs retain independent Terminal bridges and composer state', () => {
+  assert.match(source, /@interface PTWorkspaceTab[\s\S]*PTClaudeBridge \*bridge/);
+  assert.match(source, /NSMutableArray<PTWorkspaceTab \*> \*_workspaceTabs/);
+  assert.match(source, /createWorkspaceTab[\s\S]*\[\[PTClaudeBridge alloc\] init\]/);
+  assert.match(source, /activateWorkspaceTab:[\s\S]*_bridge = tab\.bridge/);
+  assert.match(source, /saveActiveWorkspaceTabState[\s\S]*tab\.draft|_activeWorkspaceTab\.draft/);
+  assert.match(source, /tab\.pendingImages/);
+  assert.match(source, /tab\.pendingFiles/);
+  assert.match(source, /addWorkspaceTab:/);
+  assert.match(source, /＋  新标签/);
+  assert.match(source, /closeWorkspaceTab:[\s\S]*\[closingTab\.bridge stop\]/);
+  assert.match(source, /closeWorkspaceTab:[\s\S]*removeObjectAtIndex:index/);
+  assert.match(source, /closeWorkspaceTab:[\s\S]*activateWorkspaceTab:_workspaceTabs\[nextIndex\]/);
+  assert.match(source, /closeButton\.action = @selector\(closeWorkspaceTab:\)/);
+  assert.match(source, /titleLabel\.leadingAnchor constraintEqualToAnchor:item\.leadingAnchor constant:14/);
+  assert.match(source, /for \(PTWorkspaceTab \*tab in _workspaceTabs\.copy\)[\s\S]*\[tab\.bridge stop\]/);
 });
 
 test('successful sends clear both composers through the native text editing transaction', () => {
@@ -62,7 +80,37 @@ test('successful messages show one real waiting state until transcript activity 
   assert.match(source, /@"awaitingReply"/);
 });
 
-test('both windows append new JSONL messages and retain full-snapshot recovery', () => {
+test('Terminal connection state never makes conversation controls unavailable', () => {
+  assert.match(agentSource, /return self\.selectedSessionID\.length > 0/);
+  assert.doesNotMatch(agentSource,
+    /commandsEnabled[\s\S]*?bridgeRunning|commandsEnabled[\s\S]*?boundSessionID/);
+  assert.match(source, /_composerTextView\.editable = ready/);
+  assert.match(source, /_sendButton\.enabled = ready/);
+  assert.match(source, /_floatingComposerTextView\.editable = ready/);
+  assert.match(source, /_floatingSendButton\.enabled = ready/);
+  assert.doesNotMatch(source, /_composerTextView\.editable = ready && !awaiting/);
+  assert.doesNotMatch(source, /_floatingComposerTextView\.editable = ready && !awaiting/);
+  assert.doesNotMatch(source, /只读|未同步|请先同步|Read only|Conversation not synced/);
+
+  const chooseMainAttachments = source.match(
+    /- \(void\)chooseAttachments:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  const chooseFloatingAttachments = source.match(
+    /- \(void\)chooseFloatingAttachments:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  const compact = source.match(
+    /- \(void\)compactConversation:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  const model = source.match(
+    /- \(void\)changeModel:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.doesNotMatch(chooseMainAttachments, /commandsEnabled|bridgeForSessionID/);
+  assert.doesNotMatch(chooseFloatingAttachments, /commandsEnabled|bridgeForSessionID/);
+  assert.doesNotMatch(compact, /commandsEnabled/);
+  assert.doesNotMatch(model, /commandsEnabled/);
+});
+
+test('both windows append new JSONL messages without automatic full-snapshot recovery', () => {
   const mainRender = source.match(
     /- \(void\)renderSession:\(PTSessionInfo \*\)session[\s\S]*?(?=\n- \([^\n]+\))/
   );
@@ -75,8 +123,10 @@ test('both windows append new JSONL messages and retain full-snapshot recovery',
   assert.match(mainRender[0], /window\.appendClaudeMessages/);
   assert.match(floatingRender[0], /window\.setClaudeSession/);
   assert.match(floatingRender[0], /window\.appendClaudeMessages/);
-  assert.match(mainRender[0], /PTSessionInfo \*latest = self->_selectedSession/);
-  assert.match(floatingRender[0], /sessionWithID:self->_floatingSessionID/);
+  assert.doesNotMatch(mainRender[0], /PTSessionInfo \*latest = self->_selectedSession/);
+  assert.doesNotMatch(floatingRender[0], /sessionWithID:self->_floatingSessionID/);
+  assert.doesNotMatch(mainRender[0], /_renderedSessionID = nil/);
+  assert.doesNotMatch(floatingRender[0], /_floatingRenderedSessionID = nil/);
 });
 
 test('clicking sync reparses the selected JSONL and forces both snapshots to redraw', () => {
@@ -132,12 +182,12 @@ test('conversation viewport preserves a character anchor while inspector width r
   assert.match(renderer, /scrollBy\(0, top - anchor\.top\)/);
 });
 
-test('Git publishing requires a manually entered commit message and never shells it', () => {
-  assert.match(source, /placeholderString = PTL\(@"提交信息（必须手动填写）", @"Commit message \(manual entry required\)"\)/);
+test('Git publishing accepts a commit message as an argument and permits authentication prompts', () => {
+  assert.match(source, /placeholderString = PTL\(@"提交信息", @"Commit message"\)/);
   assert.match(source, /message\.length > 0/);
   assert.match(source, /@\[@"commit", @"-m", message\]/);
   assert.match(source, /@\[@"push"\]/);
-  assert.match(source, /GIT_TERMINAL_PROMPT/);
+  assert.doesNotMatch(source, /GIT_TERMINAL_PROMPT/);
   assert.match(source, /commitAndPushGitChanges:/);
   assert.match(source, /PTL\(@"包含未暂存的更改", @"Include unstaged changes"\)/);
   assert.doesNotMatch(source, /git commit[^\n]*\$|git push[^\n]*\$/);
@@ -153,12 +203,41 @@ test('both composers use custom rounded surfaces and animate attachment expansio
   assert.match(source, /CATransform3DMakeScale\(0\.955, 0\.955, 1\)/);
 });
 
+test('file attachments use non-interactive attach markers in both composers', () => {
+  const mainSend = source.match(
+    /- \(void\)sendMessage:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  const floatingSend = source.match(
+    /- \(void\)sendFloatingMessage:\(id\)sender[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(agentSource, /<attach>%@<\/attach>/);
+  assert.match(mainSend, /PTMessageByAppendingClaudeAttachMarkers/);
+  assert.match(floatingSend, /PTMessageByAppendingClaudeAttachMarkers/);
+  assert.doesNotMatch(mainSend, /PTMessageByAppendingClaudeFileReferences/);
+  assert.doesNotMatch(floatingSend, /PTMessageByAppendingClaudeFileReferences/);
+});
+
+test('dragged and selected images preserve PNG pixels and submit without a confirmation gate', () => {
+  assert.match(source, /PTPNGDataForImageFileURL/);
+  assert.match(source, /if \(isPNG\) return source/);
+  assert.match(source, /@"pngData": pngData/);
+  assert.match(source, /PTWritePNGDataToPasteboard/);
+  assert.match(source, /BOOL sent = attached && \[self sendMessage:message\]/);
+  const imageSend = source.match(
+    /- \(BOOL\)sendMessage:\(NSString \*\)message withImagePNGs:\(NSArray<NSData \*> \*\)imagePNGs \{[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(imageSend, /PTRestorePasteboard[\s\S]*return sent/);
+  assert.doesNotMatch(imageSend, /PTRestorePasteboard[\s\S]*if \(!attached\)[\s\S]*sendMessage/);
+  assert.doesNotMatch(imageSend,
+    /boundTerminalContents|PTRunLoopUntil|PTTerminalImageMarkerCount|未确认图片附件|acknowledged/);
+});
+
 test('composer options drive real Claude model and effort commands', () => {
   assert.match(source, /showComposerOptions:/);
   assert.match(source, /PTEffortSlider/);
   assert.match(source, /@"\/effort %@"/);
   assert.match(source, /@"\/model %@"/);
-  assert.match(source, /PTMessageByAppendingClaudeFileReferences/);
+  assert.match(source, /PTMessageByAppendingClaudeAttachMarkers/);
   assert.doesNotMatch(source, /_composerEffortButton\.bezelStyle\s*=/);
   const slider = source.match(/@implementation PTEffortSlider[\s\S]*?@end/)?.[0] || '';
   assert.match(slider, /NSPanGestureRecognizer/);
@@ -170,6 +249,9 @@ test('composer options drive real Claude model and effort commands', () => {
   assert.doesNotMatch(slider, /nextEventMatchingMask/);
   const changeEffort = source.match(/- \(void\)changeComposerEffort:[\s\S]*?(?=\n- \([^\n]+\))/)?.[0] || '';
   assert.doesNotMatch(changeEffort, /showComposerEffortPage:/);
+  assert.match(changeEffort, /sendOutgoingMessage:/);
+  const changeComposerModel = source.match(/- \(void\)changeComposerModel:[\s\S]*?(?=\n- \([^\n]+\))/)?.[0] || '';
+  assert.match(changeComposerModel, /sendOutgoingMessage:/);
 });
 
 test('the MCP question panel contains no native AppKit button or text-field chrome', () => {
@@ -188,7 +270,7 @@ test('the MCP question panel contains no native AppKit button or text-field chro
   assert.doesNotMatch(block, /NSTextFieldRoundedBezel/);
 });
 
-test('production sending keeps both single-line and multiline messages on the safe Terminal channel', () => {
+test('production sending keeps both single-line and multiline messages on the matched Terminal channel', () => {
   const sendMethod = source.match(/- \(BOOL\)sendMessage:\(NSString \*\)message \{[\s\S]*?\n\}/)?.[0] || '';
   assert.match(sendMethod, /\? \[self sendMultilineMessage:message\]/);
   assert.match(sendMethod, /\[self sendToTerminal:PTNormalizedTerminalPasteText\(message\)\][\s\S]*\[self sendReturnToTerminal\]/);
@@ -196,19 +278,34 @@ test('production sending keeps both single-line and multiline messages on the sa
   assert.doesNotMatch(sendMethod, /AXIsProcessTrusted/);
   assert.match(source, /markerAfter >= 0 && markerAfter != markerBefore/);
   assert.match(agentSource, /do script \\\"\\\" in theTab/);
-  assert.match(agentSource, /if processName is \\\"claude\\\" then set isSafe to true/);
+  assert.match(agentSource, /if processName is \\\"claude\\\" then set isClaudeProcess to true/);
   assert.doesNotMatch(agentSource, /contains \\\"laude\\\"/);
   assert.doesNotMatch(agentSource, /do script \(ASCII character 13\) in theTab/);
 });
 
-test('Claude.ai Remote Control is hard-disabled', () => {
-  assert.doesNotMatch(source, /sendToTerminal:@"\/remote-control/);
-  assert.match(source, /_remoteButton\.enabled = NO/);
-  assert.match(source, /buttonWithTitle:PTL\(@"RC禁用", @"RC Off"\) target:nil action:nil/);
+test('Claude output can be copied and an active reply can be interrupted with Escape', () => {
+  assert.equal((source.match(/addScriptMessageHandler:self name:@"copyAssistantOutput"/g) || []).length, 2);
+  assert.match(source, /NSPasteboardTypeString/);
+  assert.match(source, /- \(BOOL\)sendEscape/);
+  assert.match(source, /PTTerminalAutomationActionInterruptEscape/);
+  assert.ok(agentSource.includes('tell application \\"System Events\\" to key code 53'));
+  assert.match(source, /_sendButton\.action = awaiting[\s\S]*stopSelectedClaudeOutput:/);
+  assert.match(source, /_floatingSendButton\.action = awaiting[\s\S]*stopFloatingClaudeOutput:/);
 });
 
-test('the Compact control sends only the exact slash command through the safe bridge', () => {
-  assert.match(source, /buttonWithTitle:@"Compact" target:self action:@selector\(compactConversation:\)/);
+test('Claude.ai Remote Control sends the exact slash command through the selected conversation', () => {
+  assert.match(source, /PTWarmButton\(@"Remote", self, @selector\(enableRemoteControl:\)\)/);
+  assert.match(source, /_remoteButton\.enabled = ready/);
+  const remoteMethod = source.match(
+    /- \(void\)enableRemoteControl:[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  assert.match(remoteMethod, /sendOutgoingMessage:@"\/remote-control"/);
+  assert.match(remoteMethod, /forSessionID:_selectedSession\.sessionID/);
+  assert.doesNotMatch(remoteMethod, /sendToTerminal:/);
+});
+
+test('the Compact control sends only the exact slash command through the selected conversation', () => {
+  assert.match(source, /PTWarmButton\(@"Compact", self, @selector\(compactConversation:\)\)/);
   assert.match(source, /_compactButton\.enabled = ready/);
   const compactMethod = source.match(
     /- \(void\)compactConversation:[\s\S]*?(?=\n- \([^\n]+\))/
@@ -252,8 +349,10 @@ test('interface language picker persists Chinese or English and rebuilds without
 test('changed-file buttons accept the first click after Finder deactivates the app', () => {
   assert.match(source, /@interface PTFirstMouseButton : NSButton/);
   assert.match(source, /acceptsFirstMouse:[\s\S]*return YES/);
-  assert.match(source, /PTFirstMouseButton \*button/);
-  assert.match(source, /action = @selector\(revealChangedFile:\)/);
+  assert.match(source, /PTAnimatedButton \*button/);
+  assert.match(source, /PTWarmButton\(@"", self, @selector\(revealChangedFile:\)\)/);
+  assert.match(source, /existingChangedFilesFromFiles:/);
+  assert.match(source, /showEmptyChangedFilesState/);
 });
 
 test('Git diff observes remembered transcript directories without changing Claude Code cwd', () => {
@@ -290,12 +389,22 @@ test('selected transcript writes reparse only that file for immediate add-dir di
   assert.doesNotMatch(watchMethod, /\[self->_store refresh\]/);
 });
 
-test('plan usage delegates authentication to Claude Code without app authorization prompts', () => {
+test('session context menu opens the recorded project folder directly', () => {
+  assert.match(source, /@"打开项目文件夹", @"Open project folder"/);
+  assert.match(source, /action:@selector\(openSessionProjectFolder:\)/);
+  assert.match(source, /NSString \*projectPath = session\.cwd\.stringByStandardizingPath/);
+  assert.match(source, /openURL:\[NSURL fileURLWithPath:path isDirectory:YES\]/);
+});
+
+test('plan usage updates only from per-response status line snapshots', () => {
   assert.doesNotMatch(source, /SecItemCopyMatching|AXIsProcessTrusted|kAXTrustedCheckOptionPrompt/);
   assert.doesNotMatch(source, /api\/oauth\/usage|find-generic-password/);
-  assert.match(source, /@"-p", @"\/usage"/);
-  assert.match(source, /@"--no-session-persistence"/);
-  assert.match(source, /PTRunToolWithEnvironment[\s\S]*?@\{ @"TZ": @"UTC" \}/);
+  assert.doesNotMatch(source, /@"-p", @"\/usage"/);
+  assert.doesNotMatch(source, /usageRefreshTimer|refreshClaudeUsage/);
+  assert.match(source, /PTClaudeUsageSnapshotDirectory/);
+  assert.match(source, /startWatchingClaudeUsageSnapshots/);
+  assert.match(source, /PTClaudePlanUsageFromStatusLineSnapshot\(snapshot, sessionID\)/);
+  assert.match(source, /\[_usageSnapshotWatcher watchFileAtPath:directory onChange:/);
   assert.match(source, /_inspectorFiveHourCaption\.stringValue\s*=\s*fiveCountdown/);
   assert.match(source, /_inspectorSevenDayCaption\.stringValue\s*=\s*sevenCountdown/);
   assert.doesNotMatch(source, /PTL\(@"%@后重置",\s*@"resets in %@"\)/);

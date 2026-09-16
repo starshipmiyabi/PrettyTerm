@@ -13,10 +13,7 @@
 }
 
 - (BOOL)commandsEnabled {
-    return self.bridgeRunning &&
-        !self.sendInFlight &&
-        self.selectedSessionID.length > 0 &&
-        [self.selectedSessionID isEqual:self.boundSessionID];
+    return self.selectedSessionID.length > 0;
 }
 
 @end
@@ -123,7 +120,13 @@ NSString *PTMessageForClaudeAttachments(NSString *message, NSUInteger imageCount
     return @" ";
 }
 
-NSString *PTMessageByAppendingClaudeFileReferences(
+static NSString *PTXMLAttachmentPath(NSString *path) {
+    NSString *escaped = [path stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
+    return [escaped stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
+}
+
+NSString *PTMessageByAppendingClaudeAttachMarkers(
     NSString *message,
     NSArray<NSString *> *filePaths
 ) {
@@ -134,7 +137,8 @@ NSString *PTMessageByAppendingClaudeFileReferences(
         if (![path isKindOfClass:NSString.class] || path.length == 0 || ![path hasPrefix:@"/"]) continue;
         NSString *standardized = path.stringByStandardizingPath;
         if (standardized.length == 0) continue;
-        [references addObject:[@"@" stringByAppendingString:standardized]];
+        [references addObject:[NSString stringWithFormat:@"<attach>%@</attach>",
+            PTXMLAttachmentPath(standardized)]];
     }
     if (references.count == 0) return trimmed;
     NSString *fileBlock = [references.array componentsJoinedByString:@"\n"];
@@ -232,6 +236,13 @@ NSString *PTTerminalAutomationScript(
         case PTTerminalAutomationActionPasteImage:
             writeCommand = @"do script (ASCII character 22) in theTab";
             break;
+        case PTTerminalAutomationActionInterruptEscape:
+            writeCommand =
+                @"set selected tab of theWindow to theTab\n"
+                 "set index of theWindow to 1\n"
+                 "activate\n"
+                 "tell application \"System Events\" to key code 53";
+            break;
     }
     NSString *shortTTY = tty.lastPathComponent;
     return [NSString stringWithFormat:
@@ -240,17 +251,17 @@ NSString *PTTerminalAutomationScript(
          "repeat with theTab in tabs of theWindow\n"
          "if (tty of theTab) is \"%@\" then\n"
          "set liveTTY to my (do shell script \"/bin/ps -p %d -o tty= | /usr/bin/xargs\")\n"
-         "if liveTTY is not \"%@\" then return \"unsafe\"\n"
-         "set isSafe to false\n"
+         "if liveTTY is not \"%@\" then return \"mismatch\"\n"
+         "set isClaudeProcess to false\n"
          // 必须先落到一个本地变量：直接 repeat with p in (processes of theTab) 时，
          // p 仍是 "item N of «class prcs» of item N of every ttab of ..." 这样的多层
          // 嵌套引用，(contents of p) as text 会以 -1700 强转失败。先赋值一次即完成解引用。
          "set processNames to processes of theTab\n"
          "repeat with p in processNames\n"
          "set processName to (contents of p) as text\n"
-         "if processName is \"claude\" then set isSafe to true\n"
+         "if processName is \"claude\" then set isClaudeProcess to true\n"
          "end repeat\n"
-         "if isSafe is false then return \"unsafe\"\n"
+         "if isClaudeProcess is false then return \"mismatch\"\n"
          "%@\n"
          "return \"ok\"\n"
          "end if\n"
@@ -311,32 +322,10 @@ static NSArray<NSString *> *PTLines(NSString *value) {
 NSDictionary<NSString *, NSNumber *> *PTDiffStats(NSString *oldText, NSString *newText) {
     NSArray<NSString *> *before = PTLines(oldText);
     NSArray<NSString *> *after = PTLines(newText);
-    NSUInteger beforeCount = before.count;
-    NSUInteger afterCount = after.count;
-    if (beforeCount == 0 || afterCount == 0 || beforeCount * afterCount > 120000) {
-        return @{@"added": @(afterCount), @"removed": @(beforeCount)};
-    }
-
-    NSUInteger columns = afterCount + 1;
-    NSUInteger *table = calloc((beforeCount + 1) * columns, sizeof(NSUInteger));
-    if (!table) return @{@"added": @(afterCount), @"removed": @(beforeCount)};
-    for (NSInteger i = (NSInteger)beforeCount - 1; i >= 0; i--) {
-        for (NSInteger j = (NSInteger)afterCount - 1; j >= 0; j--) {
-            NSUInteger index = (NSUInteger)i * columns + (NSUInteger)j;
-            if ([before[(NSUInteger)i] isEqual:after[(NSUInteger)j]]) {
-                table[index] = table[((NSUInteger)i + 1) * columns + (NSUInteger)j + 1] + 1;
-            } else {
-                NSUInteger skipBefore = table[((NSUInteger)i + 1) * columns + (NSUInteger)j];
-                NSUInteger skipAfter = table[(NSUInteger)i * columns + (NSUInteger)j + 1];
-                table[index] = MAX(skipBefore, skipAfter);
-            }
-        }
-    }
-    NSUInteger common = table[0];
-    free(table);
+    NSOrderedCollectionDifference<NSString *> *difference = [after differenceFromArray:before];
     return @{
-        @"added": @(afterCount - common),
-        @"removed": @(beforeCount - common)
+        @"added": @(difference.insertions.count),
+        @"removed": @(difference.removals.count)
     };
 }
 

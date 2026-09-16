@@ -32,18 +32,37 @@ test('turn edit summaries expose a warm review card', () => {
   assert.match(html, /\.edit-review-label/);
 });
 
-test('local WebView content is isolated from network and dynamic MathJax packages', () => {
-  assert.match(html, /Content-Security-Policy/);
-  assert.match(html, /connect-src 'none'/);
-  assert.match(html, /object-src 'none'/);
-  assert.match(html, /packages:\s*\{\s*'\[-\]'\s*:\s*\['require', 'autoload'\]\s*\}/);
-  assert.match(html, /loader:\s*\{\s*load:\s*\[\]\s*\}/);
+test('tool calls have compact two-level disclosure styling', () => {
+  assert.match(html, /details\.tool-group\s*\{/);
+  assert.match(html, /\.tool-group-events\s*\{/);
+  assert.match(html, /\.tool-group-events\s*>\s*details\.tool-event/);
+  assert.match(html, /details\.tool-group\[open\]\s*>\s*summary::after/);
+});
+
+test('local WebView content does not disable links or dynamic MathJax packages', () => {
+  assert.doesNotMatch(html, /Content-Security-Policy/);
+  assert.doesNotMatch(html, /connect-src 'none'/);
+  assert.doesNotMatch(html, /packages:\s*\{\s*'\[-\]'/);
+  assert.doesNotMatch(html, /loader:\s*\{\s*load:\s*\[\]\s*\}/);
 });
 
 test('native chrome does not use fixed light surfaces or fixed dark title text', () => {
   assert.doesNotMatch(nativeSource, /layer\.backgroundColor\s*=\s*PTColor\(0\.9/);
   assert.doesNotMatch(nativeSource, /color:PTColor\(0\.(?:08|10|12),/);
   assert.match(nativeSource, /PTAppearanceSurfaceView/);
+});
+
+test('all visible AppKit buttons use the custom warm animated chrome', () => {
+  assert.match(nativeSource, /@interface PTWarmPopUpButton\s*:\s*NSPopUpButton/);
+  assert.match(nativeSource, /@interface PTWarmToggleButton\s*:\s*PTAnimatedButton/);
+  assert.match(nativeSource, /static PTAnimatedButton \*PTWarmButton/);
+  assert.match(nativeSource, /intrinsicContentSize[\s\S]*NSMakeSize\([^\n]+, 28\.0\)/);
+  assert.match(nativeSource, /CGFloat outerY = self\.isFlipped/);
+  assert.match(nativeSource, /PTWarmPopUpButton alloc/);
+  assert.doesNotMatch(nativeSource, /\[NSButton buttonWith(?:Title|Image):/);
+  assert.doesNotMatch(nativeSource, /\[NSButton checkboxWithTitle:/);
+  assert.doesNotMatch(nativeSource, /\[\[NSPopUpButton alloc\]/);
+  assert.doesNotMatch(nativeSource, /bezelStyle\s*=\s*NSBezelStyle(?:Rounded|Inline|Recessed)/);
 });
 
 test('collapsed long replies keep their summary in normal layout flow', () => {

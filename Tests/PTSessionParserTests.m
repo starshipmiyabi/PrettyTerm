@@ -68,6 +68,13 @@ int main(void) {
             @"incremental and forced full parses must converge on the same message count");
         PTParserAssert([full.assistantMessages.lastObject[@"text"] isEqual:@"later"],
             @"incremental and forced full parses must converge on the same final content");
+        PTParserAssert(PTConversationTurnCount(@[
+            @{ @"role": @"user", @"text": @"first" },
+            @{ @"kind": @"tool", @"text": @"call" },
+            @{ @"kind": @"tool", @"text": @"result" },
+            @{ @"role": @"assistant", @"text": @"done" },
+            @{ @"role": @"user", @"text": @"second" }
+        ]) == 2, @"conversation turn count must exclude tool calls and tool results");
 
         NSString *contextOutput = @"<local-command-stdout>\x1B[1mContext Usage\x1B[22m\n"
             @"claude-sonnet-5\n56.6k/967k tokens (6%)\n"

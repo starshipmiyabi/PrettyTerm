@@ -113,6 +113,20 @@ int main(void) {
             effectiveRange:nil] != nil,
             @"transcript additions and removals must keep review highlighting");
 
+        NSMutableArray<NSString *> *largeLines = [NSMutableArray array];
+        for (NSUInteger index = 0; index < 6001; index++) {
+            [largeLines addObject:[NSString stringWithFormat:@"full row %lu", (unsigned long)index]];
+        }
+        NSString *largeReviewText = PTTranscriptEditReviewAttributedString(@[@{
+            @"kind": @"diff",
+            @"toolName": @"Write",
+            @"filePath": @"/tmp/Large.txt",
+            @"oldText": @"",
+            @"newText": [largeLines componentsJoinedByString:@"\n"]
+        }]).string;
+        PTAssert([largeReviewText containsString:@"full row 6000"],
+            @"transcript review must display rows beyond the former 5,000-row boundary");
+
         [NSUserDefaults.standardUserDefaults setObject:@"en" forKey:@"PTInterfaceLanguage"];
         NSString *englishLocal = PTTranscriptEditReviewAttributedString(transcriptEdits).string;
         NSString *englishGit = PTGitReviewAttributedString(@{

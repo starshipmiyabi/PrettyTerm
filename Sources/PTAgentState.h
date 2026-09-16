@@ -54,7 +54,7 @@ FOUNDATION_EXPORT NSString *PTMessageForClaudeAttachments(
     NSUInteger imageCount
 );
 
-FOUNDATION_EXPORT NSString *PTMessageByAppendingClaudeFileReferences(
+FOUNDATION_EXPORT NSString *PTMessageByAppendingClaudeAttachMarkers(
     NSString *message,
     NSArray<NSString *> *filePaths
 );
@@ -69,6 +69,7 @@ typedef NS_ENUM(NSInteger, PTTerminalAutomationAction) {
     PTTerminalAutomationActionWriteText,
     PTTerminalAutomationActionSubmitReturn,
     PTTerminalAutomationActionPasteImage,
+    PTTerminalAutomationActionInterruptEscape,
 };
 
 // 构造带 TTY、PID 与精确 Claude 进程名校验的 Terminal AppleScript。

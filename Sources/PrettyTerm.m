@@ -3544,8 +3544,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     [split addArrangedSubview:conversation];
     inspector.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:inspector];
-    // 检查器现在是根布局里真正占位的一栏：展开时靠下面的 _splitTrailingConstraint
-    // 把 split 的右边缘往左收，把让出来的宽度留给检查器，而不是绝对定位盖在内容上面。
+    // 检查器覆盖在根视图右侧，不参与主分栏宽度计算。窗口变窄时只调整自身宽度，
+    // 不再把会话、资源管理器或整个窗口推出屏幕边界。
     CGFloat inspectorWidth = [self adaptiveInspectorWidth];
     _inspectorWidthConstraint = [inspector.widthAnchor constraintEqualToConstant:inspectorWidth];
     _inspectorWidthConstraint.priority = 999;
@@ -3560,10 +3560,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _sidebarWidthConstraint.active = YES;
     [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:0];
     [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
-    // 检查器默认可见（inspector.hidden 初值为 NO），这里让挤压量从一开始就对齐，
-    // 避免第一帧出现"可见但没挤压"的闪烁。
     _splitTrailingConstraint = [split.trailingAnchor constraintEqualToAnchor:root.trailingAnchor
-                                                                      constant:-inspectorWidth];
+                                                                      constant:0.0];
     _splitTrailingConstraint.active = YES;
 
     [_inspectorToggleButton removeFromSuperview];
@@ -3650,7 +3648,6 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     if (!_inspectorWidthConstraint || !_splitTrailingConstraint) return;
     CGFloat width = [self adaptiveInspectorWidth];
     _inspectorWidthConstraint.constant = width;
-    if (!_inspectorView.hidden) _splitTrailingConstraint.constant = -width;
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
@@ -7432,7 +7429,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         _inspectorView.hidden = NO;
         _inspectorView.alphaValue = reduceMotion ? 1.0 : 0.0;
         if (!animated || reduceMotion) {
-            _splitTrailingConstraint.constant = -targetWidth;
             _inspectorView.alphaValue = 1.0;
             if (completion) completion();
         } else {
@@ -7440,7 +7436,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
                 context.duration = 0.22;
                 context.timingFunction = [CAMediaTimingFunction functionWithName:
                     kCAMediaTimingFunctionEaseInEaseOut];
-                self->_splitTrailingConstraint.animator.constant = -targetWidth;
                 self->_inspectorView.animator.alphaValue = 1.0;
             } completionHandler:^{
                 if (generation != self->_inspectorAnimationGeneration) return;
@@ -7452,7 +7447,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
 
     if (!animated || reduceMotion) {
-        _splitTrailingConstraint.constant = 0.0;
         _inspectorView.alphaValue = 1.0;
         _inspectorView.hidden = YES;
         if (completion) completion();
@@ -7461,7 +7455,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             context.duration = 0.22;
             context.timingFunction = [CAMediaTimingFunction functionWithName:
                 kCAMediaTimingFunctionEaseInEaseOut];
-            self->_splitTrailingConstraint.animator.constant = 0.0;
             self->_inspectorView.animator.alphaValue = 0.0;
         } completionHandler:^{
             if (generation != self->_inspectorAnimationGeneration) return;

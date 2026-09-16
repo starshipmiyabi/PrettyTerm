@@ -182,6 +182,19 @@ test('conversation viewport preserves a character anchor while inspector width r
   assert.match(renderer, /scrollBy\(0, top - anchor\.top\)/);
 });
 
+test('closing a tool workspace removes it before restoring the inspector', () => {
+  const method = source.match(
+    /- \(void\)setToolWorkspaceExpanded:\(BOOL\)expanded animated:\(BOOL\)animated \{[\s\S]*?(?=\n- \([^\n]+\))/
+  )?.[0] || '';
+  const removals = [...method.matchAll(/removeArrangedSubview:/g)].map(match => match.index);
+  const restores = [...method.matchAll(/restoreInspectorAfterToolWorkspaceCollapseIfNeeded:/g)]
+    .map(match => match.index);
+  assert.equal(removals.length, 2);
+  assert.equal(restores.length, 2);
+  assert.ok(removals[0] < restores[0]);
+  assert.ok(removals[1] < restores[1]);
+});
+
 test('Git publishing accepts a commit message as an argument and permits authentication prompts', () => {
   assert.match(source, /placeholderString = PTL\(@"提交信息", @"Commit message"\)/);
   assert.match(source, /message\.length > 0/);

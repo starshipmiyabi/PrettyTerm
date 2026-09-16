@@ -7550,15 +7550,17 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
 }
 
+- (void)restoreInspectorAfterToolWorkspaceCollapseIfNeeded:(BOOL)animated {
+    if (!_restoreInspectorAfterTools) return;
+    _restoreInspectorAfterTools = NO;
+    [self setInspectorExpanded:YES animated:animated];
+}
+
 - (void)setToolWorkspaceExpanded:(BOOL)expanded animated:(BOOL)animated {
     if (!_toolWorkspaceView || !_toolWorkspaceWidthConstraint) return;
     if (expanded && _inspectorExpanded) {
         _restoreInspectorAfterTools = YES;
         [self setInspectorExpanded:NO animated:NO];
-    }
-    if (!expanded && _restoreInspectorAfterTools) {
-        _restoreInspectorAfterTools = NO;
-        [self setInspectorExpanded:YES animated:animated];
     }
     NSUInteger generation = ++_toolWorkspaceAnimationGeneration;
     BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
@@ -7608,6 +7610,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         [_workspaceSplitView removeArrangedSubview:_toolWorkspaceView];
         [_toolWorkspaceView removeFromSuperview];
         [_window.contentView layoutSubtreeIfNeeded];
+        [self restoreInspectorAfterToolWorkspaceCollapseIfNeeded:animated];
         return;
     }
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
@@ -7625,6 +7628,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         self->_toolWorkspaceView.alphaValue = 1.0;
         [self->_workspaceSplitView removeArrangedSubview:self->_toolWorkspaceView];
         [self->_toolWorkspaceView removeFromSuperview];
+        [self->_window.contentView layoutSubtreeIfNeeded];
+        [self restoreInspectorAfterToolWorkspaceCollapseIfNeeded:animated];
     }];
 }
 

@@ -1,10 +1,10 @@
-# PrettyTerm Beta 0.9.8 (Build 29)
+# PrettyTerm Beta 0.9.8 (Build 37)
 
 PrettyTerm Beta 0.9.8 brings the new home and multi-conversation workflow, large Review and Files workspaces, complete transcript rendering improvements, direct file preview, refreshed app identity, and the accumulated composer, inspector, Terminal, and interaction work from this development cycle.
 
 ## Download
 
-Download `PrettyTerm-Beta-0.9.8-build29-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
+Download `PrettyTerm-Beta-0.9.8-build37-macOS.dmg`, open it, and drag PrettyTerm to the Applications shortcut. `SHA256SUMS.txt` is provided for integrity verification.
 
 ## Composer and Attachments
 
@@ -55,12 +55,14 @@ Download `PrettyTerm-Beta-0.9.8-build29-macOS.dmg`, open it, and drag PrettyTerm
 
 - Preserves drafts and attachments while switching between Simplified Chinese and English.
 - Clears both composers only after a successful send and keeps the main and floating attachment states independent.
+- Keeps one or more pasted images in Claude's input buffer until the accompanying text is submitted as the same turn.
+- Fully removes the Files workspace before restoring the inspector, preventing competing width constraints from expanding the main interface.
 - Uses the WebView session identity to match incremental transcript appends to the loaded conversation.
 - Adds a Remote button that sends `/remote-control` through the selected Terminal session.
 
 ## Package
 
-Build 29 is distributed as a versioned macOS DMG with a matching SHA-256 checksum file.
+Build 37 is distributed as a versioned macOS DMG with a matching SHA-256 checksum file.
 
 ---
 

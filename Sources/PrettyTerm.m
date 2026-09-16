@@ -77,6 +77,91 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 @implementation PTWorkspaceRootView
 @end
 
+@interface PTInspectorOverlayView : NSView
+@property(nonatomic) BOOL floating;
+@property(nonatomic, copy) void (^floatingFrameChanged)(NSRect frame);
+- (void)constrainFloatingFrame;
+@end
+
+@implementation PTInspectorOverlayView
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    (void)event;
+    return YES;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    if (!self.floating) return [super hitTest:point];
+    NSPoint local = point;
+    BOOL resizeEdge = local.x <= 9.0 || local.x >= NSWidth(self.bounds) - 9.0;
+    BOOL dragHeader = local.y >= NSHeight(self.bounds) - 58.0 &&
+        local.x < NSWidth(self.bounds) - 96.0;
+    return resizeEdge || dragHeader ? self : [super hitTest:point];
+}
+
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    if (!self.floating) return;
+    [self addCursorRect:NSMakeRect(0, 0, 9, NSHeight(self.bounds))
+                 cursor:NSCursor.resizeLeftRightCursor];
+    [self addCursorRect:NSMakeRect(NSWidth(self.bounds) - 9, 0, 9, NSHeight(self.bounds))
+                 cursor:NSCursor.resizeLeftRightCursor];
+}
+
+- (void)constrainFloatingFrame {
+    if (!self.floating || !self.superview) return;
+    NSRect available = self.superview.bounds;
+    CGFloat margin = 12.0;
+    CGFloat workspaceTop = NSMaxY(available) - 64.0 - margin;
+    CGFloat maximumHeight = MAX(320.0, workspaceTop - NSMinY(available) - margin);
+    NSRect frame = self.frame;
+    frame.size.width = MIN(520.0, MAX(300.0,
+        MIN(frame.size.width, NSWidth(available) - margin * 2.0)));
+    frame.size.height = MIN(frame.size.height, maximumHeight);
+    frame.origin.x = MIN(MAX(NSMinX(available) + margin, frame.origin.x),
+        NSMaxX(available) - margin - frame.size.width);
+    frame.origin.y = MIN(MAX(NSMinY(available) + margin, frame.origin.y),
+        workspaceTop - frame.size.height);
+    self.frame = NSIntegralRect(frame);
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    if (!self.floating || !self.superview) {
+        [super mouseDown:event];
+        return;
+    }
+    NSPoint local = [self convertPoint:event.locationInWindow fromView:nil];
+    BOOL resizeLeft = local.x <= 9.0;
+    BOOL resizeRight = local.x >= NSWidth(self.bounds) - 9.0;
+    BOOL moving = !resizeLeft && !resizeRight;
+    NSRect startingFrame = self.frame;
+    NSPoint startingPoint = [self.superview convertPoint:event.locationInWindow fromView:nil];
+    while (YES) {
+        NSEvent *next = [self.window nextEventMatchingMask:
+            NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp];
+        if (next.type == NSEventTypeLeftMouseUp) break;
+        NSPoint currentPoint = [self.superview convertPoint:next.locationInWindow fromView:nil];
+        CGFloat dx = currentPoint.x - startingPoint.x;
+        CGFloat dy = currentPoint.y - startingPoint.y;
+        NSRect frame = startingFrame;
+        if (moving) {
+            frame.origin.x += dx;
+            frame.origin.y += dy;
+        } else if (resizeLeft) {
+            CGFloat right = NSMaxX(startingFrame);
+            frame.origin.x += dx;
+            frame.size.width = right - frame.origin.x;
+        } else {
+            frame.size.width += dx;
+        }
+        self.frame = frame;
+        [self constrainFloatingFrame];
+        if (self.floatingFrameChanged) self.floatingFrameChanged(self.frame);
+    }
+}
+
+@end
+
 @implementation PTWorkspaceSplitView
 - (void)setTrackedPosition:(CGFloat)position ofDividerAtIndex:(NSInteger)index {
     BOOL previous = self.changingDivider;
@@ -3147,7 +3232,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     BOOL _inspectorFloating;
     BOOL _updatingInspectorPresentation;
     NSView *_workspaceRootView;
-    NSArray<NSLayoutConstraint *> *_inspectorOverlayConstraints;
+    NSRect _inspectorFloatingFrame;
+    BOOL _hasInspectorFloatingFrame;
     NSLayoutConstraint *_sidebarWidthConstraint;
     NSLayoutConstraint *_inspectorWidthConstraint;
     CGFloat _inspectorWidthBeforeCollapse;
@@ -3328,7 +3414,6 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingPanel = nil;
     _floatingConversationView = nil;
     _floatingWebReady = NO;
-    _inspectorOverlayConstraints = nil;
     _workspaceRootView = nil;
     _inspectorFloating = NO;
     [previousWindow orderOut:nil];
@@ -3657,14 +3742,12 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)applyAdaptiveInspectorWidth {
-    if (!_inspectorWidthConstraint) return;
     if (_inspectorFloating) {
-        CGFloat available = NSWidth(_window.contentView.bounds);
-        CGFloat preferred = MIN(420.0, MAX(280.0, _inspectorWidthBeforeCollapse));
-        _inspectorWidthConstraint.constant = MIN(preferred, MAX(260.0, available - 28.0));
-    } else {
-        _inspectorWidthConstraint.constant = [self adaptiveInspectorWidth];
+        [(PTInspectorOverlayView *)_inspectorView constrainFloatingFrame];
+        _inspectorFloatingFrame = _inspectorView.frame;
+        return;
     }
+    if (_inspectorWidthConstraint) _inspectorWidthConstraint.constant = [self adaptiveInspectorWidth];
 }
 
 - (BOOL)shouldFloatInspector {
@@ -3680,22 +3763,37 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     CGFloat dockedWidth = NSWidth(_inspectorView.frame);
     if (dockedWidth > 0.0) _inspectorWidthBeforeCollapse = dockedWidth;
     _inspectorWidthConstraint.active = NO;
+    _inspectorWidthConstraint = nil;
     [_splitView removeArrangedSubview:_inspectorView];
     [_inspectorView removeFromSuperview];
-    _inspectorView.translatesAutoresizingMaskIntoConstraints = NO;
+    _inspectorView.translatesAutoresizingMaskIntoConstraints = YES;
     [_workspaceRootView addSubview:_inspectorView positioned:NSWindowAbove relativeTo:_splitView];
-    _inspectorWidthConstraint = [_inspectorView.widthAnchor constraintEqualToConstant:340.0];
-    _inspectorWidthConstraint.priority = 999;
-    _inspectorOverlayConstraints = @[
-        [_inspectorView.topAnchor constraintEqualToAnchor:_workspaceRootView.topAnchor constant:64.0],
-        [_inspectorView.trailingAnchor constraintEqualToAnchor:_workspaceRootView.trailingAnchor],
-        [_inspectorView.bottomAnchor constraintEqualToAnchor:_workspaceRootView.bottomAnchor]
-    ];
-    [NSLayoutConstraint activateConstraints:_inspectorOverlayConstraints];
-    _inspectorWidthConstraint.active = YES;
+    NSRect available = _workspaceRootView.bounds;
+    CGFloat workspaceHeight = MAX(320.0, NSHeight(available) - 88.0);
+    CGFloat width = MIN(420.0, MAX(320.0, _inspectorWidthBeforeCollapse));
+    CGFloat height = MIN(640.0, MAX(360.0, workspaceHeight * 0.78));
+    NSRect frame = _hasInspectorFloatingFrame ? _inspectorFloatingFrame : NSMakeRect(
+        NSMaxX(available) - width - 12.0,
+        NSMaxY(available) - 64.0 - 12.0 - height,
+        width,
+        height
+    );
+    _inspectorView.frame = frame;
     _inspectorFloating = YES;
+    PTInspectorOverlayView *overlay = (PTInspectorOverlayView *)_inspectorView;
+    overlay.floating = YES;
+    __weak typeof(self) weakSelf = self;
+    overlay.floatingFrameChanged = ^(NSRect changedFrame) {
+        PTAppDelegate *self = weakSelf;
+        if (!self) return;
+        self->_inspectorFloatingFrame = changedFrame;
+        self->_hasInspectorFloatingFrame = YES;
+        self->_inspectorWidthBeforeCollapse = NSWidth(changedFrame);
+    };
+    [overlay constrainFloatingFrame];
+    _inspectorFloatingFrame = overlay.frame;
+    _hasInspectorFloatingFrame = YES;
     _inspectorView.hidden = !_inspectorExpanded;
-    [self applyAdaptiveInspectorWidth];
     [_window.contentView layoutSubtreeIfNeeded];
 }
 
@@ -3703,9 +3801,11 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     if (!_inspectorFloating || !_inspectorView) return;
     CGFloat floatingWidth = NSWidth(_inspectorView.frame);
     if (floatingWidth > 0.0) _inspectorWidthBeforeCollapse = floatingWidth;
-    _inspectorWidthConstraint.active = NO;
-    [NSLayoutConstraint deactivateConstraints:_inspectorOverlayConstraints ?: @[]];
-    _inspectorOverlayConstraints = nil;
+    _inspectorFloatingFrame = _inspectorView.frame;
+    _hasInspectorFloatingFrame = YES;
+    PTInspectorOverlayView *overlay = (PTInspectorOverlayView *)_inspectorView;
+    overlay.floating = NO;
+    overlay.floatingFrameChanged = nil;
     [_inspectorView removeFromSuperview];
     _inspectorView.translatesAutoresizingMaskIntoConstraints = NO;
     [_splitView addArrangedSubview:_inspectorView];
@@ -3724,7 +3824,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _updatingInspectorPresentation = YES;
     if ([self shouldFloatInspector]) [self floatInspector];
     else [self dockInspector];
-    if (!_inspectorFloating) [self applyAdaptiveInspectorWidth];
+    [self applyAdaptiveInspectorWidth];
     _updatingInspectorPresentation = NO;
 }
 
@@ -3939,7 +4039,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (NSView *)buildInspector {
-    NSView *shell = [[NSView alloc] initWithFrame:NSZeroRect];
+    PTInspectorOverlayView *shell = [[PTInspectorOverlayView alloc] initWithFrame:NSZeroRect];
     shell.translatesAutoresizingMaskIntoConstraints = NO;
     shell.wantsLayer = YES;
     shell.layer.backgroundColor = NSColor.clearColor.CGColor;
@@ -3960,12 +4060,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [inspector.leadingAnchor constraintEqualToAnchor:shell.leadingAnchor constant:10],
         [inspector.heightAnchor constraintLessThanOrEqualToAnchor:shell.heightAnchor constant:-32]
     ]];
-    NSLayoutConstraint *cardTrailing = [inspector.trailingAnchor constraintEqualToAnchor:shell.trailingAnchor constant:-16];
-    cardTrailing.priority = NSLayoutPriorityDefaultHigh;
-    cardTrailing.active = YES;
-    NSLayoutConstraint *cardBottom = [inspector.bottomAnchor constraintEqualToAnchor:shell.bottomAnchor constant:-18];
-    cardBottom.priority = NSLayoutPriorityDefaultHigh;
-    cardBottom.active = YES;
+    [inspector.trailingAnchor constraintEqualToAnchor:shell.trailingAnchor constant:-16].active = YES;
+    [inspector.bottomAnchor constraintEqualToAnchor:shell.bottomAnchor constant:-18].active = YES;
     [inspector setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                         forOrientation:NSLayoutConstraintOrientationHorizontal];
     _inspectorView = shell;

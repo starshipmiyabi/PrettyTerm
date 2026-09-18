@@ -115,8 +115,7 @@ NSString *PTMessageForClaudeAttachments(NSString *message, NSUInteger imageCount
     NSString *trimmed = [[message ?: @"" stringByTrimmingCharactersInSet:
         NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
     if (trimmed.length || imageCount == 0) return trimmed;
-    // Claude Code 已经通过 Ctrl+V 在输入缓冲区建立原生 [Image #N] 附件；
-    // 图片-only 回合仍需一个字符让现有 Terminal 提交路径执行 Return。
+    // 图片-only 回合也进入统一的附件发送流程。
     return @" ";
 }
 
@@ -179,6 +178,15 @@ NSString *PTTerminalSubmissionPayload(NSString *message) {
         escape, normalized, escape];
 }
 
+NSString *PTTerminalImageSubmissionPayload(NSString *message, NSArray<NSString *> *imagePaths) {
+    NSMutableArray<NSString *> *parts = [imagePaths mutableCopy];
+    NSString *body = PTNormalizedTerminalPasteText(message);
+    if (body.length) [parts addObject:body];
+    NSString *escape = [NSString stringWithFormat:@"%C", (unichar)0x1B];
+    return [NSString stringWithFormat:@"%@[200~%@%@[201~",
+        escape, [parts componentsJoinedByString:@"\n"], escape];
+}
+
 NSInteger PTLatestTerminalPasteMarker(NSString *contents) {
     if (contents.length == 0) return -1;
     static NSRegularExpression *pattern;
@@ -201,15 +209,17 @@ NSInteger PTLatestTerminalPasteMarker(NSString *contents) {
     return latest;
 }
 
-NSUInteger PTTerminalImageMarkerCount(NSString *contents) {
+NSInteger PTLatestTerminalImageMarker(NSString *contents) {
+    if (contents.length == 0) return -1;
     static NSRegularExpression *pattern;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         pattern = [NSRegularExpression regularExpressionWithPattern:
-            @"\\[Image #[0-9]+\\]" options:0 error:nil];
+            @"\\[Image #([0-9]+)\\]" options:0 error:nil];
     });
-    return [pattern numberOfMatchesInString:contents ?: @"" options:0
-        range:NSMakeRange(0, contents.length)];
+    NSTextCheckingResult *latest = [pattern matchesInString:contents options:0
+        range:NSMakeRange(0, contents.length)].lastObject;
+    return latest ? [[contents substringWithRange:[latest rangeAtIndex:1]] integerValue] : -1;
 }
 
 static NSString *PTAppleScriptEmbeddedText(NSString *value) {
@@ -243,23 +253,6 @@ NSString *PTTerminalAutomationScript(
             // Terminal 会自动在每次 do script 后附加一个 CR。传入空字符串正好
             // 只产生这一个提交回车；显式传入 CR 会变成两个连续回车。
             writeCommand = @"do script \"\" in theTab";
-            break;
-        case PTTerminalAutomationActionPasteImage:
-            // Terminal 会给 do script 自动追加 CR；若用它发送 Ctrl-V，图片会在
-            // 正文写入前被立即提交成独立回合。改为真实按键事件，只把图片放进
-            // Claude 当前输入缓冲区，最终由统一的正文提交动作发送整条消息。
-            writeCommand =
-                @"set selected tab of theWindow to theTab\n"
-                 "set index of theWindow to 1\n"
-                 "activate\n"
-                 "tell application \"System Events\"\n"
-                 "repeat 100 times\n"
-                 "if frontmost of process \"Terminal\" then exit repeat\n"
-                 "delay 0.01\n"
-                 "end repeat\n"
-                 "if frontmost of process \"Terminal\" is false then error \"Terminal did not become active\"\n"
-                 "end tell\n"
-                 "tell application \"System Events\" to key code 9 using control down";
             break;
         case PTTerminalAutomationActionInterruptEscape:
             writeCommand =
@@ -479,6 +472,7 @@ NSDictionary *PTEventFromToolResultBlock(
     BOOL isError = [block[@"is_error"] boolValue];
     return @{
         @"messageKey": messageKey ?: @"",
+        @"toolUseId": block[@"tool_use_id"] ?: @"",
         @"kind": isError ? @"error" : @"tool",
         @"toolName": isError ? @"工具执行失败" : @"工具结果",
         @"text": PTInspectableText(block[@"content"]),

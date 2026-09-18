@@ -53,6 +53,29 @@
       margin: 0 auto;
     }
 
+    .jump-to-bottom {
+      position: fixed;
+      z-index: 20;
+      left: 50%;
+      bottom: 16px;
+      transform: translateX(-50%);
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--ink);
+      background: var(--paper);
+      box-shadow: 0 2px 8px #0000000a;
+      cursor: pointer;
+    }
+    .jump-to-bottom[hidden], body.file-preview-mode .jump-to-bottom { display: none; }
+    .jump-to-bottom:hover { background: var(--soft); }
+    .jump-to-bottom:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+    .jump-to-bottom svg { display: block; width: 20px; height: 20px; }
+
     body.file-preview-mode {
       padding: 0;
       background: var(--paper);
@@ -150,6 +173,22 @@
       background: var(--blue-soft);
     }
     .turn-prompt p { margin: 0; }
+    .message-images { display: flex; flex-wrap: wrap; gap: 10px; }
+    .message-images + .user-message-text { margin-top: 12px; }
+    .message-image {
+      display: block;
+      flex: 0 1 260px;
+      max-width: 100%;
+      min-width: 0;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--paper);
+      cursor: zoom-in;
+    }
+    .message-image img { display: block; width: 100%; height: 200px; object-fit: contain; border-radius: 5px; }
+    .message-image[aria-expanded="true"] { flex-basis: 100%; cursor: zoom-out; }
+    .message-image[aria-expanded="true"] img { height: auto; }
     .turn-events { padding-left: 2px; }
 
     .assistant-output { margin: 0; }
@@ -926,6 +965,9 @@
 </head>
 <body>
   <main id="content"><div class="empty" data-i18n="loading">正在读取 Claude 的会话事件…</div></main>
+  <button id="jump-to-bottom" class="jump-to-bottom" type="button" hidden aria-label="回到底部" title="回到底部">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M5 13l7 7 7-7"/></svg>
+  </button>
   <script src="app.js"></script>
 </body>
 </html>

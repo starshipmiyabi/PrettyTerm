@@ -63,13 +63,13 @@ FOUNDATION_EXPORT NSString *PTMessageByAppendingClaudeAttachMarkers(
 // Return 由 Bridge 分阶段投递。
 FOUNDATION_EXPORT NSString *PTNormalizedTerminalPasteText(NSString *message);
 FOUNDATION_EXPORT NSString *PTTerminalSubmissionPayload(NSString *message);
+FOUNDATION_EXPORT NSString *PTTerminalImageSubmissionPayload(NSString *message, NSArray<NSString *> *imagePaths);
 FOUNDATION_EXPORT NSInteger PTLatestTerminalPasteMarker(NSString *contents);
-FOUNDATION_EXPORT NSUInteger PTTerminalImageMarkerCount(NSString *contents);
+FOUNDATION_EXPORT NSInteger PTLatestTerminalImageMarker(NSString *contents);
 
 typedef NS_ENUM(NSInteger, PTTerminalAutomationAction) {
     PTTerminalAutomationActionWriteText,
     PTTerminalAutomationActionSubmitReturn,
-    PTTerminalAutomationActionPasteImage,
     PTTerminalAutomationActionInterruptEscape,
 };
 

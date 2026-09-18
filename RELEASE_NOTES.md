@@ -1,3 +1,43 @@
+# PrettyTerm Beta 0.9.9 (Build 1)
+
+This release moves conversation input and live output to a managed background Claude Code session. Text, images, commands, usage information, model selection, and interruption are available in PrettyTerm without keeping Terminal open.
+
+## Download and Update
+
+Download `PrettyTerm-Beta-0.9.9-build1-macOS.dmg`, open it, and drag PrettyTerm Beta to Applications. Replace the existing application, then quit and reopen it. `SHA256SUMS.txt` accompanies the disk image.
+
+Requires macOS 13 or later and an installed, signed-in Claude Code executable with streaming JSON and session-control support. This integration was developed against Claude Code 2.1.275. The beta uses ad-hoc signing and is not notarized.
+
+## Background Sessions and Image Input
+
+- Runs the installed Claude Code executable over streaming JSON and resumes existing conversation IDs. Connecting an existing interactive conversation transfers that session to the managed background process.
+- Sends one or multiple images and the accompanying text in one structured user message, without clipboard transfer, Terminal activation, or a simulated Return.
+- Displays sent images in conversation history as expandable thumbnails, including image-only messages.
+- Streams text, thinking, and tool inputs into both conversation views, then merges completed output into transcript history.
+- Keeps requests, authentication, tools, and prompt-cache handling in Claude Code.
+
+## Commands, Models, and Usage
+
+- Adds a rounded in-window slash-command palette with icons, descriptions, live text matching, and keyboard selection. Selecting a command inserts it into the composer.
+- Loads available built-ins, project commands, skills, and plugin commands from the active Claude Code process and refreshes them when the process reports changes.
+- Connects model, effort, and permission-mode controls to the background session, including Plan, Auto, Bypass, Default, and Accept edits.
+- Runs Compact on the current session and displays Claude's compaction status, completion or error, and available token counts.
+- Refreshes subscription usage through Claude Code's structured usage control and live rate-limit events while Terminal is closed.
+- Keeps synthetic configuration acknowledgements out of conversation history and presents command output separately.
+
+## Conversation Controls and Question Cards
+
+- Keeps Stop visible and available throughout Claude's work, including tool activity, and interrupts through the session protocol.
+- Returns inline question answers to the matching active tool request and updates the original question card with its answer.
+- Merges matching live question results into history instead of leaving duplicate tool-result cards at the bottom.
+- Adds a circular down-arrow button when reading earlier messages; clicking it returns to the latest content and resumes bottom-following.
+
+## Build
+
+The application was compiled for this release. No test suite or interactive runtime tests were run during this publication.
+
+---
+
 # PrettyTerm Beta 0.9.8 (Build 38)
 
 PrettyTerm Beta 0.9.8 brings the new home and multi-conversation workflow, large Review and Files workspaces, complete transcript rendering improvements, direct file preview, refreshed app identity, and the accumulated composer, inspector, Terminal, and interaction work from this development cycle.

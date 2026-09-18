@@ -230,19 +230,21 @@ test('file attachments use non-interactive attach markers in both composers', ()
   assert.doesNotMatch(floatingSend, /PTMessageByAppendingClaudeFileReferences/);
 });
 
-test('dragged and selected images preserve PNG pixels until Claude completes each clipboard read', () => {
+test('images and text use one native paste batch without clipboard or window focus changes', () => {
   assert.match(source, /PTPNGDataForImageFileURL/);
   assert.match(source, /if \(isPNG\) return source/);
   assert.match(source, /@"pngData": pngData/);
-  assert.match(source, /PTWritePNGDataToPasteboard/);
-  assert.match(source, /BOOL sent = attached && \[self sendMessage:message\]/);
   const imageSend = source.match(
     /- \(BOOL\)sendMessage:\(NSString \*\)message withImagePNGs:\(NSArray<NSData \*> \*\)imagePNGs \{[\s\S]*?(?=\n- \([^\n]+\))/
   )?.[0] || '';
-  assert.match(imageSend, /PTRestorePasteboard[\s\S]*return sent/);
-  assert.doesNotMatch(imageSend, /PTRestorePasteboard[\s\S]*if \(!attached\)[\s\S]*sendMessage/);
+  assert.match(imageSend, /PTTerminalImageSubmissionPayload\(message, imagePaths\)/);
+  assert.match(imageSend, /\[self sendToTerminal:payload\]/);
+  assert.match(imageSend, /BOOL sent = \[self sendReturnToTerminal\]/);
+  assert.doesNotMatch(imageSend, /NSPasteboard|CGEvent|activateIgnoringOtherApps/);
   assert.match(imageSend, /PTRunLoopUntil\(5\.0/);
-  assert.match(imageSend, /PTTerminalImageMarkerCount.*> markerBefore/);
+  assert.match(imageSend, /PTCompletedClaudeImageCacheChanges\(imageCache, cacheBefore\)/);
+  assert.match(imageSend, /completedImages >= imagePNGs\.count/);
+  assert.doesNotMatch(imageSend, /boundTerminalContents|PTLatestTerminalImageMarker/);
 });
 
 test('composer options drive real Claude model and effort commands', () => {

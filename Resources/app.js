@@ -8,6 +8,7 @@
     scope.__ptSessionMatches = api.sessionMatches;
     scope.setPrettyTermLanguage = api.setPrettyTermLanguage;
     scope.setClaudeWaiting = api.setClaudeWaiting;
+    scope.setClaudeStream = api.setClaudeStream;
   }
 })(typeof window !== 'undefined' ? window : globalThis, function (scope) {
   'use strict';
@@ -24,7 +25,9 @@
     viewportResizePending: false,
     typesetQueue: Promise.resolve(),
     renderedTurns: [],
-    waiting: false
+    waiting: false,
+    stream: null,
+    streamFrame: 0
   };
   const editStats = new WeakMap();
   const virtualBodies = new Map();
@@ -104,11 +107,14 @@
     'zh-Hans': {
       quote: '引用选中内容', expandInput: '展开输入', lines: '行', codeChange: '代码改动',
       copyOutput: '复制',
+      jumpToBottom: '回到底部',
+      attachedImage: '图片 {count} · 点击展开或收起',
       showMoreFiles: '再显示 {count} 个文件', editedFiles: '已编辑 {count} 个文件',
       review: '审阅', thinking: '思考过程', tool: '工具调用',
       toolActivity: '工具调用情况', toolCount: '{count} 次', error: '错误',
       empty: '这个会话还没有可显示的事件。', loading: '正在读取 Claude 的会话事件…',
-      waitingTitle: 'Claude 正在组织思路', waitingDetail: 'Terminal 信号已送达，回复会在这里出现',
+      waitingTitle: 'Claude 正在组织思路', waitingDetail: '消息已提交，回复会在这里出现',
+      compactingTitle: 'Claude 正在压缩上下文', compactingDetail: '正在整理会话历史，完成后显示压缩结果',
       askUserTitle: 'Claude 有个问题', askUserCustomPlaceholder: '没有符合的选项？在这里说明',
       askUserSubmit: '提交回答', askUserSent: '已发送', askUserAnswered: '已作答',
       askUserSingle: '单选', askUserMultiple: '可多选', askUserCustom: '补充说明'
@@ -116,11 +122,14 @@
     en: {
       quote: 'Quote selection', expandInput: 'Expand input', lines: 'lines', codeChange: 'Code change',
       copyOutput: 'Copy',
+      jumpToBottom: 'Jump to bottom',
+      attachedImage: 'Image {count} · Click to expand or collapse',
       showMoreFiles: 'Show {count} more files', editedFiles: 'Edited {count} files',
       review: 'Review', thinking: 'Thinking', tool: 'Tool call',
       toolActivity: 'Tool activity', toolCount: '{count} calls', error: 'Error',
       empty: 'This conversation has no events to display yet.', loading: 'Reading Claude conversation events…',
-      waitingTitle: 'Claude is working through it', waitingDetail: 'Terminal signal delivered; the response will appear here',
+      waitingTitle: 'Claude is working through it', waitingDetail: 'Message submitted; the response will appear here',
+      compactingTitle: 'Claude is compacting context', compactingDetail: 'Summarizing conversation history; results follow when complete',
       askUserTitle: 'Claude has a question', askUserCustomPlaceholder: 'None of these fit? Say what you want here',
       askUserSubmit: 'Submit answers', askUserSent: 'Sent', askUserAnswered: 'Answered',
       askUserSingle: 'Choose one', askUserMultiple: 'Choose any', askUserCustom: 'Add a note'
@@ -620,7 +629,7 @@
   function renderQuestionCard(message) {
     const messageKey = escapeHTML(message.messageKey || '');
     if (message.answered) {
-      return `<section class="question-card answered"${messageKey ? ` data-message-key="${messageKey}"` : ''}><header class="question-card-header"><span class="question-spark" aria-hidden="true">✓</span><span class="question-card-title">${escapeHTML(t('askUserAnswered'))}</span></header><div class="question-answer-text">${renderMarkdown(message.answerText || '')}</div></section>`;
+      return `<section class="question-card answered" data-tool-use-id="${escapeHTML(message.toolUseId || '')}"${messageKey ? ` data-message-key="${messageKey}"` : ''}><header class="question-card-header"><span class="question-spark" aria-hidden="true">✓</span><span class="question-card-title">${escapeHTML(t('askUserAnswered'))}</span></header><div class="question-answer-text">${renderMarkdown(message.answerText || '')}</div></section>`;
     }
     const toolUseId = escapeHTML(message.toolUseId || '');
     const questions = Array.isArray(message.questions) ? message.questions : [];
@@ -669,13 +678,14 @@
       const card = submit.closest('.question-card');
       if (!card || card.classList.contains('submitted')) return;
       const lines = [];
+      const answers = {};
       card.querySelectorAll('.question-block').forEach(block => {
         const questionText = block.dataset.questionText || '';
         const custom = block.querySelector('.question-custom-input');
         const customValue = custom ? custom.value.trim() : '';
         const answer = customValue || Array.from(block.querySelectorAll('.question-option.selected'))
           .map(node => node.dataset.label || '').join('、');
-        if (answer) lines.push(`${questionText}：${answer}`);
+        if (answer) { lines.push(`${questionText}：${answer}`); answers[questionText] = answer; }
       });
       if (!lines.length) {
         card.classList.remove('needs-answer');
@@ -686,7 +696,7 @@
       const bridge = scope.webkit && scope.webkit.messageHandlers && scope.webkit.messageHandlers.answerQuestion;
       if (bridge && typeof bridge.postMessage === 'function') {
         const sessionId = String(state.session && (state.session.sessionId || state.session.id) || '');
-        bridge.postMessage({ toolUseId: card.dataset.toolUseId || '', text: lines.join('\n'), sessionId });
+        bridge.postMessage({ toolUseId: card.dataset.toolUseId || '', answers, text: lines.join('\n'), sessionId });
       }
       card.classList.add('submitted');
       submit.disabled = true;
@@ -818,6 +828,19 @@
     });
   }
 
+  function installMessageImageBridge() {
+    if (!scope || !scope.document) return;
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      const button = target && typeof target.closest === 'function'
+        ? target.closest('.message-image') : null;
+      if (!button) return;
+      const expanded = button.getAttribute('aria-expanded') !== 'true';
+      button.setAttribute('aria-expanded', String(expanded));
+      captureViewportAnchor();
+    });
+  }
+
   function renderEvent(message, session) {
     message = message || {};
     const kind = eventKind(message);
@@ -838,6 +861,16 @@
       return `<details class="event error-event" open${anchorAttribute}><summary><span class="event-icon">!</span>${escapeHTML(name)}</summary>${contentBody('event-body', text, () => renderMarkdown(text))}</details>`;
     }
     if (kind === 'user') {
+      const images = Array.isArray(message.images) ? message.images : [];
+      if (images.length) {
+        const pictures = images.map((src, index) => {
+          const label = escapeHTML(t('attachedImage', { count: index + 1 }));
+          return `<button type="button" class="message-image" aria-expanded="false" aria-label="${label}" title="${label}"><img src="${escapeHTML(src)}" alt="${label}" loading="lazy" decoding="async"></button>`;
+        }).join('');
+        const body = text ? contentBody('user-message-text', text,
+          () => longContent(renderMarkdown(text), text)) : '';
+        return `<div class="turn-prompt"${anchorAttribute}><div class="message-images">${pictures}</div>${body}</div>`;
+      }
       if (liveRendering) {
         const lineCount = text.split('\n').length;
         if (lineCount > 20) return `<div class="turn-prompt"${anchorAttribute}><details class="long-content"><summary>${escapeHTML(t('expandInput'))} · ${lineCount} ${escapeHTML(t('lines'))}</summary>${contentBody('long-content-body', text, () => renderMarkdown(text))}</details></div>`;
@@ -888,14 +921,15 @@
           </svg>
         </span>
       </div>
-      <div class="waiting-copy"><strong>${escapeHTML(t('waitingTitle'))}</strong><span>${escapeHTML(t('waitingDetail'))}</span></div>
+      <div class="waiting-copy"><strong>${escapeHTML(t(state.stream && state.stream.compacting ? 'compactingTitle' : 'waitingTitle'))}</strong><span>${escapeHTML(t(state.stream && state.stream.compacting ? 'compactingDetail' : 'waitingDetail'))}</span></div>
     </div>`;
   }
 
   function syncClaudeWaiting(root) {
     if (!root) return '';
     root.querySelectorAll('.claude-waiting').forEach(node => node.remove());
-    if (!state.waiting) return '';
+    const compacting = state.stream && state.stream.compacting;
+    if (!compacting && (!state.waiting || (state.stream && state.stream.active && state.stream.messages.length))) return '';
     const template = scope.document.createElement('template');
     template.innerHTML = renderClaudeWaiting();
     root.appendChild(template.content);
@@ -952,6 +986,105 @@
 
   function rootElement() {
     return scope && scope.document ? scope.document.getElementById('content') : null;
+  }
+
+  // Only the currently arriving blocks are mutable. Historical turns keep their
+  // DOM, selection, expanded details and viewport position while tokens arrive.
+  function applyQuestionUpdates(updates) {
+    const answers = new Map((updates || []).filter(message => message.answered)
+      .map(message => [message.toolUseId, message]));
+    if (!answers.size) return;
+    for (const message of (state.session && state.session.messages) || []) {
+      const update = message.kind === 'question' && answers.get(message.toolUseId);
+      if (update) Object.assign(message, { answered: true, answerText: update.answerText });
+    }
+    const root = rootElement();
+    if (!root) return;
+    root.querySelectorAll('.question-card').forEach(card => {
+      const update = answers.get(card.dataset.toolUseId);
+      if (!update) return;
+      const signature = JSON.stringify([update.toolUseId, update.answerText]);
+      if (card.dataset.answerSignature === signature) return;
+      const template = scope.document.createElement('template');
+      template.innerHTML = renderQuestionCard(update);
+      const replacement = template.content.firstElementChild;
+      replacement.dataset.answerSignature = signature;
+      card.replaceWith(replacement);
+    });
+  }
+
+  function renderClaudeStream() {
+    const root = rootElement();
+    if (!root) return;
+    let region = root.querySelector(':scope > .claude-stream');
+    if (!state.stream || !sessionMatches(state.stream)) {
+      if (region) region.remove();
+      return;
+    }
+    applyQuestionUpdates(state.stream.questionUpdates);
+    const persisted = new Set((state.session.messages || []).map(message => message.messageKey));
+    const messages = state.stream.messages.filter(message => !persisted.has(message.messageKey));
+    const shouldFollow = nearBottom();
+    captureViewportAnchor();
+    if (!region && messages.length) {
+      region = scope.document.createElement('div');
+      region.className = 'claude-stream';
+    }
+    if (region) {
+      const existing = new Map(Array.from(region.children).map(node => [node.dataset.streamId, node]));
+      const retained = new Set();
+      messages.forEach((message, index) => {
+        const identity = message.streamID || message.messageKey;
+        retained.add(identity);
+        let node = existing.get(identity);
+        if (!node) {
+          node = scope.document.createElement('div');
+          node.dataset.streamId = identity;
+        }
+        const signature = JSON.stringify(message);
+        if (node.__streamSignature !== signature) {
+          const details = Array.from(node.querySelectorAll('details')).map(item => item.open);
+          const mathJax = scope.MathJax;
+          if (mathJax && mathJax.typesetClear) mathJax.typesetClear([node]);
+          node.innerHTML = renderEvent(message, state.session);
+          node.querySelectorAll('details').forEach((item, index) => {
+            if (index < details.length) item.open = details[index];
+          });
+          node.classList.toggle('streaming-block', Boolean(message.streaming));
+          node.__streamSignature = signature;
+          if (!message.streaming) typeset([node]);
+        }
+        if (region.children[index] !== node)
+          region.insertBefore(node, region.children[index] || null);
+      });
+      existing.forEach((node, identity) => { if (!retained.has(identity)) node.remove(); });
+      if (messages.length) {
+        const waiting = root.querySelector(':scope > .claude-waiting');
+        if (region.parentNode !== root || region.nextSibling !== waiting)
+          root.insertBefore(region, waiting);
+      }
+      else region.remove();
+    }
+    syncClaudeWaiting(root);
+    if (shouldFollow) scope.scrollTo(0, scope.document.body.scrollHeight);
+    else restoreViewportAnchor();
+    captureViewportAnchor();
+  }
+
+  function setClaudeStream(snapshot) {
+    if (!sessionMatches(snapshot)) return false;
+    if (state.stream && state.stream.sessionId === snapshot.sessionId &&
+        Number(state.stream.revision) > Number(snapshot.revision)) return false;
+    state.stream = Object.assign({}, snapshot, {
+      messages: Array.isArray(snapshot.messages) ? snapshot.messages : []
+    });
+    if (!state.streamFrame) {
+      state.streamFrame = scope.requestAnimationFrame(() => {
+        state.streamFrame = 0;
+        renderClaudeStream();
+      });
+    }
+    return true;
   }
 
   function nearBottom() {
@@ -1060,6 +1193,35 @@
     return true;
   }
 
+  function installJumpToBottom() {
+    if (!scope || !scope.document) return;
+    const button = scope.document.getElementById('jump-to-bottom');
+    if (!button) return;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      button.hidden = !state.session || nearBottom();
+      button.title = t('jumpToBottom');
+      button.setAttribute('aria-label', t('jumpToBottom'));
+    };
+    const schedule = () => {
+      if (!frame) frame = scope.requestAnimationFrame(update);
+    };
+    button.addEventListener('click', () => {
+      state.viewportAnchor = { followBottom: true };
+      scope.scrollTo({ top: scope.document.body.scrollHeight, behavior: 'auto' });
+      captureViewportAnchor();
+      scheduleVirtualContent();
+      schedule();
+    });
+    scope.addEventListener('scroll', schedule, { passive: true });
+    scope.addEventListener('resize', schedule);
+    const observer = new scope.ResizeObserver(schedule);
+    observer.observe(scope.document.body);
+    observer.observe(rootElement());
+    update();
+  }
+
   function installStableViewport() {
     if (!scope || !scope.document || typeof scope.addEventListener !== 'function') return;
     const scheduleCapture = () => {
@@ -1129,6 +1291,7 @@
 
   async function setClaudeSession(session) {
     const root = rootElement();
+    if (!sessionMatches(session)) state.stream = null;
     state.session = Object.assign({}, session, {
       messages: Array.isArray(session && session.messages) ? session.messages.slice() : []
     });
@@ -1144,6 +1307,7 @@
       virtualBodies.clear();
       state.renderedTurns = messageTurns(snapshot.messages);
       root.innerHTML = renderLive(() => renderSession(snapshot));
+      renderClaudeStream();
       if (shouldFollow) scope.scrollTo(0, scope.document.body.scrollHeight);
     });
     captureViewportAnchor();
@@ -1172,6 +1336,7 @@
     state.renderedCount = state.session.messages.length;
     const root = rootElement();
     if (!root) return renderSession(state.session);
+    applyQuestionUpdates(session.questionUpdates);
     if (!incoming.length) return state.renderedCount;
 
     const snapshot = state.session;
@@ -1224,6 +1389,7 @@
         else appendHTML(events, renderLive(() => renderEvent(message, snapshot)));
       });
       refreshTurnEditSummaries(root, snapshot, dirtyTurns);
+      renderClaudeStream();
       syncClaudeWaiting(root);
       if (shouldFollow) scope.scrollTo(0, scope.document.body.scrollHeight);
     });
@@ -1235,8 +1401,10 @@
   installGitReviewBridge();
   installTranscriptFileBridge();
   installAssistantCopyBridge();
+  installMessageImageBridge();
   installQuestionCardBridge();
   installStableViewport();
+  installJumpToBottom();
   installVirtualContent();
 
   return {
@@ -1255,6 +1423,7 @@
     renderClaudeWaiting,
     setPrettyTermLanguage,
     setClaudeWaiting,
+    setClaudeStream,
     typeset,
     setClaudeSession,
     appendClaudeMessages,

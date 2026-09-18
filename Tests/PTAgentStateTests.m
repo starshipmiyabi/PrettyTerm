@@ -104,7 +104,6 @@ int main(void) {
         PTTerminalAutomationAction automationActions[] = {
             PTTerminalAutomationActionWriteText,
             PTTerminalAutomationActionSubmitReturn,
-            PTTerminalAutomationActionPasteImage,
             PTTerminalAutomationActionInterruptEscape
         };
         for (size_t index = 0; index < sizeof(automationActions) / sizeof(automationActions[0]); index++) {
@@ -118,7 +117,6 @@ int main(void) {
         for (NSNumber *actionValue in @[
             @(PTTerminalAutomationActionWriteText),
             @(PTTerminalAutomationActionSubmitReturn),
-            @(PTTerminalAutomationActionPasteImage),
             @(PTTerminalAutomationActionInterruptEscape),
         ]) {
             PTTerminalAutomationAction action = actionValue.integerValue;
@@ -140,12 +138,18 @@ int main(void) {
         PTAssert(![singleReturnAutomation containsString:@"ASCII character 13"],
             @"an independent submit must not duplicate Return by supplying another CR");
         NSString *imagePasteAutomation = PTTerminalAutomationScript(
-            @"/dev/ttys007", 4321, @"", PTTerminalAutomationActionPasteImage);
-        PTAssert([imagePasteAutomation containsString:
-            @"tell application \"System Events\" to key code 9 using control down"],
-            @"image paste must send Ctrl-V without an implicit Return");
-        PTAssert(![imagePasteAutomation containsString:@"do script (ASCII character 22)"],
-            @"image paste must not use Terminal do-script because it appends Return and submits the image separately");
+            @"/dev/ttys007", 4321,
+            PTTerminalImageSubmissionPayload(@"请比较", @[@"/tmp/one.png", @"/tmp/two.png"]),
+            PTTerminalAutomationActionWriteText);
+        PTAssert([imagePasteAutomation containsString:@"do script"] &&
+            [imagePasteAutomation containsString:@"/tmp/one.png"] &&
+            [imagePasteAutomation containsString:@"/tmp/two.png"] &&
+            [imagePasteAutomation containsString:@"请比较"],
+            @"images and text enter the bound tab together through one native paste frame");
+        PTAssert(![imagePasteAutomation containsString:@"activate"] &&
+            ![imagePasteAutomation containsString:@"set index"] &&
+            ![imagePasteAutomation containsString:@"System Events"],
+            @"image submission must not activate, reorder, or type into Terminal windows");
         NSString *escapeAutomation = PTTerminalAutomationScript(
             @"/dev/ttys007", 4321, @"", PTTerminalAutomationActionInterruptEscape);
         PTAssert([escapeAutomation containsString:@"tell application \"System Events\" to key code 53"],
@@ -159,10 +163,10 @@ int main(void) {
             @"Terminal paste acknowledgement must use the newest visible marker");
         PTAssert(PTLatestTerminalPasteMarker(@"ordinary terminal contents") == -1,
             @"ordinary Terminal contents must not look like a paste acknowledgement");
-        PTAssert(PTTerminalImageMarkerCount(@"❯ [Image #1] [Image #2] 请比较") == 2,
-            @"image clipboard completion must count loaded native attachments");
-        PTAssert(PTTerminalImageMarkerCount(@"Pasting…") == 0,
-            @"asynchronous clipboard reads must not count as completed image attachments");
+        PTAssert(PTLatestTerminalImageMarker(@"❯ [Image #1] [Image #10] 请比较") == 10,
+            @"image clipboard completion follows the newest attachment number, not visible count");
+        PTAssert(PTLatestTerminalImageMarker(@"Pasting…") == -1,
+            @"asynchronous clipboard reads must not look like completed image attachments");
         PTAssert(PTComposerActionForKey(36, NO, NO, NO) == PTComposerKeyActionSubmit,
             @"Return should submit the composer");
         PTAssert(PTComposerActionForKey(76, NO, NO, NO) == PTComposerKeyActionSubmit,

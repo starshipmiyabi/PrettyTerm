@@ -2,6 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <errno.h>
 #import <signal.h>
 #import <string.h>
 #import "PTAgentState.h"
@@ -9,8 +10,6 @@
 #import "PTGitReview.h"
 #import "PTLocalization.h"
 #import "PTUsageMetrics.h"
-
-static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments);
 
 static NSColor *PTColor(CGFloat red, CGFloat green, CGFloat blue) {
     return [NSColor colorWithSRGBRed:red green:green blue:blue alpha:1.0];
@@ -1101,6 +1100,30 @@ static NSString *PTTextFromMessageContent(id content) {
     return [parts componentsJoinedByString:@"\n"];
 }
 
+static NSArray<NSString *> *PTImagesFromMessageContent(id content) {
+    if (![content isKindOfClass:NSArray.class]) return @[];
+    NSMutableArray<NSString *> *images = [NSMutableArray array];
+    for (NSDictionary *block in content) {
+        if (![block isKindOfClass:NSDictionary.class] || ![block[@"type"] isEqual:@"image"]) continue;
+        NSDictionary *source = block[@"source"];
+        if (![source isKindOfClass:NSDictionary.class]) continue;
+        if ([source[@"type"] isEqual:@"base64"] && [source[@"data"] isKindOfClass:NSString.class]) {
+            [images addObject:[NSString stringWithFormat:@"data:%@;base64,%@",
+                source[@"media_type"], source[@"data"]]];
+        } else if ([source[@"type"] isEqual:@"url"] && [source[@"url"] isKindOfClass:NSString.class]) {
+            [images addObject:source[@"url"]];
+        }
+    }
+    return images;
+}
+
+static NSArray<NSDictionary *> *PTQuestionUpdates(NSArray<NSDictionary *> *messages) {
+    NSMutableArray *updates = [NSMutableArray array];
+    for (NSDictionary *message in messages)
+        if ([message[@"kind"] isEqual:@"question"] && [message[@"answered"] boolValue]) [updates addObject:message];
+    return updates;
+}
+
 static NSString *PTAddedWorkingDirectoryFromText(NSString *text) {
     if (![text isKindOfClass:NSString.class] || text.length == 0) return nil;
     static NSRegularExpression *ansiExpression;
@@ -1493,6 +1516,7 @@ static PTSessionInfo *PTParseSessionData(
                 }
             }
             NSString *text = PTTextFromMessageContent(message[@"content"]);
+            NSArray<NSString *> *images = PTImagesFromMessageContent(message[@"content"]);
             NSDictionary *contextSnapshot = PTContextSnapshotFromText(text);
             if (contextSnapshot) {
                 session.contextUsed = [contextSnapshot[@"used"] unsignedIntegerValue];
@@ -1505,8 +1529,8 @@ static PTSessionInfo *PTParseSessionData(
             if (firstPrompt.length == 0 && text.length > 0 && !isMeta) {
                 firstPrompt = text;
             }
-            // text 为空说明这条 user 记录其实是 tool_result（工具调用结果），不是老师真正打的字，跳过。
-            if (text.length > 0 && !isMeta) {
+            // 图片消息也是完整的用户回合；工具结果没有顶层文字或图片。
+            if ((text.length > 0 || images.count > 0) && !isMeta) {
                 NSString *uuid = object[@"uuid"] ?: message[@"id"] ?: NSUUID.UUID.UUIDString;
                 NSString *key = [NSString stringWithFormat:@"%@:user", uuid];
                 if (![messageKeys containsObject:key]) {
@@ -1514,6 +1538,7 @@ static PTSessionInfo *PTParseSessionData(
                     [messages addObject:@{
                         @"messageKey": key,
                         @"text": text,
+                        @"images": images,
                         @"timestamp": object[@"timestamp"] ?: @"",
                         @"role": @"user"
                     }];
@@ -1943,58 +1968,39 @@ static PTSessionInfo *PTParseSessionAppending(
 @interface PTClaudeBridge : NSObject
 @property(nonatomic, copy) void (^statusChanged)(NSString *status);
 @property(nonatomic, copy) void (^outputObserved)(NSString *chunk);
+@property(nonatomic, copy) dispatch_block_t turnCompleted;
+@property(nonatomic, copy) dispatch_block_t streamChanged;
+@property(nonatomic, copy) void (^usageChanged)(NSDictionary *payload, NSString *error);
+@property(nonatomic, copy) dispatch_block_t modelChanged;
+@property(nonatomic, readonly) NSString *currentModel;
+@property(nonatomic, readonly) NSString *currentEffort;
+@property(nonatomic, readonly) NSString *permissionMode;
+@property(nonatomic, readonly) NSArray<NSDictionary *> *commands;
+@property(nonatomic, readonly) BOOL compacting;
+@property(nonatomic, readonly) NSNumber *contextTokens;
+@property(nonatomic, copy) void (^commandOutputChanged)(NSString *text);
+@property(nonatomic, copy) void (^toolPermissionRequested)(NSString *requestID, NSDictionary *request);
+@property(nonatomic, copy) void (^toolRequestCancelled)(NSString *requestID);
+- (void)answerToolRequest:(NSString *)requestID response:(NSDictionary *)response;
+@property(nonatomic, readonly) NSDictionary *streamPayload;
+@property(nonatomic, readonly) BOOL responding;
 @property(nonatomic, readonly) NSString *sessionID;
 @property(nonatomic, readonly) BOOL running;
 @property(nonatomic, readonly) NSString *lastSendError;
 - (void)connectToSession:(PTSessionInfo *)session;
+- (void)connectToSession:(PTSessionInfo *)session completion:(void (^)(BOOL))completion;
+- (void)refreshUsage;
 - (void)startNewSession:(PTSessionInfo *)session prompt:(NSString *)prompt;
 - (void)startNewSessionInDirectory:(NSString *)directory;
 - (BOOL)sendMessage:(NSString *)message;
 - (BOOL)sendMessage:(NSString *)message withImagePNGs:(NSArray<NSData *> *)imagePNGs;
+- (void)submitMessage:(NSString *)message withImagePNGs:(NSArray<NSData *> *)imagePNGs
+          completion:(void (^)(BOOL))completion;
 - (BOOL)sendEscape;
 - (void)stop;
+- (void)reconcileStreamWithMessages:(NSArray<NSDictionary *> *)messages;
 @end
 
-static NSString *PTRunToolWithEnvironment(NSString *path,
-                                          NSArray<NSString *> *arguments,
-                                          NSDictionary<NSString *, NSString *> *overrides) {
-    NSTask *task = [[NSTask alloc] init];
-    NSPipe *pipe = [NSPipe pipe];
-    task.executableURL = [NSURL fileURLWithPath:path];
-    task.arguments = arguments;
-    if (overrides.count > 0) {
-        NSMutableDictionary<NSString *, NSString *> *environment =
-            [NSProcessInfo.processInfo.environment mutableCopy];
-        [environment addEntriesFromDictionary:overrides];
-        task.environment = environment;
-    }
-    task.standardOutput = pipe;
-    // stderr 丢给 /dev/null：如果还用 NSPipe 但没人读，lsof/ps 一吐 warning
-    // 管道缓冲区（约 64KB）就会写满，readDataToEndOfFile 永久卡死。
-    task.standardError = [NSFileHandle fileHandleWithNullDevice];
-    if (![task launchAndReturnError:nil]) return @"";
-    NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
-    [task waitUntilExit];
-    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
-}
-
-static NSString *PTRunTool(NSString *path, NSArray<NSString *> *arguments) {
-    return PTRunToolWithEnvironment(path, arguments, nil);
-}
-
-static NSString *PTClaudeUsageSnapshotDirectory(void) {
-    return [NSHomeDirectory() stringByAppendingPathComponent:
-        @"Library/Application Support/PrettyTerm/rate-limits"];
-}
-
-static NSString *PTClaudeUsageSnapshotPath(NSString *sessionID) {
-    if (![sessionID isKindOfClass:NSString.class] || sessionID.length == 0) return nil;
-    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
-    [allowed addCharactersInString:@"-_"];
-    if ([sessionID rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) return nil;
-    return [PTClaudeUsageSnapshotDirectory() stringByAppendingPathComponent:
-        [sessionID stringByAppendingPathExtension:@"json"]];
-}
 
 static NSString *PTRunGit(NSString *directory, NSArray<NSString *> *arguments, int *exitStatus) {
     NSTask *task = [[NSTask alloc] init];
@@ -2072,53 +2078,6 @@ static NSDictionary<NSString *, NSString *> *PTGitReviewSnapshotForDirectory(NSS
     };
 }
 
-static NSString *PTAppleScriptString(NSString *value) {
-    NSString *escaped = [value stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
-    // bracketed-paste 的 ESC 不能原样塞进 AppleScript 字面量，否则不同系统版本
-    // 可能把控制字符当作脚本源码；显式拼成 ASCII character 27 更稳定。
-    NSString *escape = [NSString stringWithFormat:@"%C", (unichar)0x1B];
-    escaped = [escaped stringByReplacingOccurrencesOfString:escape
-        withString:@"\" & (ASCII character 27) & \""];
-    // 先处理连续换行，再处理单个换行
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"\n\n" withString:@"\" & linefeed & linefeed & \""];
-    // 再处理单个换行
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"\n" withString:@"\" & linefeed & \""];
-    return [escaped stringByReplacingOccurrencesOfString:@"\r" withString:@""];
-}
-
-static NSString *PTShellArgument(NSString *value) {
-    return [NSString stringWithFormat:@"'%@'", [value stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
-}
-
-static NSArray<NSDictionary<NSString *, NSData *> *> *PTSnapshotPasteboard(NSPasteboard *pasteboard) {
-    NSMutableArray<NSDictionary<NSString *, NSData *> *> *snapshot = [NSMutableArray array];
-    for (NSPasteboardItem *item in pasteboard.pasteboardItems ?: @[]) {
-        NSMutableDictionary<NSString *, NSData *> *dataByType = [NSMutableDictionary dictionary];
-        for (NSPasteboardType type in item.types) {
-            NSData *data = [item dataForType:type];
-            if (data) dataByType[type] = data;
-        }
-        if (dataByType.count) [snapshot addObject:dataByType];
-    }
-    return snapshot;
-}
-
-static void PTRestorePasteboard(
-    NSPasteboard *pasteboard,
-    NSArray<NSDictionary<NSString *, NSData *> *> *snapshot
-) {
-    [pasteboard clearContents];
-    NSMutableArray<NSPasteboardItem *> *items = [NSMutableArray array];
-    for (NSDictionary<NSString *, NSData *> *dataByType in snapshot) {
-        NSPasteboardItem *item = [[NSPasteboardItem alloc] init];
-        for (NSString *type in dataByType) {
-            [item setData:dataByType[type] forType:type];
-        }
-        if (item.types.count) [items addObject:item];
-    }
-    if (items.count) [pasteboard writeObjects:items];
-}
 
 static NSData *PTPNGDataForImage(NSImage *image) {
     if (!image.isValid) return nil;
@@ -2141,37 +2100,69 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     return [representation representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
 }
 
-static BOOL PTWritePNGDataToPasteboard(NSData *png, NSPasteboard *pasteboard) {
-    if (png.length == 0 || ![NSBitmapImageRep imageRepWithData:png]) return NO;
-    [pasteboard clearContents];
-    return [pasteboard setData:png forType:NSPasteboardTypePNG];
-}
-
-static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
-    while (!condition() && deadline.timeIntervalSinceNow > 0) {
-        NSDate *nextPass = [NSDate dateWithTimeIntervalSinceNow:
-            MIN(0.02, MAX(0.001, deadline.timeIntervalSinceNow))];
-        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:nextPass];
-    }
-    return condition();
-}
-
 @implementation PTClaudeBridge {
     NSString *_sessionID;
     NSString *_connectingSessionID;
-    NSString *_terminalTTY;
-    pid_t _terminalPID;
+    NSString *_lastSendError;
+    NSString *_stderrText;
     BOOL _running;
     NSUInteger _connectionGeneration;
+    NSTask *_task;
+    NSPipe *_inputPipe;
+    NSPipe *_outputPipe;
+    NSPipe *_errorPipe;
+    NSMutableData *_outputBuffer;
+    NSMutableDictionary<NSString *, id> *_pendingSends;
+    NSMutableDictionary<NSString *, id> *_pendingControls;
+    NSMutableArray *_pendingConnections;
+    NSString *_usageRequestID;
+    NSDictionary *_usagePayload;
+    NSString *_currentModel;
+    NSString *_currentEffort;
+    NSString *_permissionMode;
+    NSArray<NSDictionary *> *_commands;
+    NSMutableDictionary *_pendingQueries;
+    NSMutableDictionary<NSString *, NSString *> *_submittedCommands;
+    NSString *_activeCommand;
+    BOOL _compacting;
+    NSNumber *_contextTokens;
+    NSMutableSet<NSString *> *_toolRequests;
+    NSString *_initializeID;
+    NSString *_initialPrompt;
     dispatch_queue_t _ioQueue;
-    NSString *_lastSendError;
+    BOOL _stdoutEnded;
+    BOOL _processEnded;
+    int _exitStatus;
+    NSMutableOrderedSet<NSString *> *_streamOrder;
+    NSMutableDictionary<NSString *, NSDictionary *> *_streamRecords;
+    NSMutableDictionary<NSNumber *, NSMutableDictionary *> *_streamBlocks;
+    NSMutableDictionary<NSString *, NSDictionary *> *_streamQuestions;
+    NSSet<NSString *> *_persistedStreamKeys;
+    NSString *_streamMessageID;
+    NSString *_streamModel;
+    NSNumber *_streamBlockIndex;
+    BOOL _responding;
+    NSMutableSet<NSString *> *_workingMessageIDs;
+    NSString *_activeWorkID;
+    BOOL _streamNotificationScheduled;
+    NSUInteger _streamRevision;
 }
 
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _ioQueue = dispatch_queue_create("com.yuuka.prettyterm.bridge-io", DISPATCH_QUEUE_SERIAL);
+        _ioQueue = dispatch_queue_create("com.yuuka.prettyterm.bridge-write", DISPATCH_QUEUE_SERIAL);
+        _pendingSends = [NSMutableDictionary dictionary];
+        _pendingControls = [NSMutableDictionary dictionary];
+        _pendingConnections = [NSMutableArray array];
+        _pendingQueries = [NSMutableDictionary dictionary];
+        _submittedCommands = [NSMutableDictionary dictionary];
+        _toolRequests = [NSMutableSet set];
+        _streamOrder = [NSMutableOrderedSet orderedSet];
+        _streamRecords = [NSMutableDictionary dictionary];
+        _streamBlocks = [NSMutableDictionary dictionary];
+        _streamQuestions = [NSMutableDictionary dictionary];
+        _workingMessageIDs = [NSMutableSet set];
     }
     return self;
 }
@@ -2179,585 +2170,772 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (NSString *)sessionID { return _sessionID; }
 - (BOOL)running { return _running; }
 - (NSString *)lastSendError { return _lastSendError; }
+- (BOOL)responding { return _responding; }
+- (NSString *)currentModel { return _currentModel; }
+- (NSString *)currentEffort { return _currentEffort; }
+- (NSString *)permissionMode { return _permissionMode; }
+- (NSArray *)commands { return _commands ?: @[]; }
+- (BOOL)compacting { return _compacting; }
+- (NSNumber *)contextTokens { return _contextTokens; }
 
-- (NSString *)launchTerminalCommand:(NSString *)command error:(NSString **)errorMessage {
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "set launchedTab to do script \"%@\"\n"
-         "activate\n"
-         "return tty of launchedTab\n"
-         "end tell", PTAppleScriptString(command)];
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    if (!result.stringValue.length && errorMessage) {
-        *errorMessage = [NSString stringWithFormat:PTL(@"Terminal 启动失败：%@", @"Terminal launch failed: %@"),
-            error[NSAppleScriptErrorMessage] ?: @"未取得新窗口的 tty"];
-    }
-    return result.stringValue;
+- (NSDictionary *)streamPayload {
+    NSMutableArray *messages = [NSMutableArray array];
+    for (NSString *key in _streamOrder) if (_streamRecords[key]) [messages addObject:_streamRecords[key]];
+    return @{@"sessionId": _sessionID ?: @"", @"messages": messages,
+        @"questionUpdates": _streamQuestions.allValues,
+        @"active": @(_responding), @"compacting": @(_compacting), @"revision": @(_streamRevision)};
 }
 
-- (BOOL)sendShellCommand:(NSString *)command toTTY:(NSString *)tty error:(NSString **)errorMessage {
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "repeat with w in windows\n"
-         "repeat with t in tabs of w\n"
-         "if tty of t is \"%@\" then\n"
-         "repeat while busy of t\n"
-         "delay 0.05\n"
-         "end repeat\n"
-         "do script \"%@\" in t\n"
-         "return true\n"
-         "end if\n"
-         "end repeat\nend repeat\nreturn false\nend tell",
-         PTAppleScriptString(tty), PTAppleScriptString(command)];
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    if (!result.booleanValue && errorMessage) {
-        *errorMessage = [NSString stringWithFormat:PTL(@"Terminal 命令提交失败：%@", @"Terminal command submission failed: %@"),
-            error[NSAppleScriptErrorMessage] ?: PTL(@"启动窗口已关闭", @"Launch window was closed")];
-    }
-    return result.booleanValue;
-}
-
-- (NSDictionary *)terminalStateForTTY:(NSString *)tty error:(NSString **)errorMessage {
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "repeat with w in windows\n"
-         "repeat with t in tabs of w\n"
-         "if tty of t is \"%@\" then return {busy of t, contents of t}\n"
-         "end repeat\nend repeat\nend tell", PTAppleScriptString(tty)];
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    if (result.numberOfItems != 2) {
-        if (errorMessage) *errorMessage = error[NSAppleScriptErrorMessage] ?: PTL(@"启动窗口已关闭", @"Launch window was closed");
-        return nil;
-    }
-    return @{ @"busy": @([result descriptorAtIndex:1].booleanValue),
-              @"contents": [result descriptorAtIndex:2].stringValue ?: @"" };
-}
-
-- (void)finishConnection:(NSString *)sessionID tty:(NSString *)tty pid:(pid_t)pid
-                  status:(NSString *)status generation:(NSUInteger)generation {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (generation != self->_connectionGeneration) return;
-        self->_connectingSessionID = nil;
-        self->_terminalTTY = tty;
-        self->_terminalPID = pid;
-        self->_sessionID = sessionID;
-        self->_running = pid > 0;
-        if (self.statusChanged) self.statusChanged(status);
-    });
-}
-
-- (void)observeLaunchTTY:(NSString *)tty sessionID:(NSString *)sessionID generation:(NSUInteger)generation {
-    if (generation != _connectionGeneration) return;
-    NSString *error = nil;
-    NSDictionary *terminal = [self terminalStateForTTY:tty error:&error];
-    pid_t pid = [self claudePIDForTTY:tty];
-    NSString *actualSessionID = pid > 0 ? [self sessionMetadataForPID:pid][@"sessionId"] : nil;
-    if (pid > 0 && actualSessionID.length && (!sessionID.length || [actualSessionID isEqual:sessionID])) {
-        [self finishConnection:actualSessionID tty:tty pid:pid
-            status:[NSString stringWithFormat:PTL(@"已同步 Terminal · %@", @"Terminal synced · %@"), tty.lastPathComponent]
-            generation:generation];
-        return;
-    }
-    if (!terminal || (!pid && ![terminal[@"busy"] boolValue])) {
-        NSString *status = error ?: [NSString stringWithFormat:
-            PTL(@"Claude 启动命令已结束：%@", @"Claude launch command ended: %@"), terminal[@"contents"]];
-        [self finishConnection:sessionID tty:nil pid:0 status:status generation:generation];
-        return;
-    }
-    // Observe readiness of this one launch; do not rerun the command or create
-    // another window while Claude is still loading its original conversation.
+- (void)notifyStreamChanged {
+    _streamRevision++;
+    if (_streamNotificationScheduled) return;
+    _streamNotificationScheduled = YES;
     __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), _ioQueue, ^{
-        [weakSelf observeLaunchTTY:tty sessionID:sessionID generation:generation];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        PTClaudeBridge *self = weakSelf;
+        if (!self) return;
+        self->_streamNotificationScheduled = NO;
+        if (self.streamChanged) self.streamChanged();
     });
 }
 
-- (void)launchSessionID:(NSString *)sessionID cwd:(NSString *)cwd generation:(NSUInteger)generation {
-    NSString *command = [NSString stringWithFormat:@"Claude --yolo --resume %@", PTShellArgument(sessionID)];
-    [self launchSessionID:sessionID cwd:cwd command:command generation:generation];
-}
-
-- (void)startNewSession:(PTSessionInfo *)session prompt:(NSString *)prompt {
-    [self stop];
-    _connectingSessionID = [session.sessionID copy];
-    NSUInteger generation = _connectionGeneration;
-    NSString *sessionID = [session.sessionID copy];
-    NSString *cwd = [session.cwd copy];
-    NSString *command = [NSString stringWithFormat:@"Claude --yolo --session-id %@ -- %@",
-        PTShellArgument(sessionID), PTShellArgument(prompt)];
-    dispatch_async(_ioQueue, ^{
-        [self launchSessionID:sessionID cwd:cwd command:command generation:generation];
-    });
-}
-
-- (void)startNewSessionInDirectory:(NSString *)directory {
-    [self stop];
-    NSUInteger generation = _connectionGeneration;
-    NSString *cwd = [directory copy];
-    dispatch_async(_ioQueue, ^{
-        [self launchSessionID:@"" cwd:cwd command:@"Claude --yolo" generation:generation];
-    });
-}
-
-- (void)launchSessionID:(NSString *)sessionID cwd:(NSString *)cwd command:(NSString *)claudeCommand generation:(NSUInteger)generation {
-    if (generation != _connectionGeneration) return;
-    NSString *directoryCommand = [NSString stringWithFormat:@"cd -- %@", PTShellArgument(cwd)];
-    NSString *error = nil;
-    NSString *tty = [self launchTerminalCommand:directoryCommand error:&error];
-    if (!tty.length) {
-        [self finishConnection:sessionID tty:nil pid:0 status:error generation:generation];
-        return;
-    }
-    // Submit directory navigation to the system shell first. Only after that
-    // shell is idle submit the separate Claude invocation to the same tab.
-    if (![self sendShellCommand:claudeCommand toTTY:tty error:&error]) {
-        [self finishConnection:sessionID tty:nil pid:0 status:error generation:generation];
-        return;
-    }
-    [self observeLaunchTTY:tty sessionID:sessionID generation:generation];
-}
-
-// 老师常常同时开好几个 Terminal 标签页跑不同的 Claude 对话，很多都是直接在主目录里
-// 起的、cwd 一模一样——只看"最前面窗口的选中标签页"没法区分到底是哪一个，
-// 严重的话甚至会在 cwd 恰好相同时悄悄接错会话都不报错。这里改成拿到全部标签页的 tty，
-// 交给 connectToSession 按 cwd 精确匹配、遇到歧义就明确告诉老师，而不是瞎猜一个。
-- (NSArray<NSString *> *)allTerminalTTYsWithError:(NSString **)errorMessage {
-    NSString *source =
-        @"tell application id \"com.apple.Terminal\"\n"
-         "set ttyList to {}\n"
-         "repeat with theWindow in windows\n"
-         "repeat with theTab in tabs of theWindow\n"
-         "set end of ttyList to (tty of theTab)\n"
-         "end repeat\n"
-         "end repeat\n"
-         "return ttyList\n"
-         "end tell";
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    if (!result) {
-        if (errorMessage) {
-            NSNumber *number = error[NSAppleScriptErrorNumber];
-            *errorMessage = number.integerValue == -1743
-                ? @"Terminal 自动化权限未开启"
-                : [NSString stringWithFormat:@"无法读取 Terminal：%@",
-                    error[NSAppleScriptErrorMessage] ?: @"未知错误"];
-        }
-        return @[];
-    }
-    NSMutableArray<NSString *> *ttys = [NSMutableArray array];
-    for (NSInteger index = 1; index <= result.numberOfItems; index++) {
-        NSString *tty = [result descriptorAtIndex:index].stringValue;
-        if (tty.length) [ttys addObject:tty];
-    }
-    return ttys;
-}
-
-- (pid_t)claudePIDForTTY:(NSString *)tty {
-    NSString *shortTTY = tty.lastPathComponent;
-    // comm= 会被截断到 16 字符、且可能含空格，靠它按空白分列很脆。
-    // 只留 pid/tty 两个不含空格的字段，剩下全部当 args 整体处理。
-    NSString *output = PTRunTool(@"/bin/ps", @[@"-Ao", @"pid=,tty=,args="]);
-    static NSRegularExpression *claudePattern;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        claudePattern = [NSRegularExpression regularExpressionWithPattern:@"(^|/)claude(\\s|$)"
-                                                                   options:NSRegularExpressionCaseInsensitive
-                                                                     error:nil];
-    });
-    for (NSString *line in [output componentsSeparatedByString:@"\n"]) {
-        NSString *trimmedLine = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        if (trimmedLine.length == 0) continue;
-        NSRange firstSpace = [trimmedLine rangeOfCharacterFromSet:NSCharacterSet.whitespaceCharacterSet];
-        if (firstSpace.location == NSNotFound) continue;
-        NSString *pidToken = [trimmedLine substringToIndex:firstSpace.location];
-        NSString *rest = [[trimmedLine substringFromIndex:firstSpace.location]
-            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        NSRange secondSpace = [rest rangeOfCharacterFromSet:NSCharacterSet.whitespaceCharacterSet];
-        NSString *ttyToken = secondSpace.location == NSNotFound ? rest : [rest substringToIndex:secondSpace.location];
-        NSString *args = secondSpace.location == NSNotFound ? @"" :
-            [[rest substringFromIndex:secondSpace.location]
-                stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        if (![ttyToken isEqual:shortTTY] || args.length == 0) continue;
-        if ([claudePattern firstMatchInString:args options:0 range:NSMakeRange(0, args.length)]) {
-            return (pid_t)pidToken.intValue;
+- (void)reconcileStreamWithMessages:(NSArray<NSDictionary *> *)messages {
+    NSMutableSet *keys = [NSMutableSet set];
+    BOOL changed = NO;
+    for (NSDictionary *message in messages) {
+        if (message[@"messageKey"]) [keys addObject:message[@"messageKey"]];
+        if ([message[@"kind"] isEqual:@"question"] && [message[@"toolUseId"] length]) {
+            NSString *toolID = message[@"toolUseId"];
+            if (([message[@"answered"] boolValue] || !_streamQuestions[toolID]) && ![message isEqual:_streamQuestions[toolID]]) {
+                _streamQuestions[toolID] = [message copy];
+                changed = YES;
+            }
         }
     }
-    return 0;
-}
-
-- (NSString *)cwdForPID:(pid_t)pid {
-    if (pid <= 0) return @"";
-    NSString *output = PTRunTool(@"/usr/sbin/lsof",
-        @[@"-a", @"-p", [NSString stringWithFormat:@"%d", pid], @"-d", @"cwd", @"-Fn"]);
-    for (NSString *line in [output componentsSeparatedByString:@"\n"]) {
-        if ([line hasPrefix:@"n"] && line.length > 1) return [line substringFromIndex:1];
+    _persistedStreamKeys = keys;
+    for (NSString *identity in _streamOrder.array) {
+        NSDictionary *record = _streamRecords[identity];
+        BOOL mergedQuestionResult = ![record[@"kind"] isEqual:@"question"] &&
+            [record[@"toolUseId"] length] && _streamQuestions[record[@"toolUseId"]];
+        if (![keys containsObject:record[@"messageKey"]] && !mergedQuestionResult) continue;
+        [_streamRecords removeObjectForKey:identity];
+        [_streamOrder removeObject:identity];
+        changed = YES;
     }
-    return @"";
+    if (changed) [self notifyStreamChanged];
 }
 
-// Claude Code 2.1+ 会为每个仍在运行的交互会话写入
-// ~/.claude/sessions/<pid>.json。这里面的 sessionId 才是 Terminal 进程与
-// transcript 的可靠连接键；cwd 只能筛候选，因为多个会话完全可能从同一目录启动。
-- (NSDictionary *)sessionMetadataForPID:(pid_t)pid {
-    if (pid <= 0) return nil;
-    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@".claude/sessions/%d.json", pid]];
-    NSData *data = [NSData dataWithContentsOfFile:path];
-    if (!data) return nil;
-    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if (![object isKindOfClass:NSDictionary.class]) return nil;
-    NSDictionary *metadata = object;
-    if ([metadata[@"pid"] intValue] != pid) return nil;
-    return metadata;
+- (void)putStreamRecord:(NSDictionary *)record identity:(NSString *)identity {
+    if (!record || !identity.length) return;
+    if ([record[@"kind"] isEqual:@"question"] && [record[@"toolUseId"] length])
+        _streamQuestions[record[@"toolUseId"]] = [record copy];
+    if ([_persistedStreamKeys containsObject:record[@"messageKey"]]) {
+        [_streamRecords removeObjectForKey:identity];
+        [_streamOrder removeObject:identity];
+    } else {
+        NSMutableDictionary *item = [record mutableCopy];
+        item[@"streamID"] = identity;
+        [_streamOrder addObject:identity];
+        _streamRecords[identity] = item;
+    }
+    [self notifyStreamChanged];
 }
 
-// 在同一段 AppleScript 执行内核对 tab 里的 claude 进程并执行 do script，
-// Obj-C 侧探活和实际写入在一次 AppleEvent 内核对同一进程。
-- (BOOL)sendToTerminal:(NSString *)message {
-    if (_terminalTTY.length == 0 || message.length == 0) return NO;
-    NSString *source = PTTerminalAutomationScript(
-        _terminalTTY, _terminalPID, message, PTTerminalAutomationActionWriteText);
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    NSString *outcome = result.stringValue;
-    if ([outcome isEqual:@"mismatch"]) {
-        _running = NO;
-        if (self.statusChanged) {
-            self.statusChanged(@"目标 Terminal 标签页已不再运行 Claude，消息未发送");
+- (NSDictionary *)streamRecordForBlock:(NSDictionary *)block key:(NSString *)key
+                                model:(NSString *)model partial:(BOOL)partial {
+    NSString *type = block[@"type"];
+    NSMutableDictionary *record = nil;
+    if ([type isEqual:@"text"]) {
+        record = [@{@"role": @"assistant", @"text": block[@"text"] ?: @"",
+            @"messageKey": key, @"model": model ?: @"Claude"} mutableCopy];
+    } else if (partial && [type isEqual:@"tool_use"]) {
+        record = [@{@"role": @"tool", @"kind": @"tool", @"toolName": block[@"name"] ?: @"",
+            @"text": block[@"partial_json"] ?: @"", @"messageKey": key} mutableCopy];
+    } else {
+        record = [PTEventFromAssistantBlock(block, key, @"", model ?: @"Claude") mutableCopy];
+    }
+    record[@"streaming"] = @(partial);
+    return record;
+}
+
+- (void)consumeStreamFrame:(NSDictionary *)frame {
+    // 子代理完整消息另有 parent_tool_use_id，不混进主会话正在生成的内容块。
+    if ([frame[@"parent_tool_use_id"] isKindOfClass:NSString.class]) return;
+    NSString *type = frame[@"type"];
+    if ([type isEqual:@"command_lifecycle"]) {
+        NSString *uuid = frame[@"command_uuid"];
+        NSString *state = frame[@"state"];
+        if (uuid.length && [state isEqual:@"started"]) {
+            _activeWorkID = uuid;
+            [_workingMessageIDs addObject:uuid];
+            _responding = YES;
+        } else if (uuid.length && ![state isEqual:@"queued"]) {
+            [_workingMessageIDs removeObject:uuid];
+            if ([_activeWorkID isEqual:uuid]) _activeWorkID = nil;
+            _responding = _workingMessageIDs.count > 0;
         }
+        [self notifyStreamChanged];
+    }
+    if ([type isEqual:@"stream_event"]) {
+        NSDictionary *event = frame[@"event"];
+        NSString *eventType = event[@"type"];
+        _responding = YES;
+        if ([eventType isEqual:@"message_start"]) {
+            _streamMessageID = event[@"message"][@"id"];
+            _streamModel = event[@"message"][@"model"];
+            NSDictionary *usage = event[@"message"][@"usage"];
+            if ([usage isKindOfClass:NSDictionary.class]) {
+                _contextTokens = @([usage[@"input_tokens"] unsignedIntegerValue] +
+                    [usage[@"cache_read_input_tokens"] unsignedIntegerValue] + [usage[@"cache_creation_input_tokens"] unsignedIntegerValue]);
+            }
+            [_streamBlocks removeAllObjects];
+            _streamBlockIndex = nil;
+        } else if ([eventType isEqual:@"content_block_start"]) {
+            _streamBlockIndex = event[@"index"];
+            _streamBlocks[_streamBlockIndex] = [event[@"content_block"] mutableCopy];
+        } else if ([eventType isEqual:@"content_block_delta"]) {
+            _streamBlockIndex = event[@"index"];
+            NSMutableDictionary *block = _streamBlocks[_streamBlockIndex];
+            NSDictionary *delta = event[@"delta"];
+            NSString *field = [delta[@"type"] isEqual:@"text_delta"] ? @"text" :
+                ([delta[@"type"] isEqual:@"thinking_delta"] ? @"thinking" :
+                 ([delta[@"type"] isEqual:@"input_json_delta"] ? @"partial_json" : nil));
+            if (!field) return;
+            block[field] = [block[field] ?: @"" stringByAppendingString:delta[field] ?: @""];
+        } else {
+            return; // 完整 assistant 块已在 content_block_stop 之前交付。
+        }
+        if (_streamBlockIndex && _streamMessageID.length) {
+            NSString *identity = [NSString stringWithFormat:@"%@:%@", _streamMessageID, _streamBlockIndex];
+            NSDictionary *record = [self streamRecordForBlock:_streamBlocks[_streamBlockIndex]
+                key:identity model:_streamModel partial:YES];
+            [self putStreamRecord:record identity:identity];
+        }
+    } else if ([type isEqual:@"assistant"]) {
+        NSDictionary *message = frame[@"message"];
+        // Local-command acknowledgements are synthetic and never enter the
+        // persisted assistant history. Keep them out of the live history too.
+        if ([message[@"model"] isEqual:@"<synthetic>"]) return;
+        NSArray *content = message[@"content"];
+        if (![content isKindOfClass:NSArray.class]) return;
+        [content enumerateObjectsUsingBlock:^(NSDictionary *block, NSUInteger index, BOOL *stop) {
+            (void)stop;
+            // SDK 每完成一个内容块发一条 assistant；该条记录的 block index 从 0 起，
+            // 而 stream_event.index 属于原始 API 消息。用当前流块连接两种标识。
+            NSString *key = [NSString stringWithFormat:@"%@:%lu",
+                frame[@"uuid"] ?: message[@"id"], (unsigned long)index];
+            NSString *identity = [message[@"id"] isEqual:self->_streamMessageID] && self->_streamBlockIndex
+                ? [NSString stringWithFormat:@"%@:%@", self->_streamMessageID, self->_streamBlockIndex] : key;
+            [self putStreamRecord:[self streamRecordForBlock:block key:key
+                model:message[@"model"] partial:NO] identity:identity];
+        }];
+    } else if ([type isEqual:@"user"]) {
+        NSDictionary *message = frame[@"message"];
+        NSString *uuid = frame[@"uuid"];
+        if (!uuid.length) return;
+        NSString *text = PTTextFromMessageContent(message[@"content"]);
+        NSArray<NSString *> *images = PTImagesFromMessageContent(message[@"content"]);
+        if ((text.length || images.count) && ![frame[@"isMeta"] boolValue] && !_submittedCommands[uuid]) {
+            NSString *key = [uuid stringByAppendingString:@":user"];
+            [self putStreamRecord:@{@"role": @"user", @"text": text, @"images": images, @"messageKey": key} identity:key];
+        }
+        if ([message[@"content"] isKindOfClass:NSArray.class]) {
+            [message[@"content"] enumerateObjectsUsingBlock:^(NSDictionary *block, NSUInteger index, BOOL *stop) {
+                (void)stop;
+                if (![block[@"type"] isEqual:@"tool_result"]) return;
+                NSString *toolID = block[@"tool_use_id"];
+                NSMutableDictionary *question = [self->_streamQuestions[toolID ?: @""] mutableCopy];
+                if (question) {
+                    question[@"answered"] = @YES;
+                    id result = frame[@"tool_use_result"] ?: frame[@"toolUseResult"];
+                    NSDictionary *answers = [result isKindOfClass:NSDictionary.class] ? result[@"answers"] : nil;
+                    question[@"answerText"] = answers.count ? PTFormattedQuestionAnswers(answers)
+                        : PTEventFromToolResultBlock(block, @"", @"")[@"text"];
+                    NSString *identity = question[@"messageKey"];
+                    for (NSString *candidate in self->_streamOrder)
+                        if ([self->_streamRecords[candidate][@"toolUseId"] isEqual:toolID] &&
+                            [self->_streamRecords[candidate][@"kind"] isEqual:@"question"]) { identity = candidate; break; }
+                    [self putStreamRecord:question identity:identity];
+                    return;
+                }
+                NSString *key = [NSString stringWithFormat:@"%@:result:%lu", uuid, (unsigned long)index];
+                [self putStreamRecord:PTEventFromToolResultBlock(block, key, @"") identity:key];
+            }];
+        }
+    } else if ([type isEqual:@"result"]) {
+        NSString *completed = frame[@"user_message_uuid"] ?: _activeWorkID;
+        if (completed) [_workingMessageIDs removeObject:completed];
+        _activeWorkID = nil;
+        _responding = _workingMessageIDs.count > 0;
+        for (NSString *key in _streamOrder) {
+            NSMutableDictionary *record = [_streamRecords[key] mutableCopy];
+            record[@"streaming"] = @NO;
+            _streamRecords[key] = record;
+        }
+        [self notifyStreamChanged];
+    }
+}
+
+- (void)reportError:(NSString *)message {
+    _lastSendError = message;
+    if (self.statusChanged) self.statusChanged(message);
+}
+
+- (void)completePendingSends:(BOOL)accepted {
+    NSArray *callbacks = _pendingSends.allValues;
+    callbacks = [callbacks arrayByAddingObjectsFromArray:_pendingControls.allValues];
+    callbacks = [callbacks arrayByAddingObjectsFromArray:_pendingConnections];
+    [_pendingSends removeAllObjects];
+    [_pendingControls removeAllObjects];
+    [_pendingConnections removeAllObjects];
+    for (void (^completion)(BOOL) in callbacks) completion(accepted);
+    NSArray *queries = _pendingQueries.allValues;
+    [_pendingQueries removeAllObjects];
+    for (void (^query)(NSDictionary *, NSString *) in queries) query(nil, _lastSendError ?: @"Claude session ended");
+    [_submittedCommands removeAllObjects];
+}
+
+- (BOOL)writeFrame:(NSDictionary *)frame completion:(void (^)(BOOL))completion {
+    NSError *error = nil;
+    NSMutableData *data = [[NSJSONSerialization dataWithJSONObject:frame options:0 error:&error] mutableCopy];
+    if (!data || !_task.running) {
+        [self reportError:error.localizedDescription ?: PTL(@"Claude 会话未连接", @"Claude session is disconnected")];
+        if (completion) completion(NO);
         return NO;
     }
-    if (!result || ![outcome isEqual:@"ok"]) {
-        _running = NO;
-        if (self.statusChanged) {
-            NSNumber *number = error[NSAppleScriptErrorNumber];
-            self.statusChanged(number.integerValue == -1743
-                ? @"Terminal 自动化权限未开启"
-                : [NSString stringWithFormat:@"Terminal 写入失败（%@）：%@",
-                    number ?: @0,
-                    error[NSAppleScriptErrorMessage] ?: (outcome.length ? outcome : @"标签页不可用")]);
-        }
-        return NO;
-    }
+    [data appendBytes:"\n" length:1];
+    NSFileHandle *input = _inputPipe.fileHandleForWriting;
+    NSUInteger generation = _connectionGeneration;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(_ioQueue, ^{
+        NSError *writeError = nil;
+        BOOL written = [input writeData:data error:&writeError];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PTClaudeBridge *self = weakSelf;
+            if (!self || generation != self->_connectionGeneration) return;
+            if (!written) [self reportError:[NSString stringWithFormat:
+                PTL(@"Claude 消息写入失败：%@", @"Claude message write failed: %@"), writeError.localizedDescription]];
+            if (completion) completion(written);
+        });
+    });
     return YES;
 }
 
-- (NSString *)boundTerminalContents {
-    if (_terminalTTY.length == 0) return @"";
-    NSString *source = [NSString stringWithFormat:
-        @"tell application id \"com.apple.Terminal\"\n"
-         "repeat with theWindow in windows\n"
-         "repeat with theTab in tabs of theWindow\n"
-         "if (tty of theTab) is \"%@\" then return (contents of theTab) as text\n"
-         "end repeat\n"
-         "end repeat\n"
-         "return \"\"\n"
-         "end tell",
-         PTAppleScriptString(_terminalTTY)];
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:nil];
-    return result.stringValue ?: @"";
+- (BOOL)sendControl:(NSDictionary *)request {
+    return [self writeFrame:@{@"type": @"control_request",
+        @"request_id": NSUUID.UUID.UUIDString.lowercaseString, @"request": request} completion:nil];
 }
 
-- (BOOL)sendReturnToTerminal {
-    if (_terminalTTY.length == 0) return NO;
-    // 实机字节探针确认：空 do script 由 Terminal 自动附加且只附加一个 CR；
-    // 显式传入 CR 反而会得到两个。正文落地后用这个独立单回车兜住提交。
-    NSString *source = PTTerminalAutomationScript(
-        _terminalTTY, _terminalPID, @"", PTTerminalAutomationActionSubmitReturn);
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    NSString *outcome = result.stringValue;
-    NSLog(@"PrettyTerm multiline Return: outcome=%@ errorNumber=%@ error=%@",
-        outcome ?: @"(nil)", error[NSAppleScriptErrorNumber] ?: @0,
-        error[NSAppleScriptErrorMessage] ?: @"(none)");
-    if ([outcome isEqual:@"ok"]) return YES;
-    if ([outcome isEqual:@"mismatch"] || [outcome isEqual:@"missing"]) _running = NO;
-    if (self.statusChanged) {
-        self.statusChanged([NSString stringWithFormat:@"Terminal 回车提交失败（%@）：%@",
-            error[NSAppleScriptErrorNumber] ?: @0,
-            error[NSAppleScriptErrorMessage] ?: outcome ?: @"标签页不可用"]);
-    }
-    return NO;
+- (void)refreshUsage {
+    if (!_running || _usageRequestID) return;
+    _usageRequestID = NSUUID.UUID.UUIDString.lowercaseString;
+    [self writeFrame:@{@"type": @"control_request", @"request_id": _usageRequestID,
+        @"request": @{@"subtype": @"get_usage", @"skip_behaviors": @YES}}
+        completion:^(BOOL written) {
+            if (written) return;
+            self->_usageRequestID = nil;
+            if (self.usageChanged) self.usageChanged(nil, self.lastSendError);
+        }];
 }
 
-- (BOOL)sendEscape {
-    if (!_running || _terminalTTY.length == 0 || _terminalPID <= 0 ||
-        kill(_terminalPID, 0) != 0) {
-        [self stop];
-        if (self.statusChanged) {
-            self.statusChanged(PTL(@"Terminal 中的 Claude 已结束", @"Claude has exited in Terminal"));
-        }
-        return NO;
-    }
-    NSString *source = PTTerminalAutomationScript(
-        _terminalTTY, _terminalPID, @"", PTTerminalAutomationActionInterruptEscape);
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    NSString *outcome = result.stringValue;
-    if ([outcome isEqual:@"ok"]) {
-        [NSApp activateIgnoringOtherApps:YES];
-        if (self.statusChanged) {
-            self.statusChanged(PTL(@"已向 Terminal 发送 Esc", @"Escape sent to Terminal"));
-        }
-        return YES;
-    }
-    if ([outcome isEqual:@"mismatch"] || [outcome isEqual:@"missing"]) _running = NO;
-    if (self.statusChanged) {
-        NSNumber *number = error[NSAppleScriptErrorNumber];
-        self.statusChanged(number.integerValue == -1743
-            ? PTL(@"Terminal 自动化权限未开启",
-                  @"Terminal automation permission is not enabled")
-            : [NSString stringWithFormat:
-                PTL(@"Terminal Esc 发送失败（%@）：%@", @"Failed to send Escape to Terminal (%@): %@"),
-                number ?: @0,
-                error[NSAppleScriptErrorMessage] ?: outcome ?: PTL(@"标签页不可用", @"Tab unavailable")]);
-    }
-    return NO;
+- (void)queryControl:(NSDictionary *)request completion:(void (^)(NSDictionary *, NSString *))completion {
+    NSString *requestID = NSUUID.UUID.UUIDString.lowercaseString;
+    _pendingQueries[requestID] = [completion copy];
+    [self writeFrame:@{@"type": @"control_request", @"request_id": requestID, @"request": request}
+        completion:^(BOOL written) {
+            if (written) return;
+            void (^callback)(NSDictionary *, NSString *) = self->_pendingQueries[requestID];
+            [self->_pendingQueries removeObjectForKey:requestID];
+            if (callback) callback(nil, self.lastSendError);
+        }];
 }
 
-- (BOOL)sendMultilineMessage:(NSString *)message {
-    NSInteger markerBefore = PTLatestTerminalPasteMarker([self boundTerminalContents]);
-    if (![self sendToTerminal:PTTerminalSubmissionPayload(message)]) return NO;
-
-    // `do script` 附加的第一枚 CR 与 bracketed-paste 数据处于同一批次，Claude
-    // 会吞掉它而只显示 [Pasted text #N]。等屏幕上出现新的编号，证明粘贴帧
-    // 已被完整解析，再单独写入一次空 do-script；它附加的 CR 才会稳定提交。
-    __block NSInteger markerAfter = markerBefore;
-    BOOL pasteAcknowledged = PTRunLoopUntil(0.8, ^BOOL{
-        markerAfter = PTLatestTerminalPasteMarker([self boundTerminalContents]);
-        return markerAfter >= 0 && markerAfter != markerBefore;
-    });
-    NSLog(@"PrettyTerm multiline paste: markerBefore=%ld markerAfter=%ld acknowledged=%@",
-        (long)markerBefore, (long)markerAfter, pasteAcknowledged ? @"YES" : @"NO");
-    return [self sendReturnToTerminal];
+- (void)refreshSettings {
+    __weak typeof(self) weakSelf = self;
+    [self queryControl:@{@"subtype": @"get_settings"} completion:^(NSDictionary *body, NSString *error) {
+        PTClaudeBridge *self = weakSelf;
+        if (!self || error) return;
+        NSDictionary *applied = body[@"applied"];
+        if ([applied[@"model"] isKindOfClass:NSString.class]) self->_currentModel = applied[@"model"];
+        if ([applied[@"effort"] isKindOfClass:NSString.class]) self->_currentEffort = applied[@"effort"];
+        if (self.modelChanged) self.modelChanged();
+    }];
 }
 
-// connectToSession 内部要跑 AppleScript + ps + lsof，慢的时候能到几秒；
-// 全部挪到后台队列执行，只有最终结果（含 ivar 赋值和 statusChanged 回调）回主线程。
-- (void)connectToSession:(PTSessionInfo *)session {
-    if (session.sessionID.length && [_connectingSessionID isEqual:session.sessionID]) return;
-    [self stop];
-    NSUInteger requestGeneration = _connectionGeneration;
-    if (session.sessionID.length == 0 || session.cwd.length == 0) {
-        if (self.statusChanged) self.statusChanged(@"会话缺少目录信息");
+- (void)answerToolRequest:(NSString *)requestID response:(NSDictionary *)response {
+    if (![_toolRequests containsObject:requestID]) return;
+    [_toolRequests removeObject:requestID];
+    [self writeFrame:@{@"type": @"control_response", @"response": @{
+        @"subtype": @"success", @"request_id": requestID, @"response": response}} completion:nil];
+}
+
+- (void)showCommandOutput:(NSString *)text {
+    if (!text.length) return;
+    if (self.commandOutputChanged) self.commandOutputChanged(text);
+}
+
+- (void)consumeFrame:(NSDictionary *)frame {
+    [self consumeStreamFrame:frame];
+    NSString *type = frame[@"type"];
+    if ([type isEqual:@"assistant"] && [frame[@"message"][@"model"] isEqual:@"<synthetic>"]) {
+        [self showCommandOutput:PTTextFromMessageContent(frame[@"message"][@"content"])];
         return;
     }
-    _connectingSessionID = [session.sessionID copy];
-    // 注意：这里不提前发一次"正在同步…"的中间态 statusChanged —— AppDelegate 那边
-    // 用 _connecting 标志位驱动按钮文案，若这里也广播中间状态，两边会互相覆盖打脸。
-    // 只有下面几个分支的"最终结果"才应该触发 statusChanged。
+    if ([type isEqual:@"control_response"]) {
+        NSDictionary *response = frame[@"response"];
+        NSString *responseID = response[@"request_id"];
+        void (^query)(NSDictionary *, NSString *) = responseID ? _pendingQueries[responseID] : nil;
+        if (query) {
+            [_pendingQueries removeObjectForKey:responseID];
+            query(response[@"response"], [response[@"subtype"] isEqual:@"error"] ? response[@"error"] : nil);
+        } else if ([responseID isEqual:_usageRequestID]) {
+            _usageRequestID = nil;
+            NSDictionary *body = response[@"response"];
+            NSDictionary *limits = [body[@"rate_limits"] isKindOfClass:NSDictionary.class] ? body[@"rate_limits"] : nil;
+            NSString *error = [response[@"subtype"] isEqual:@"error"] ? response[@"error"] : nil;
+            if (!limits && !error) error = PTL(@"Claude Code 未返回套餐额度", @"Claude Code did not return plan limits");
+            _usagePayload = [limits copy];
+            if (self.usageChanged) self.usageChanged(_usagePayload, error);
+        } else if ([response[@"request_id"] isEqual:_initializeID]) {
+            if ([response[@"subtype"] isEqual:@"error"]) {
+                [self reportError:response[@"error"] ?: PTL(@"Claude 会话恢复失败", @"Claude session resume failed")];
+                _connectingSessionID = nil;
+                [self completePendingSends:NO];
+                return;
+            }
+            _connectingSessionID = nil;
+            _running = YES;
+            NSArray *commands = response[@"response"][@"commands"];
+            if ([commands isKindOfClass:NSArray.class]) _commands = commands;
+            NSString *prompt = _initialPrompt;
+            _initialPrompt = nil;
+            if (self.statusChanged) self.statusChanged(PTL(@"Claude 后台会话已连接", @"Claude background session connected"));
+            NSArray *connections = [_pendingConnections copy];
+            [_pendingConnections removeAllObjects];
+            for (void (^completion)(BOOL) in connections) completion(YES);
+            [self refreshUsage];
+            [self refreshSettings];
+            if (prompt.length) [self sendMessage:prompt];
+        } else {
+            NSString *requestID = response[@"request_id"];
+            BOOL accepted = ![response[@"subtype"] isEqual:@"error"];
+            if (!accepted) [self reportError:response[@"error"] ?: PTL(@"Claude 指令执行失败", @"Claude command failed")];
+            void (^completion)(BOOL) = requestID ? _pendingControls[requestID] : nil;
+            if (requestID) [_pendingControls removeObjectForKey:requestID];
+            if (completion) completion(accepted);
+        }
+    } else if ([type isEqual:@"control_request"]) {
+        NSDictionary *request = frame[@"request"];
+        if ([request[@"subtype"] isEqual:@"can_use_tool"] && self.toolPermissionRequested) {
+            [_toolRequests addObject:frame[@"request_id"]];
+            self.toolPermissionRequested(frame[@"request_id"], request);
+        }
+    } else if ([type isEqual:@"control_cancel_request"]) {
+        NSString *requestID = frame[@"request_id"];
+        [_toolRequests removeObject:requestID];
+        if (self.toolRequestCancelled) self.toolRequestCancelled(requestID);
+    } else if ([type isEqual:@"command_lifecycle"]) {
+        NSString *uuid = frame[@"command_uuid"];
+        NSString *command = _submittedCommands[uuid];
+        if (!command) return;
+        NSString *state = frame[@"state"];
+        if ([state isEqual:@"queued"]) return;
+        BOOL accepted = [state isEqual:@"started"] || [state isEqual:@"completed"];
+        void (^completion)(BOOL) = _pendingSends[uuid];
+        [_pendingSends removeObjectForKey:uuid];
+        if ([state isEqual:@"started"]) _activeCommand = command;
+        if (!accepted) [self reportError:[NSString stringWithFormat:@"%@ · %@", command, state]];
+        if (completion) completion(accepted);
+        if (![state isEqual:@"started"]) {
+            _compacting = NO;
+            [self notifyStreamChanged];
+            [_submittedCommands removeObjectForKey:uuid];
+            if (self.turnCompleted) self.turnCompleted();
+        }
+    } else if ([type isEqual:@"rate_limit_event"]) {
+        NSDictionary *windows = frame[@"rate_limit_info"][@"unifiedWindows"];
+        NSMutableDictionary *limits = [_usagePayload mutableCopy] ?: [NSMutableDictionary dictionary];
+        NSISO8601DateFormatter *formatter = [NSISO8601DateFormatter new];
+        for (NSString *name in @[@"five_hour", @"seven_day"]) {
+            NSDictionary *window = windows[name];
+            if (![window isKindOfClass:NSDictionary.class]) continue;
+            limits[name] = @{@"utilization": @([window[@"utilization"] doubleValue] * 100.0),
+                @"resets_at": [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:[window[@"resetsAt"] doubleValue]]]};
+        }
+        if (limits.count) {
+            _usagePayload = [limits copy];
+            if (self.usageChanged) self.usageChanged(_usagePayload, nil);
+        }
+    } else if ([type isEqual:@"system"] && [frame[@"subtype"] isEqual:@"init"]) {
+        NSString *model = frame[@"model"];
+        if ([frame[@"permissionMode"] isKindOfClass:NSString.class]) _permissionMode = frame[@"permissionMode"];
+        if ([model isKindOfClass:NSString.class] && model.length) {
+            _currentModel = [model copy];
+            if (self.modelChanged) self.modelChanged();
+        }
+    } else if ([type isEqual:@"system"]) {
+        NSString *subtype = frame[@"subtype"];
+        if ([subtype isEqual:@"commands_changed"]) _commands = frame[@"commands"];
+        if ([subtype isEqual:@"local_command_output"]) [self showCommandOutput:frame[@"content"]];
+        if ([subtype isEqual:@"status"]) {
+            if ([frame[@"permissionMode"] isKindOfClass:NSString.class]) {
+                _permissionMode = frame[@"permissionMode"];
+                if (self.modelChanged) self.modelChanged();
+            }
+            _compacting = [frame[@"status"] isEqual:@"compacting"];
+            if (_compacting) {
+                _responding = YES;
+                if (self.statusChanged) self.statusChanged(PTL(@"Claude 正在压缩上下文…", @"Claude is compacting context…"));
+            }
+            if ([frame[@"status"] isEqual:@"requesting"]) _responding = YES;
+            if ([frame[@"compact_result"] isEqual:@"failed"]) [self reportError:frame[@"compact_error"] ?: PTL(@"压缩失败", @"Compaction failed")];
+            [self notifyStreamChanged];
+        }
+        if ([subtype isEqual:@"compact_boundary"]) {
+            _compacting = NO;
+            NSDictionary *metadata = frame[@"compact_metadata"];
+            if ([metadata[@"post_tokens"] isKindOfClass:NSNumber.class]) _contextTokens = metadata[@"post_tokens"];
+            NSString *text = metadata[@"post_tokens"]
+                ? [NSString stringWithFormat:PTL(@"压缩完成：%@ → %@ tokens", @"Compacted: %@ → %@ tokens"), metadata[@"pre_tokens"], metadata[@"post_tokens"]]
+                : [NSString stringWithFormat:PTL(@"压缩完成 · 压缩前 %@ tokens", @"Compacted · %@ tokens before"), metadata[@"pre_tokens"]];
+            [self showCommandOutput:text];
+            if (self.modelChanged) self.modelChanged();
+            [self notifyStreamChanged];
+        }
+    } else if ([type isEqual:@"user"]) {
+        // --replay-user-messages 保留输入 UUID：此时整条图文已进入 Claude，
+        // 不再依赖终端画面、图片缓存位置或粘贴后的回车时序。
+        NSString *uuid = frame[@"uuid"];
+        void (^completion)(BOOL) = uuid ? _pendingSends[uuid] : nil;
+        if (completion) {
+            [_pendingSends removeObjectForKey:uuid];
+            if (self.statusChanged) self.statusChanged(PTL(@"图文已提交，等待 Claude 回复…", @"Message submitted; waiting for Claude…"));
+            completion(YES);
+        }
+    } else if ([type isEqual:@"result"]) {
+        _compacting = NO;
+        [self notifyStreamChanged];
+        if (_activeCommand.length && [frame[@"result"] isKindOfClass:NSString.class]) [self showCommandOutput:frame[@"result"]];
+        _activeCommand = nil;
+        if ([frame[@"is_error"] boolValue]) {
+            NSArray *errors = frame[@"errors"];
+            NSString *message = errors.count ? [errors componentsJoinedByString:@"\n"] : frame[@"result"];
+            [self reportError:message ?: PTL(@"Claude 未完成本次请求", @"Claude did not complete the request")];
+            [self completePendingSends:NO];
+        }
+        if (self.turnCompleted) self.turnCompleted();
+        [self refreshUsage];
+        [self refreshSettings];
+    }
+    if (self.outputObserved && ([type isEqual:@"control_response"] || [type isEqual:@"system"])) {
+        NSData *json = [NSJSONSerialization dataWithJSONObject:frame options:0 error:nil];
+        self.outputObserved([[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding]);
+    }
+}
 
-    NSString *sessionID = session.sessionID;
-    NSString *sessionCWD = session.cwd.stringByStandardizingPath;
+- (void)consumeOutput:(NSData *)data {
+    [_outputBuffer appendData:data];
+    while (_outputBuffer.length) {
+        const void *newline = memchr(_outputBuffer.bytes, '\n', _outputBuffer.length);
+        if (!newline) break;
+        NSUInteger length = (const uint8_t *)newline - (const uint8_t *)_outputBuffer.bytes;
+        NSData *line = [_outputBuffer subdataWithRange:NSMakeRange(0, length)];
+        [_outputBuffer replaceBytesInRange:NSMakeRange(0, length + 1) withBytes:NULL length:0];
+        if (!line.length) continue;
+        id frame = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+        if ([frame isKindOfClass:NSDictionary.class]) [self consumeFrame:frame];
+        else [self reportError:PTL(@"Claude 返回了无法解析的消息", @"Claude returned an unreadable message")];
+    }
+}
+
+- (void)finishProcessIfEnded {
+    if (!_processEnded || !_stdoutEnded) return;
+    [_workingMessageIDs removeAllObjects];
+    [self consumeStreamFrame:@{@"type": @"result"}];
+    _running = NO;
+    _connectingSessionID = nil;
+    NSString *message = _stderrText.length ? _stderrText :
+        [NSString stringWithFormat:PTL(@"Claude 后台会话已结束（%d）", @"Claude background session ended (%d)"), _exitStatus];
+    [self reportError:message];
+    [self completePendingSends:NO];
+}
+
+// 接管同一 session 的旧交互进程后再恢复，避免两个进程同时续写同一会话。
+// 这是已确认的连接迁移，只匹配 Claude 自己记录的 sessionId。
+- (NSString *)releaseInteractiveSession:(NSString *)sessionID {
+    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@".claude/sessions"];
+    NSFileManager *files = NSFileManager.defaultManager;
+    for (NSString *name in [files contentsOfDirectoryAtPath:directory error:nil]) {
+        NSData *data = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:name]];
+        NSDictionary *metadata = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if (![metadata isKindOfClass:NSDictionary.class] || ![metadata[@"sessionId"] isEqual:sessionID]) continue;
+        pid_t pid = [metadata[@"pid"] intValue];
+        if (pid <= 0 || kill(pid, 0) != 0) continue;
+        dispatch_semaphore_t exited = dispatch_semaphore_create(0);
+        dispatch_source_t observer = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, pid,
+            DISPATCH_PROC_EXIT, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+        dispatch_source_set_event_handler(observer, ^{ dispatch_semaphore_signal(exited); });
+        dispatch_resume(observer);
+        int result = kill(pid, SIGTERM);
+        if (result == 0) dispatch_semaphore_wait(exited, DISPATCH_TIME_FOREVER);
+        dispatch_source_cancel(observer);
+        if (result != 0 && errno != ESRCH) return [NSString stringWithFormat:
+            PTL(@"Claude 会话接管失败：%s", @"Claude session takeover failed: %s"), strerror(errno)];
+    }
+    return nil;
+}
+
+- (void)launchSession:(PTSessionInfo *)session resume:(BOOL)resume prompt:(NSString *)prompt {
+    [self stop];
+    _sessionID = [session.sessionID copy];
+    _connectingSessionID = _sessionID;
+    _initialPrompt = [prompt copy];
+    NSUInteger generation = _connectionGeneration;
+    NSString *sessionID = _sessionID;
+    NSString *cwd = [session.cwd copy];
     __weak typeof(self) weakSelf = self;
     dispatch_async(_ioQueue, ^{
         PTClaudeBridge *self = weakSelf;
-        if (!self || requestGeneration != self->_connectionGeneration) return;
-
-        NSString *appleScriptError = nil;
-        NSArray<NSString *> *allTTYs = [self allTerminalTTYsWithError:&appleScriptError];
-        if (appleScriptError) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (requestGeneration != self->_connectionGeneration) return;
-                self->_connectingSessionID = nil;
-                if (self.statusChanged) {
-                    self.statusChanged(appleScriptError);
-                }
-            });
-            return;
-        }
-
-        // 逐个标签页找它上面跑着的 Claude 进程。Claude 自己记录的 sessionId 是
-        // 首要连接键，不能先经 cwd 过滤，否则 lsof 短暂漏报或目录表示差异会把本来
-        // 可以精确绑定的会话提前删除。只有 sessionId 不等于目标时，cwd 才负责收集
-        // 同目录候选，供下面判断当前 Claude 是否尚未提供会话标识。
-        NSMutableArray<NSString *> *matchedTTYs = [NSMutableArray array];
-        NSMutableArray<NSNumber *> *matchedPIDs = [NSMutableArray array];
-        NSMutableArray<NSString *> *matchedSessionIDs = [NSMutableArray array];
-        for (NSString *tty in allTTYs) {
-            pid_t candidatePID = [self claudePIDForTTY:tty];
-            if (candidatePID <= 0) continue;
-            NSDictionary *metadata = [self sessionMetadataForPID:candidatePID];
-            NSString *liveSessionID = [metadata[@"sessionId"] isKindOfClass:NSString.class]
-                ? metadata[@"sessionId"] : @"";
-            BOOL exactSession = [liveSessionID isEqual:sessionID];
-            NSString *candidateCWD = [self cwdForPID:candidatePID].stringByStandardizingPath;
-            BOOL sameDirectory = candidateCWD.length && [candidateCWD isEqual:sessionCWD];
-            if (exactSession || sameDirectory) {
-                [matchedTTYs addObject:tty];
-                [matchedPIDs addObject:@(candidatePID)];
-                [matchedSessionIDs addObject:liveSessionID];
-            }
-        }
-
-        if (matchedTTYs.count == 0) {
-            [self launchSessionID:sessionID cwd:sessionCWD generation:requestGeneration];
-            return;
-        }
-
-        NSMutableArray<NSNumber *> *exactIndexes = [NSMutableArray array];
-        BOOL hasLiveSessionMetadata = NO;
-        for (NSUInteger index = 0; index < matchedSessionIDs.count; index++) {
-            NSString *liveSessionID = matchedSessionIDs[index];
-            if (liveSessionID.length) hasLiveSessionMetadata = YES;
-            if ([liveSessionID isEqual:sessionID]) [exactIndexes addObject:@(index)];
-        }
-
-        if (exactIndexes.count == 0 && hasLiveSessionMetadata) {
-            [self launchSessionID:sessionID cwd:sessionCWD generation:requestGeneration];
-            return;
-        }
-        if (exactIndexes.count == 0 && matchedTTYs.count > 1) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (requestGeneration != self->_connectionGeneration) return;
-                self->_connectingSessionID = nil;
-                if (self.statusChanged) {
-                    self.statusChanged(@"同目录存在多个无会话标识的 Claude 标签页，无法确定目标");
-                }
-            });
-            return;
-        }
-
-        if (exactIndexes.count > 1) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (requestGeneration != self->_connectionGeneration) return;
-                self->_connectingSessionID = nil;
-                if (self.statusChanged) {
-                    self.statusChanged(@"多个 Terminal 标签页声明同一会话，无法确定目标");
-                }
-            });
-            return;
-        }
-
-        NSUInteger selectedIndex = exactIndexes.count == 1
-            ? exactIndexes.firstObject.unsignedIntegerValue : 0;
-        NSString *tty = matchedTTYs[selectedIndex];
-        pid_t pid = matchedPIDs[selectedIndex].intValue;
-        NSString *ambiguityNote = @"";
-        if (exactIndexes.count == 0) {
-            ambiguityNote = @"（当前 Claude 未提供会话标识；已连接该目录唯一候选）";
-        }
-
+        if (!self || generation != self->_connectionGeneration) return;
+        NSString *error = resume ? [self releaseInteractiveSession:sessionID] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (requestGeneration != self->_connectionGeneration) return;
-            self->_connectingSessionID = nil;
-            self->_terminalTTY = tty;
-            self->_terminalPID = pid;
-            self->_sessionID = sessionID;
-            self->_running = YES;
-            if (self.statusChanged) {
-                self.statusChanged([NSString stringWithFormat:@"已同步 Terminal · %@ %@",
-                    tty.lastPathComponent, ambiguityNote]);
+            if (generation != self->_connectionGeneration) return;
+            if (error) {
+                [self reportError:error];
+                self->_connectingSessionID = nil;
+                [self completePendingSends:NO];
+                return;
             }
+            [self startProcessInDirectory:cwd resume:resume];
         });
     });
 }
 
-- (BOOL)sendMessage:(NSString *)message {
-    if (!_running || message.length == 0) return NO;
-    if (_terminalPID <= 0 || kill(_terminalPID, 0) != 0) {
-        [self stop];
-        if (self.statusChanged) self.statusChanged(@"Terminal 中的 Claude 已结束");
-        return NO;
+- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume {
+    _task = [NSTask new];
+    _inputPipe = [NSPipe pipe];
+    _outputPipe = [NSPipe pipe];
+    _errorPipe = [NSPipe pipe];
+    _outputBuffer = [NSMutableData data];
+    _stderrText = @"";
+    _stdoutEnded = NO;
+    _processEnded = NO;
+    _task.executableURL = [NSURL fileURLWithPath:@"/bin/zsh"];
+    _task.currentDirectoryURL = [NSURL fileURLWithPath:cwd];
+    // 加载用户已有 shell 环境、代理和认证；保持原 Claude --yolo 的 UTC/权限模式。
+    _task.arguments = @[@"-lic", @"export TZ=UTC\nexec \"$(whence -p claude)\" \"$@\"",
+        @"PrettyTerm", @"--dangerously-skip-permissions", @"--permission-prompt-tool", @"stdio", @"--print",
+        @"--input-format", @"stream-json", @"--output-format", @"stream-json",
+        @"--verbose", @"--replay-user-messages", @"--include-partial-messages",
+        resume ? @"--resume" : @"--session-id", _sessionID];
+    _task.standardInput = _inputPipe;
+    _task.standardOutput = _outputPipe;
+    _task.standardError = _errorPipe;
+    NSUInteger generation = _connectionGeneration;
+    __weak typeof(self) weakSelf = self;
+    _outputPipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
+        NSData *data = handle.availableData;
+        if (!data.length) handle.readabilityHandler = nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PTClaudeBridge *self = weakSelf;
+            if (!self || generation != self->_connectionGeneration) return;
+            if (data.length) [self consumeOutput:data];
+            else { self->_stdoutEnded = YES; [self finishProcessIfEnded]; }
+        });
+    };
+    _errorPipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
+        NSData *data = handle.availableData;
+        if (!data.length) { handle.readabilityHandler = nil; return; }
+        NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PTClaudeBridge *self = weakSelf;
+            if (!self || generation != self->_connectionGeneration || !text) return;
+            self->_stderrText = [self->_stderrText stringByAppendingString:text];
+        });
+    };
+    _task.terminationHandler = ^(NSTask *task) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PTClaudeBridge *self = weakSelf;
+            if (!self || generation != self->_connectionGeneration) return;
+            self->_processEnded = YES;
+            self->_exitStatus = task.terminationStatus;
+            [self finishProcessIfEnded];
+        });
+    };
+    NSError *error = nil;
+    if (![_task launchAndReturnError:&error]) {
+        [self reportError:error.localizedDescription];
+        _connectingSessionID = nil;
+        [self completePendingSends:NO];
+        return;
     }
-    BOOL isMultiline =
-        [message rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound;
-    BOOL sent = isMultiline
-        ? [self sendMultilineMessage:message]
-        : ([self sendToTerminal:PTNormalizedTerminalPasteText(message)] &&
-           [self sendReturnToTerminal]);
-    if (sent) {
-        if (self.statusChanged) self.statusChanged(@"已写入 Terminal，等待 Claude 回复…");
-        return YES;
-    }
-    return NO;
+    _initializeID = NSUUID.UUID.UUIDString.lowercaseString;
+    [self writeFrame:@{@"type": @"control_request", @"request_id": _initializeID,
+        @"request": @{@"subtype": @"initialize"}} completion:nil];
 }
 
-- (BOOL)pasteCurrentClipboardImageIntoTerminal {
-    if (_terminalTTY.length == 0) return NO;
-    NSString *source = PTTerminalAutomationScript(
-        _terminalTTY, _terminalPID, @"", PTTerminalAutomationActionPasteImage);
-    NSDictionary *error = nil;
-    NSAppleEventDescriptor *result =
-        [[[NSAppleScript alloc] initWithSource:source] executeAndReturnError:&error];
-    NSString *outcome = result.stringValue;
-    if ([outcome isEqual:@"ok"]) return YES;
+- (void)connectToSession:(PTSessionInfo *)session {
+    if ([_connectingSessionID isEqual:session.sessionID] ||
+        (_running && [_sessionID isEqual:session.sessionID])) return;
+    [self launchSession:session resume:YES prompt:nil];
+}
 
-    if ([outcome isEqual:@"mismatch"]) _running = NO;
-    NSNumber *number = error[NSAppleScriptErrorNumber];
-    NSString *detail = error[NSAppleScriptErrorMessage] ?: outcome ?: @"未知错误";
-    NSLog(@"PrettyTerm image paste failed: outcome=%@ errorNumber=%@ error=%@",
-        outcome ?: @"(nil)", number ?: @0, detail);
-    BOOL denied = number.integerValue == -1743;
-    _lastSendError = denied
-            ? @"Terminal 自动化权限未开启"
-            : [NSString stringWithFormat:@"Claude 图片附件写入失败（%@）：%@",
-                number ?: @0, detail];
-    if (self.statusChanged) self.statusChanged(_lastSendError);
-    return NO;
+- (void)connectToSession:(PTSessionInfo *)session completion:(void (^)(BOOL))completion {
+    if (_running && [_sessionID isEqual:session.sessionID]) {
+        if (completion) completion(YES);
+        return;
+    }
+    [self connectToSession:session];
+    if (completion) [_pendingConnections addObject:[completion copy]];
+}
+
+- (void)startNewSession:(PTSessionInfo *)session prompt:(NSString *)prompt {
+    [self launchSession:session resume:NO prompt:prompt];
+}
+
+- (void)startNewSessionInDirectory:(NSString *)directory {
+    PTSessionInfo *session = [PTSessionInfo new];
+    session.sessionID = NSUUID.UUID.UUIDString.lowercaseString;
+    session.cwd = directory;
+    [self launchSession:session resume:NO prompt:nil];
+}
+
+- (void)submitMessage:(NSString *)message withImagePNGs:(NSArray<NSData *> *)imagePNGs
+          completion:(void (^)(BOOL))completion {
+    _lastSendError = nil;
+    if (!imagePNGs.count && [[message stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] hasPrefix:@"/"])
+        message = [message stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!_running) {
+        [self reportError:PTL(@"Claude 会话未连接", @"Claude session is disconnected")];
+        if (completion) completion(NO);
+        return;
+    }
+    NSDictionary *control = nil;
+    if (!imagePNGs.count && [message hasPrefix:@"/model "]) {
+        control = @{@"subtype": @"set_model", @"model": [message substringFromIndex:7]};
+    } else if (!imagePNGs.count && [message isEqual:@"/remote-control"]) {
+        control = @{@"subtype": @"remote_control", @"enabled": @YES};
+    } else if (!imagePNGs.count && [message hasPrefix:@"/effort "]) {
+        control = @{@"subtype": @"apply_flag_settings", @"settings": @{@"effortLevel": [message substringFromIndex:8]}};
+    } else if (!imagePNGs.count) {
+        NSDictionary *modes = @{@"/plan": @"plan", @"/auto": @"auto", @"/bypass": @"bypassPermissions",
+            @"/mode plan": @"plan", @"/mode auto": @"auto", @"/mode bypass": @"bypassPermissions",
+            @"/mode default": @"default", @"/mode acceptEdits": @"acceptEdits"};
+        NSString *mode = modes[message];
+        if (mode) control = @{@"subtype": @"set_permission_mode", @"mode": mode};
+    }
+    if (control) {
+        NSString *requestID = NSUUID.UUID.UUIDString.lowercaseString;
+        NSString *model = control[@"model"];
+        __weak typeof(self) weakSelf = self;
+        _pendingControls[requestID] = [^(BOOL accepted) {
+            PTClaudeBridge *self = weakSelf;
+            if (!self) return;
+            if (accepted && model) {
+                self->_currentModel = [model copy];
+                if (self.modelChanged) self.modelChanged();
+            }
+            if (accepted && control[@"mode"]) self->_permissionMode = control[@"mode"];
+            if (accepted && control[@"settings"][@"effortLevel"]) self->_currentEffort = control[@"settings"][@"effortLevel"];
+            if (accepted) {
+                if (self.modelChanged) self.modelChanged();
+                [self refreshSettings];
+            }
+            if (completion) completion(accepted);
+        } copy];
+        [self writeFrame:@{@"type": @"control_request", @"request_id": requestID, @"request": control}
+            completion:^(BOOL written) {
+                if (written) return;
+                void (^callback)(BOOL) = self->_pendingControls[requestID];
+                [self->_pendingControls removeObjectForKey:requestID];
+                if (callback) callback(NO);
+            }];
+        return;
+    }
+    NSMutableArray *content = [NSMutableArray array];
+    for (NSData *png in imagePNGs) {
+        [content addObject:@{@"type": @"image", @"source": @{
+            @"type": @"base64", @"media_type": @"image/png",
+            @"data": [png base64EncodedStringWithOptions:0]}}];
+    }
+    if ([message stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length)
+        [content addObject:@{@"type": @"text", @"text": message}];
+    NSString *uuid = NSUUID.UUID.UUIDString.lowercaseString;
+    if (!imagePNGs.count && [message hasPrefix:@"/"]) _submittedCommands[uuid] = message;
+    if (completion) _pendingSends[uuid] = [completion copy];
+    NSDictionary *frame = @{@"type": @"user", @"uuid": uuid, @"session_id": _sessionID,
+        @"parent_tool_use_id": NSNull.null, @"message": @{@"role": @"user", @"content": imagePNGs.count ? (id)content : message}};
+    [_workingMessageIDs addObject:uuid];
+    _responding = YES;
+    [self notifyStreamChanged];
+    [self writeFrame:frame completion:^(BOOL written) {
+        if (written) return;
+        [self->_workingMessageIDs removeObject:uuid];
+        self->_responding = self->_workingMessageIDs.count > 0;
+        [self notifyStreamChanged];
+        void (^callback)(BOOL) = self->_pendingSends[uuid];
+        [self->_pendingSends removeObjectForKey:uuid];
+        if (callback) callback(NO);
+    }];
+}
+
+- (BOOL)sendMessage:(NSString *)message {
+    if (!_running) return NO;
+    [self submitMessage:message withImagePNGs:@[] completion:nil];
+    return YES;
 }
 
 - (BOOL)sendMessage:(NSString *)message withImagePNGs:(NSArray<NSData *> *)imagePNGs {
-    _lastSendError = nil;
-    if (imagePNGs.count == 0) return [self sendMessage:message];
-    if (!_running || _terminalPID <= 0 || kill(_terminalPID, 0) != 0) {
-        [self stop];
-        if (self.statusChanged) self.statusChanged(@"Terminal 中的 Claude 已结束");
-        return NO;
-    }
+    if (!_running) return NO;
+    [self submitMessage:message withImagePNGs:imagePNGs completion:nil];
+    return YES;
+}
 
-    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-    NSArray<NSDictionary<NSString *, NSData *> *> *snapshot = PTSnapshotPasteboard(pasteboard);
-    BOOL attached = YES;
-    for (NSData *png in imagePNGs) {
-        NSUInteger markerBefore = PTTerminalImageMarkerCount([self boundTerminalContents]);
-        if (!PTWritePNGDataToPasteboard(png, pasteboard) ||
-            ![self pasteCurrentClipboardImageIntoTerminal]) {
-            attached = NO;
-            break;
-        }
-        // Ctrl-V 只启动 Claude 的异步剪贴板读取。新附件出现之前保持当前 PNG，
-        // 不能覆盖成下一张、恢复原剪贴板或提交正文。
-        BOOL loaded = PTRunLoopUntil(5.0, ^BOOL{
-            return PTTerminalImageMarkerCount([self boundTerminalContents]) > markerBefore;
-        });
-        if (!loaded) {
-            _lastSendError = PTL(@"Claude 未完成图片读取，图片和文字尚未提交",
-                @"Claude did not finish reading the image; images and text have not been submitted");
-            if (self.statusChanged) self.statusChanged(_lastSendError);
-            attached = NO;
-            break;
-        }
-    }
-    // 全部图片已进入 Claude 输入缓冲区后，再统一提交正文并恢复剪贴板。
-    BOOL sent = attached && [self sendMessage:message];
-    PTRestorePasteboard(pasteboard, snapshot);
-    [NSApp activateIgnoringOtherApps:YES];
-    return sent;
+- (BOOL)sendEscape {
+    return [self sendControl:@{@"subtype": @"interrupt"}];
 }
 
 - (void)stop {
     _connectionGeneration++;
-    _connectingSessionID = nil;
-    _sessionID = nil;
-    _terminalTTY = nil;
-    _terminalPID = 0;
     _running = NO;
+    _responding = NO;
+    [_workingMessageIDs removeAllObjects];
+    _activeWorkID = nil;
+    [_streamOrder removeAllObjects];
+    [_streamRecords removeAllObjects];
+    [_streamBlocks removeAllObjects];
+    [_streamQuestions removeAllObjects];
+    _persistedStreamKeys = nil;
+    [self notifyStreamChanged];
+    _connectingSessionID = nil;
+    _usageRequestID = nil;
+    _usagePayload = nil;
+    _currentModel = nil;
+    _currentEffort = nil;
+    _permissionMode = @"bypassPermissions";
+    _commands = @[];
+    _activeCommand = nil;
+    _compacting = NO;
+    _contextTokens = nil;
+    for (NSString *requestID in _toolRequests.allObjects) if (self.toolRequestCancelled) self.toolRequestCancelled(requestID);
+    [_toolRequests removeAllObjects];
+    _outputPipe.fileHandleForReading.readabilityHandler = nil;
+    _errorPipe.fileHandleForReading.readabilityHandler = nil;
+    [_inputPipe.fileHandleForWriting closeAndReturnError:nil];
+    if (_task.running) [_task terminate];
+    _task = nil;
+    _inputPipe = nil;
+    _outputPipe = nil;
+    _errorPipe = nil;
+    _initialPrompt = nil;
+    [self completePendingSends:NO];
 }
 
 - (void)dealloc {
-    [self stop];
+    _outputPipe.fileHandleForReading.readabilityHandler = nil;
+    _errorPipe.fileHandleForReading.readabilityHandler = nil;
+    [_inputPipe.fileHandleForWriting closeAndReturnError:nil];
+    if (_task.running) [_task terminate];
 }
 @end
 
@@ -2961,8 +3139,143 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 @end
 
+// An in-window completion list keeps the editor focused while the query changes.
+@interface PTCommandRowView : NSView
+@property(nonatomic, copy) NSDictionary *command;
+@property(nonatomic) BOOL highlighted;
+@end
+
+@implementation PTCommandRowView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    if (_highlighted) {
+        [NSColor.quaternaryLabelColor setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 3, 2) xRadius:11 yRadius:11] fill];
+    }
+    NSImage *icon = [NSImage imageWithSystemSymbolName:_command[@"icon"] accessibilityDescription:nil];
+    icon = [icon imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPaletteColors:@[NSColor.secondaryLabelColor]]];
+    [icon drawInRect:NSMakeRect(14, 12, 18, 18) fromRect:NSZeroRect
+        operation:NSCompositingOperationSourceOver fraction:0.65 respectFlipped:YES hints:nil];
+    NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
+    style.lineBreakMode = NSLineBreakByTruncatingTail;
+    NSDictionary *titleStyle = @{NSFontAttributeName: [NSFont systemFontOfSize:14 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: NSColor.labelColor, NSParagraphStyleAttributeName: style};
+    NSString *title = _command[@"title"];
+    CGFloat titleWidth = MIN([title sizeWithAttributes:titleStyle].width + 2, MAX(80, self.bounds.size.width * 0.40));
+    [title drawInRect:NSMakeRect(43, 11, titleWidth, 22) withAttributes:titleStyle];
+    CGFloat descriptionX = 43 + titleWidth + 12;
+    [_command[@"detail"] drawInRect:NSMakeRect(descriptionX, 12, MAX(0, self.bounds.size.width - descriptionX - 14), 21)
+        withAttributes:@{NSFontAttributeName: [NSFont systemFontOfSize:13],
+            NSForegroundColorAttributeName: NSColor.secondaryLabelColor, NSParagraphStyleAttributeName: style}];
+}
+@end
+
+@interface PTCommandPaletteView : NSView <NSTableViewDataSource, NSTableViewDelegate>
+@property(nonatomic, copy) NSArray<NSDictionary *> *commands;
+@property(nonatomic, copy) void (^chooseCommand)(NSDictionary *command);
+- (void)moveSelection:(NSInteger)offset;
+- (BOOL)chooseSelection;
+@end
+
+@implementation PTCommandPaletteView {
+    NSScrollView *_scroll;
+    NSTableView *_table;
+    NSTextField *_emptyLabel;
+}
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 18;
+        self.layer.borderWidth = 1;
+        self.layer.masksToBounds = YES;
+        _scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+        _scroll.drawsBackground = NO;
+        _scroll.hasVerticalScroller = YES;
+        _scroll.autohidesScrollers = YES;
+        _table = [[NSTableView alloc] initWithFrame:NSZeroRect];
+        _table.autoresizingMask = NSViewWidthSizable;
+        _table.headerView = nil;
+        _table.backgroundColor = NSColor.clearColor;
+        _table.rowHeight = 42;
+        _table.intercellSpacing = NSZeroSize;
+        _table.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
+        _table.columnAutoresizingStyle = NSTableViewLastColumnOnlyAutoresizingStyle;
+        NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"command"];
+        column.minWidth = 0;
+        [_table addTableColumn:column];
+        _table.dataSource = self;
+        _table.delegate = self;
+        _table.target = self;
+        _table.action = @selector(chooseSelection);
+        _scroll.documentView = _table;
+        [self addSubview:_scroll];
+        _emptyLabel = [NSTextField labelWithString:PTL(@"没有匹配的指令", @"No matching commands")];
+        _emptyLabel.textColor = NSColor.secondaryLabelColor;
+        _emptyLabel.alignment = NSTextAlignmentCenter;
+        [self addSubview:_emptyLabel];
+        [self updateLayer];
+    }
+    return self;
+}
+- (void)updateLayer {
+    self.layer.backgroundColor = PTWarmCardColor().CGColor;
+    self.layer.borderColor = PTWarmBorderColor().CGColor;
+}
+- (void)viewDidChangeEffectiveAppearance { [super viewDidChangeEffectiveAppearance]; [self updateLayer]; [_table reloadData]; }
+- (void)layout {
+    [super layout];
+    _scroll.frame = NSInsetRect(self.bounds, 6, 6);
+    _table.frame = NSMakeRect(0, 0, _scroll.contentSize.width, MAX(_scroll.contentSize.height, _commands.count * 42));
+    _table.tableColumns.firstObject.width = _scroll.contentSize.width;
+    _emptyLabel.frame = NSMakeRect(12, MAX(0, (self.bounds.size.height - 20) / 2), MAX(0, self.bounds.size.width - 24), 20);
+}
+- (void)setCommands:(NSArray<NSDictionary *> *)commands {
+    _commands = [commands copy];
+    [_table reloadData];
+    _emptyLabel.hidden = commands.count != 0;
+    if (commands.count) {
+        [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+        [_table scrollRowToVisible:0];
+    }
+}
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return _commands.count; }
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
+    PTCommandRowView *view = [tableView makeViewWithIdentifier:@"commandRow" owner:self];
+    if (!view) { view = [PTCommandRowView new]; view.identifier = @"commandRow"; }
+    view.command = _commands[row];
+    view.highlighted = tableView.selectedRow == row;
+    view.toolTip = [NSString stringWithFormat:@"/%@\n%@", view.command[@"name"], view.command[@"detail"]];
+    [view setNeedsDisplay:YES];
+    return view;
+}
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    NSRange rows = [_table rowsInRect:_table.visibleRect];
+    if (rows.location == NSNotFound) return;
+    for (NSUInteger row = rows.location; row < NSMaxRange(rows); row++) {
+        PTCommandRowView *view = [_table viewAtColumn:0 row:row makeIfNecessary:NO];
+        view.highlighted = _table.selectedRow == (NSInteger)row;
+        [view setNeedsDisplay:YES];
+    }
+}
+- (void)moveSelection:(NSInteger)offset {
+    if (!_commands.count) return;
+    NSInteger row = (_table.selectedRow + offset + (NSInteger)_commands.count) % (NSInteger)_commands.count;
+    [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+    [_table scrollRowToVisible:row];
+}
+- (BOOL)chooseSelection {
+    NSInteger row = _table.selectedRow;
+    if (row < 0 || row >= (NSInteger)_commands.count) return NO;
+    if (_chooseCommand) _chooseCommand(_commands[row]);
+    return YES;
+}
+@end
+
 @interface PTComposerTextView : NSTextView
 @property(nonatomic, copy) dispatch_block_t submitHandler;
+@property(nonatomic, copy) dispatch_block_t commandMenuHandler;
+@property(nonatomic, copy) BOOL (^commandKeyHandler)(NSEvent *event);
 @property(nonatomic, copy) BOOL (^imagePasteHandler)(NSPasteboard *pasteboard);
 @property(nonatomic, copy) BOOL (^fileDropHandler)(NSArray<NSURL *> *urls);
 @property(nonatomic, copy) NSString *placeholderText;
@@ -2989,6 +3302,13 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 - (void)didChangeText {
     [super didChangeText];
     [self setNeedsDisplay:YES];
+    if (!self.hasMarkedText && self.commandMenuHandler) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PTComposerTextView *self = weakSelf;
+            if (self && !self.hasMarkedText && self.commandMenuHandler) self.commandMenuHandler();
+        });
+    }
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
@@ -3020,6 +3340,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)keyDown:(NSEvent *)event {
+    if (!self.hasMarkedText && self.commandKeyHandler && self.commandKeyHandler(event)) return;
     BOOL commandPaste =
         (event.modifierFlags & NSEventModifierFlagCommand) != 0 &&
         (event.keyCode == 9 ||
@@ -3083,6 +3404,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 @end
 
 @interface PTWorkspaceTab : NSObject
+@property(nonatomic, copy) NSString *commandOutput;
 @property(nonatomic, copy) NSString *identifier;
 @property(nonatomic, copy) NSString *sessionID;
 @property(nonatomic, copy) NSString *draft;
@@ -3172,7 +3494,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSButton *_sendButton;
     NSButton *_refreshButton;
     NSTimer *_refreshTimer;
-    PTTranscriptWatcher *_usageSnapshotWatcher;
+    NSTimer *_usageRefreshTimer;
     NSString *_planUsageSessionID;
     BOOL _planUsageAvailable;
     double _fiveHourPercent;
@@ -3328,15 +3650,24 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSTextField *_questionPanelStatusLabel;
     NSMutableArray<NSDictionary *> *_questionPanelBlocks;
     NSString *_questionPanelRequestID;
+    NSMutableDictionary *_protocolQuestions;
+    NSMutableDictionary<NSString *, NSAlert *> *_protocolAlerts;
+    NSPopover *_commandResultPopover;
+    PTComposerTextView *_commandMenuComposer;
+    PTCommandPaletteView *_commandPalette;
+    id _commandDismissMonitor;
+    id _commandLayoutObserver;
+    NSString *_configurationSessionID;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     _agentState = [[PTAgentState alloc] init];
     _transcriptWatcher = [[PTTranscriptWatcher alloc] init];
-    _usageSnapshotWatcher = [[PTTranscriptWatcher alloc] init];
     _processedQuestionRequestIDs = [NSMutableSet set];
     _pendingQuestionRequests = [NSMutableArray array];
+    _protocolQuestions = [NSMutableDictionary dictionary];
+    _protocolAlerts = [NSMutableDictionary dictionary];
     _pendingImages = [NSMutableArray array];
     _pendingFiles = [NSMutableArray array];
     _workspaceTabs = [NSMutableArray array];
@@ -3362,9 +3693,9 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     [_window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [(PTWorkspaceSplitView *)_splitView setTrackedPosition:270 ofDividerAtIndex:0];
-    [self startWatchingClaudeUsageSnapshots];
     [_store refresh];
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(refreshSessions:) userInfo:nil repeats:YES];
+    _usageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:60 target:self selector:@selector(refreshClaudeUsage:) userInfo:nil repeats:YES];
     _questionPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(pollQuestionRequests:) userInfo:nil repeats:YES];
 }
 
@@ -3375,6 +3706,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         ? sender.selectedItem.representedObject : @"zh-Hans";
     NSString *stored = PTInterfaceLanguageCode();
     if ([language isEqualToString:stored]) return;
+    [self dismissCommandPalette];
 
     [NSUserDefaults.standardUserDefaults setObject:language
         forKey:PTInterfaceLanguageDefaultsKey];
@@ -3555,7 +3887,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         [tab.bridge stop];
     }
     [_transcriptWatcher stopWatching];
-    [_usageSnapshotWatcher stopWatching];
+    [_usageRefreshTimer invalidate];
     [_store stopWatchingGlobalSettings];
     for (NSString *path in _temporaryImagePaths.copy) {
         [NSFileManager.defaultManager removeItemAtPath:path error:nil];
@@ -3847,6 +4179,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
+    [self layoutCommandPalette];
     if (notification.object == _window) {
         [self updateInspectorPresentation];
     }
@@ -4130,7 +4463,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     };
 
     NSTextField *connectionValue = nil;
-    NSView *connectionCard = makeCard(PTL(@"TERMINAL 连接", @"TERMINAL CONNECTION"), &connectionValue);
+    NSView *connectionCard = makeCard(PTL(@"CLAUDE CODE 连接", @"CLAUDE CODE CONNECTION"), &connectionValue);
     _inspectorConnectionLabel = connectionValue;
 
     // 上下文卡片与成本卡片保持同一层级：总占用和状态条永远可见，只有
@@ -4609,6 +4942,69 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
             self->_statusLabel.stringValue = PTL(@"官方 Remote Control 已启用", @"Official Remote Control is enabled");
         }
     };
+    tab.bridge.turnCompleted = ^{
+        PTAppDelegate *self = weakSelf;
+        PTWorkspaceTab *strongTab = weakTab;
+        if (!self || !strongTab) return;
+        [self finishAwaitingClaudeReplyForSessionID:strongTab.bridge.sessionID];
+        [self->_store refresh];
+    };
+    tab.bridge.streamChanged = ^{
+        PTAppDelegate *self = weakSelf;
+        PTWorkspaceTab *strongTab = weakTab;
+        if (self && strongTab) {
+            [self presentClaudeStreamForBridge:strongTab.bridge];
+            [self refreshAgentStateAndControls];
+        }
+    };
+    tab.bridge.usageChanged = ^(NSDictionary *payload, NSString *error) {
+        PTAppDelegate *self = weakSelf;
+        PTWorkspaceTab *strongTab = weakTab;
+        if (!self || !strongTab || ![strongTab.bridge.sessionID isEqual:self->_selectedSession.sessionID]) return;
+        [self finishClaudeUsageWithPayload:payload error:error];
+    };
+    tab.bridge.modelChanged = ^{
+        PTAppDelegate *self = weakSelf;
+        PTWorkspaceTab *strongTab = weakTab;
+        if (!self || !strongTab) return;
+        PTSessionInfo *session = [self sessionWithID:strongTab.bridge.sessionID];
+        session.model = strongTab.bridge.currentModel;
+        if (strongTab.bridge.currentEffort.length) session.effort = strongTab.bridge.currentEffort;
+        if ([session.sessionID isEqual:self->_selectedSession.sessionID]) [self showSelectedSession];
+    };
+    tab.bridge.commandOutputChanged = ^(NSString *text) {
+        PTAppDelegate *self = weakSelf;
+        PTWorkspaceTab *strongTab = weakTab;
+        if (!self || !strongTab) return;
+        strongTab.commandOutput = text;
+        strongTab.status = [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet].firstObject;
+        if (self->_activeWorkspaceTab == strongTab) {
+            self->_statusLabel.stringValue = strongTab.status;
+            self->_statusLabel.toolTip = text;
+        }
+    };
+    tab.bridge.toolPermissionRequested = ^(NSString *requestID, NSDictionary *request) {
+        PTAppDelegate *self = weakSelf;
+        PTWorkspaceTab *strongTab = weakTab;
+        if (self && strongTab) [self presentClaudeToolRequest:requestID request:request bridge:strongTab.bridge];
+    };
+    tab.bridge.toolRequestCancelled = ^(NSString *requestID) {
+        PTAppDelegate *self = weakSelf;
+        if (!self) return;
+        NSAlert *alert = self->_protocolAlerts[requestID];
+        [self->_protocolAlerts removeObjectForKey:requestID];
+        if (alert.window.sheetParent) [alert.window.sheetParent endSheet:alert.window returnCode:NSModalResponseCancel];
+        [self->_protocolQuestions removeObjectForKey:requestID];
+        NSIndexSet *indexes = [self->_pendingQuestionRequests indexesOfObjectsPassingTest:^BOOL(NSDictionary *item, NSUInteger index, BOOL *stop) {
+            (void)index; (void)stop;
+            return [item[@"id"] isEqual:requestID];
+        }];
+        [self->_pendingQuestionRequests removeObjectsAtIndexes:indexes];
+        if ([self->_questionPanelRequestID isEqual:requestID]) {
+            [self->_questionPanel orderOut:nil];
+            [self presentNextQuestionRequestIfIdle];
+        }
+    };
 }
 
 - (PTWorkspaceTab *)createWorkspaceTab {
@@ -4657,6 +5053,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 
 - (void)activateWorkspaceTab:(PTWorkspaceTab *)tab animated:(BOOL)animated {
     if (!tab || _activeWorkspaceTab == tab) return;
+    [self dismissCommandPalette];
     [self saveActiveWorkspaceTabState];
     _activeWorkspaceTab = tab;
     _bridge = tab.bridge;
@@ -4776,7 +5173,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         selectButton.strokeColor = _activeWorkspaceTab == tab ? PTWarmBorderColor() : NSColor.clearColor;
         selectButton.cornerRadius = 11;
         selectButton.toolTip = tab.bridge.running
-            ? [NSString stringWithFormat:PTL(@"已同步 Terminal · %@", @"Terminal synced · %@"), name]
+            ? [NSString stringWithFormat:PTL(@"已连接 Claude · %@", @"Terminal synced · %@"), name]
             : name;
         [selectButton setAccessibilityLabel:name];
 
@@ -5458,7 +5855,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _compactButton = PTWarmButton(@"Compact", self, @selector(compactConversation:));
     _compactButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
     _compactButton.enabled = NO;
-    _compactButton.toolTip = PTL(@"向当前 Terminal 会话发送 /compact", @"Send /compact to the current Terminal conversation");
+    _compactButton.toolTip = PTL(@"向当前 Claude Code 会话发送 /compact", @"Send /compact to the current Claude Code conversation");
     [header addSubview:_compactButton];
 
     _inspectorToggleButton = PTWarmButton(@"", self, @selector(toggleInspector:));
@@ -5466,10 +5863,10 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _inspectorToggleButton.toolTip = PTL(@"显示或收起检查器", @"Show or collapse the inspector");
     [header addSubview:_inspectorToggleButton];
 
-    _connectButton = PTWarmButton(PTL(@"同步 Terminal", @"Sync"), self, @selector(connectSelectedSession:));
+    _connectButton = PTWarmButton(PTL(@"连接 Claude", @"Sync"), self, @selector(connectSelectedSession:));
     _connectButton.contentTintColor = PTWarmAccentColor();
     _connectButton.enabled = NO;
-    _connectButton.toolTip = PTL(@"同步选中的 Terminal Claude Code 会话", @"Sync the selected Terminal Claude Code conversation");
+    _connectButton.toolTip = PTL(@"连接选中的 Claude Code 后台会话", @"Connect the selected Claude Code conversation");
     [header addSubview:_connectButton];
 
     PTAnimatedButton *floatingButton = PTWarmButton(@"", self, @selector(toggleFloatingConversation:));
@@ -5583,6 +5980,14 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _composerTextView.submitHandler = ^{
         [weakSelf sendMessage:nil];
     };
+    _composerTextView.commandMenuHandler = ^{
+        PTAppDelegate *self = weakSelf;
+        if (self) [self updateClaudeCommandsForComposer:self->_composerTextView];
+    };
+    _composerTextView.commandKeyHandler = ^BOOL(NSEvent *event) {
+        PTAppDelegate *self = weakSelf;
+        return self ? [self handleCommandKey:event composer:self->_composerTextView] : NO;
+    };
     _composerTextView.imagePasteHandler = ^BOOL(NSPasteboard *pasteboard) {
         return [weakSelf handleImagePasteboard:pasteboard];
     };
@@ -5627,7 +6032,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     statusBar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
     statusBar.state = NSVisualEffectStateActive;
     [pane addSubview:statusBar];
-    _bottomStatusLabel = [self label:PTL(@"Terminal 是唯一执行引擎", @"Terminal is the sole execution engine") size:10 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    _bottomStatusLabel = [self label:PTL(@"Claude Code 后台执行", @"Claude Code runs in the background") size:10 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
     [statusBar addSubview:_bottomStatusLabel];
 
     _composerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:112];
@@ -5863,6 +6268,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 
 - (void)showHome:(id)sender {
     (void)sender;
+    [self dismissCommandPalette];
     if (!_homeProjectPath.length) _homeProjectPath = [_selectedSession.cwd copy];
     [self updateHomeProjects];
     _homeVisible = YES;
@@ -6001,6 +6407,24 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     return nil;
 }
 
+- (void)prepareBridgeForSessionID:(NSString *)sessionID
+                      completion:(void (^)(PTClaudeBridge *))completion {
+    PTClaudeBridge *bridge = [self bridgeForSessionID:sessionID];
+    if (bridge) { completion(bridge); return; }
+    PTSessionInfo *session = [self sessionWithID:sessionID];
+    for (PTWorkspaceTab *tab in _workspaceTabs) {
+        if (!session || ![tab.sessionID isEqual:sessionID]) continue;
+        tab.connecting = YES;
+        if (_activeWorkspaceTab == tab) _connecting = YES;
+        [tab.bridge connectToSession:session completion:^(BOOL connected) {
+            completion(connected ? tab.bridge : nil);
+        }];
+        [self updateConnectButtonTitle];
+        return;
+    }
+    completion(nil);
+}
+
 - (void)presentClaudeWaiting:(BOOL)waiting forSessionID:(NSString *)sessionID {
     if (sessionID.length == 0) return;
     NSString *script = [NSString stringWithFormat:
@@ -6012,6 +6436,17 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     if (_floatingWebReady && _floatingPanel.visible && [_floatingSessionID isEqual:sessionID]) {
         [_floatingConversationView evaluateJavaScript:script completionHandler:nil];
     }
+}
+
+- (void)presentClaudeStreamForBridge:(PTClaudeBridge *)bridge {
+    if (!bridge.sessionID.length) return;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:bridge.streamPayload options:0 error:nil];
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSString *script = [NSString stringWithFormat:@"window.setClaudeStream(%@); null;", json];
+    if (_webReady && [_selectedSession.sessionID isEqual:bridge.sessionID])
+        [_conversationView evaluateJavaScript:script completionHandler:nil];
+    if (_floatingWebReady && _floatingPanel.visible && [_floatingSessionID isEqual:bridge.sessionID])
+        [_floatingConversationView evaluateJavaScript:script completionHandler:nil];
 }
 
 - (void)beginAwaitingClaudeReplyForSessionID:(NSString *)sessionID {
@@ -6033,6 +6468,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)reconcileAwaitingClaudeReplyWithSession:(PTSessionInfo *)session {
+    // A managed turn ends at the protocol result, never at its first transcript event.
+    if ([self bridgeForSessionID:session.sessionID].running) return;
     NSNumber *baselineValue = _awaitingClaudeBaselineBySessionID[session.sessionID];
     if (!baselineValue) return;
     NSUInteger baseline = baselineValue.unsignedIntegerValue;
@@ -6169,6 +6606,14 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingComposerTextView.submitHandler = ^{
         [weakSelf sendFloatingMessage:nil];
     };
+    _floatingComposerTextView.commandMenuHandler = ^{
+        PTAppDelegate *self = weakSelf;
+        if (self) [self updateClaudeCommandsForComposer:self->_floatingComposerTextView];
+    };
+    _floatingComposerTextView.commandKeyHandler = ^BOOL(NSEvent *event) {
+        PTAppDelegate *self = weakSelf;
+        return self ? [self handleCommandKey:event composer:self->_floatingComposerTextView] : NO;
+    };
     _floatingComposerTextView.imagePasteHandler = ^BOOL(NSPasteboard *pasteboard) {
         return [weakSelf handleFloatingImagePasteboard:pasteboard];
     };
@@ -6270,6 +6715,8 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 
 - (void)renderFloatingSession:(PTSessionInfo *)session {
     if (!_floatingWebReady || !_floatingPanel.visible || !session) return;
+    PTClaudeBridge *streamBridge = [self bridgeForSessionID:session.sessionID];
+    [streamBridge reconcileStreamWithMessages:session.assistantMessages];
     if (_floatingRenderInFlight) {
         if (!_pendingFloatingSession ||
             ![_pendingFloatingSession.sessionID isEqual:session.sessionID] ||
@@ -6300,6 +6747,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
         @"interfaceLanguage": PTInterfaceLanguageCode(),
         @"awaitingReply": @(_awaitingClaudeBaselineBySessionID[session.sessionID] != nil)
     } mutableCopy];
+    payload[@"questionUpdates"] = PTQuestionUpdates(session.assistantMessages);
     if (!canAppend) payload[@"messages"] = session.assistantMessages ?: @[];
 
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
@@ -6339,6 +6787,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
             self->_floatingRenderedSessionID = targetSessionID;
             self->_floatingRenderedModifiedAt = targetModifiedAt;
             self->_floatingRenderedMessageCount = session.assistantMessages.count;
+            [self presentClaudeStreamForBridge:streamBridge];
         } else if (stillCurrent && (error || appendRejected)) {
             self->_floatingPanel.title = @"悬浮对话 · 显示更新失败";
         }
@@ -7027,7 +7476,240 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     PTAnimatedButton *effortRow = [self composerPopoverButtonWithTitle:
         [NSString stringWithFormat:PTL(@"推理强度   ·   %@   ›", @"Effort   ·   %@   ›"), effort]
         action:@selector(showComposerEffortPage:) identifier:nil];
-    [self replaceComposerOptionsWithViews:@[back, modelRow, effortRow] height:190];
+    PTClaudeBridge *bridge = [self bridgeForSessionID:_configurationSessionID ?: _selectedSession.sessionID];
+    NSString *mode = bridge.permissionMode ?: @"bypassPermissions";
+    PTAnimatedButton *modeRow = [self composerPopoverButtonWithTitle:
+        [NSString stringWithFormat:PTL(@"模式   ·   %@   ›", @"Mode   ·   %@   ›"), mode]
+        action:@selector(showComposerModePage:) identifier:nil];
+    PTAnimatedButton *commands = [self composerPopoverButtonWithTitle:PTL(@"命令 /   ›", @"Commands /   ›")
+        action:@selector(showClaudeCommands:) identifier:nil];
+    PTAnimatedButton *result = [self composerPopoverButtonWithTitle:PTL(@"查看命令结果   ›", @"View command result   ›")
+        action:@selector(showClaudeCommandResult:) identifier:nil];
+    [self replaceComposerOptionsWithViews:@[back, modelRow, effortRow, modeRow, commands, result] height:325];
+}
+
+- (void)showComposerModePage:(id)sender {
+    NSMutableArray *views = [NSMutableArray arrayWithObject:[self composerPopoverButtonWithTitle:PTL(@"‹  模式", @"‹  Mode") action:@selector(showComposerAdvancedPage:) identifier:nil]];
+    NSString *mode = [self bridgeForSessionID:_configurationSessionID ?: _selectedSession.sessionID].permissionMode;
+    for (NSArray *entry in @[@[@"Plan", @"plan"], @[@"Auto", @"auto"], @[@"Bypass", @"bypass"], @[@"Default", @"default"], @[@"Accept edits", @"acceptEdits"]]) {
+        NSString *wireMode = [entry[1] isEqual:@"bypass"] ? @"bypassPermissions" : entry[1];
+        NSString *title = [[wireMode isEqual:mode] ? @"✓  " : @"    " stringByAppendingString:entry[0]];
+        [views addObject:[self composerPopoverButtonWithTitle:title action:@selector(changeComposerMode:) identifier:entry[1]]];
+    }
+    [self replaceComposerOptionsWithViews:views height:320];
+}
+
+- (void)changeComposerMode:(PTAnimatedButton *)sender {
+    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
+    [self sendOutgoingMessage:[@"/mode " stringByAppendingString:sender.identifier] imagePNGs:@[] forSessionID:sessionID success:^{
+        [self showComposerModePage:nil];
+        self->_statusLabel.stringValue = [NSString stringWithFormat:PTL(@"模式已切换为 %@", @"Mode changed to %@"), sender.identifier];
+    } failureResponder:nil];
+}
+
+- (void)dismissCommandPalette {
+    [_commandPalette removeFromSuperview];
+    _commandMenuComposer = nil;
+    if (_commandDismissMonitor) { [NSEvent removeMonitor:_commandDismissMonitor]; _commandDismissMonitor = nil; }
+    if (_commandLayoutObserver) { [NSNotificationCenter.defaultCenter removeObserver:_commandLayoutObserver]; _commandLayoutObserver = nil; }
+}
+
+- (NSString *)commandQueryForComposer:(PTComposerTextView *)composer {
+    NSString *text = composer.string;
+    if (![text hasPrefix:@"/"] || [text rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) return nil;
+    return [text substringFromIndex:1];
+}
+
+- (void)updateClaudeCommandsForComposer:(PTComposerTextView *)composer {
+    if (composer.window.firstResponder != composer) return;
+    if ([self commandQueryForComposer:composer] == nil) {
+        if (_commandMenuComposer == composer) [self dismissCommandPalette];
+        return;
+    }
+    [self showClaudeCommands:composer];
+}
+
+- (BOOL)handleCommandKey:(NSEvent *)event composer:(PTComposerTextView *)composer {
+    if (!_commandPalette.superview || _commandMenuComposer != composer) return NO;
+    NSEventModifierFlags modifiers = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if (modifiers & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift)) return NO;
+    if (event.keyCode == 53) { [self dismissCommandPalette]; return YES; }
+    if (event.keyCode == 125 || event.keyCode == 126) { [_commandPalette moveSelection:event.keyCode == 125 ? 1 : -1]; return YES; }
+    if (event.keyCode == 48 || event.keyCode == 36 || event.keyCode == 76) {
+        if ([_commandPalette chooseSelection]) return YES;
+        [self dismissCommandPalette];
+    }
+    return NO;
+}
+
+- (void)layoutCommandPalette {
+    NSView *root = _commandPalette.superview;
+    if (!root || !_commandMenuComposer) return;
+    NSView *surface = _commandMenuComposer == _floatingComposerTextView ? _floatingComposerSurface : _composerSurface;
+    NSRect anchor = [surface convertRect:surface.bounds toView:root];
+    CGFloat available = root.isFlipped ? NSMinY(anchor) - 16 : NSHeight(root.bounds) - NSMaxY(anchor) - 16;
+    CGFloat height = MIN(MAX(54, _commandPalette.commands.count * 42 + 12), MIN(348, MAX(0, available)));
+    CGFloat width = MIN(NSWidth(anchor), MAX(0, NSWidth(root.bounds) - 24));
+    CGFloat x = MAX(12, MIN(NSMinX(anchor), NSWidth(root.bounds) - width - 12));
+    CGFloat y = root.isFlipped ? NSMinY(anchor) - height - 8 : NSMaxY(anchor) + 8;
+    _commandPalette.frame = NSMakeRect(x, y, width, height);
+    [_commandPalette setNeedsLayout:YES];
+}
+
+- (NSArray<NSDictionary *> *)commandSuggestions:(PTClaudeBridge *)bridge query:(NSString *)query {
+    NSDictionary *labels = @{
+        @"compact": @[PTL(@"压缩", @"Compact"), PTL(@"压缩当前聊天的上下文", @"Compact this conversation's context"), @"arrow.down.right.and.arrow.up.left"],
+        @"model": @[PTL(@"模型", @"Model"), PTL(@"选择当前会话使用的模型", @"Choose the model for this conversation"), @"cpu"],
+        @"effort": @[PTL(@"推理", @"Reasoning"), PTL(@"调整推理强度", @"Adjust reasoning effort"), @"brain"],
+        @"mode": @[PTL(@"模式", @"Mode"), PTL(@"切换 Plan、Auto、Bypass 等模式", @"Switch Plan, Auto, Bypass and other modes"), @"slider.horizontal.3"],
+        @"config": @[PTL(@"设置", @"Settings"), PTL(@"打开会话配置", @"Open conversation settings"), @"gearshape"],
+        @"context": @[PTL(@"上下文", @"Context"), PTL(@"查看上下文占用情况", @"Inspect context usage"), @"chart.pie"],
+        @"usage": @[PTL(@"套餐用量", @"Plan usage"), PTL(@"查看套餐额度与使用情况", @"View plan limits and usage"), @"gauge.medium"],
+        @"cost": @[PTL(@"费用", @"Cost"), PTL(@"查看本次会话的用量和费用", @"View conversation usage and cost"), @"dollarsign.circle"],
+        @"mcp": @[@"MCP", PTL(@"查看 MCP 服务器状态", @"View MCP server status"), @"puzzlepiece.extension"],
+        @"init": @[PTL(@"初始化", @"Initialize"), PTL(@"为项目创建 CLAUDE.md 说明", @"Create project instructions in CLAUDE.md"), @"doc.text"],
+        @"clear": @[PTL(@"清空", @"Clear"), PTL(@"清空当前会话上下文", @"Clear the conversation context"), @"trash"],
+        @"plan": @[@"Plan", PTL(@"进入计划模式", @"Enter plan mode"), @"list.bullet.clipboard"],
+        @"auto": @[@"Auto", PTL(@"进入自动模式", @"Enter auto mode"), @"sparkles"],
+        @"bypass": @[@"Bypass", PTL(@"进入 Bypass 模式", @"Enter bypass mode"), @"bolt"],
+        @"fast": @[PTL(@"快速", @"Fast"), PTL(@"切换快速模式", @"Toggle fast mode"), @"bolt"],
+        @"commands": @[PTL(@"全部指令", @"Commands"), PTL(@"浏览可用的 Claude 指令", @"Browse available Claude commands"), @"command"]
+    };
+    NSArray *preferred = @[@"compact", @"model", @"effort", @"mode", @"config", @"context", @"usage", @"cost", @"mcp", @"init"];
+    NSMutableArray *source = [bridge.commands mutableCopy] ?: [NSMutableArray array];
+    NSMutableSet *names = [NSMutableSet set];
+    for (NSDictionary *command in source) if (command[@"name"]) [names addObject:command[@"name"]];
+    for (NSString *name in @[@"config", @"model", @"effort", @"mode", @"plan", @"auto", @"bypass", @"commands"])
+        if (![names containsObject:name]) [source addObject:@{@"name": name}];
+    [names removeAllObjects];
+    NSString *needle = [query stringByFoldingWithOptions:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch locale:NSLocale.currentLocale];
+    NSMutableArray *results = [NSMutableArray array];
+    for (NSDictionary *command in source) {
+        NSString *name = command[@"name"];
+        if (!name.length || [names containsObject:name]) continue;
+        [names addObject:name];
+        NSArray *label = labels[name];
+        NSString *title = label ? label[0] : [@"/" stringByAppendingString:name];
+        NSString *detail = label ? label[1] : (command[@"description"] ?: @"");
+        NSString *hint = command[@"argumentHint"] ?: @"";
+        if (hint.length) detail = [NSString stringWithFormat:@"%@  %@", detail, hint];
+        NSString *search = [[NSString stringWithFormat:@"%@ %@ %@ %@", name, title, detail, command[@"description"] ?: @""]
+            stringByFoldingWithOptions:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch locale:NSLocale.currentLocale];
+        NSInteger score = 0;
+        if (needle.length) {
+            NSString *foldedName = name.lowercaseString;
+            if ([foldedName isEqual:needle]) score = 0;
+            else if ([foldedName hasPrefix:needle]) score = 10;
+            else if ([title.lowercaseString hasPrefix:needle]) score = 20;
+            else if ([search containsString:needle]) score = 40;
+            else {
+                NSUInteger offset = 0;
+                BOOL matches = YES;
+                for (NSUInteger index = 0; index < needle.length; index++) {
+                    NSRange match = [foldedName rangeOfString:[needle substringWithRange:NSMakeRange(index, 1)]
+                        options:0 range:NSMakeRange(offset, foldedName.length - offset)];
+                    if (match.location == NSNotFound) { matches = NO; break; }
+                    offset = NSMaxRange(match);
+                }
+                if (!matches) continue;
+                score = 80 + (NSInteger)foldedName.length;
+            }
+        }
+        NSUInteger priority = [preferred indexOfObject:name];
+        [results addObject:@{@"name": name, @"title": title, @"detail": detail,
+            @"icon": label ? label[2] : @"command", @"score": @(score),
+            @"priority": @(priority == NSNotFound ? preferred.count : priority)}];
+    }
+    [results sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSComparisonResult order = [a[@"score"] compare:b[@"score"]];
+        if (order == NSOrderedSame) order = [a[@"priority"] compare:b[@"priority"]];
+        if (order == NSOrderedSame) order = [a[@"name"] localizedStandardCompare:b[@"name"]];
+        return order;
+    }];
+    return results;
+}
+
+- (void)showClaudeCommands:(id)sender {
+    PTComposerTextView *composer = [sender isKindOfClass:PTComposerTextView.class] ? sender :
+        ([_configurationSessionID isEqual:_floatingSessionID] && _floatingPanel.visible ? _floatingComposerTextView : _composerTextView);
+    NSString *sessionID = composer == _floatingComposerTextView ? _floatingSessionID : _selectedSession.sessionID;
+    if (!sessionID.length) return;
+    if (_commandMenuComposer != composer) [self dismissCommandPalette];
+    _commandMenuComposer = composer;
+    _configurationSessionID = sessionID;
+    [_composerOptionsPopover close];
+    if (!_commandPalette) {
+        _commandPalette = [[PTCommandPaletteView alloc] initWithFrame:NSZeroRect];
+        __weak typeof(self) weakSelf = self;
+        _commandPalette.chooseCommand = ^(NSDictionary *command) { [weakSelf insertClaudeCommand:command]; };
+    }
+    PTClaudeBridge *bridge = [self bridgeForSessionID:sessionID];
+    _commandPalette.commands = [self commandSuggestions:bridge query:[self commandQueryForComposer:composer] ?: @""];
+    if (!_commandPalette.superview) {
+        [composer.window.contentView addSubview:_commandPalette positioned:NSWindowAbove relativeTo:nil];
+        __weak typeof(self) weakSelf = self;
+        _commandDismissMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent *(NSEvent *event) {
+            PTAppDelegate *self = weakSelf;
+            if (!self) return event;
+            NSView *hit = [event.window.contentView hitTest:[event.window.contentView convertPoint:event.locationInWindow fromView:nil]];
+            if (event.window != composer.window || (!([hit isDescendantOf:self->_commandPalette]) && ![hit isDescendantOf:composer]))
+                [self dismissCommandPalette];
+            return event;
+        }];
+        NSView *surface = composer == _floatingComposerTextView ? _floatingComposerSurface : _composerSurface;
+        surface.postsFrameChangedNotifications = YES;
+        _commandLayoutObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSViewFrameDidChangeNotification
+            object:surface queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) { (void)note; [weakSelf layoutCommandPalette]; }];
+    }
+    [self layoutCommandPalette];
+    [composer.window makeFirstResponder:composer];
+    if (!bridge) {
+        [self prepareBridgeForSessionID:sessionID completion:^(PTClaudeBridge *connected) {
+            if (connected && self->_commandMenuComposer == composer && self->_commandPalette.superview) {
+                self->_commandPalette.commands = [self commandSuggestions:connected query:[self commandQueryForComposer:composer] ?: @""];
+                [self layoutCommandPalette];
+            }
+        }];
+    }
+}
+
+- (void)insertClaudeCommand:(NSDictionary *)command {
+    PTComposerTextView *composer = _commandMenuComposer;
+    if (!composer) return;
+    NSString *text = composer.string;
+    NSRange range = composer.selectedRange;
+    if ([text hasPrefix:@"/"]) {
+        NSRange end = [text rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        range = NSMakeRange(0, end.location == NSNotFound ? text.length : end.location);
+    }
+    [self dismissCommandPalette];
+    [composer.window makeFirstResponder:composer];
+    NSString *suffix = NSMaxRange(range) < text.length && [NSCharacterSet.whitespaceAndNewlineCharacterSet
+        characterIsMember:[text characterAtIndex:NSMaxRange(range)]] ? @"" : @" ";
+    [composer insertText:[NSString stringWithFormat:@"/%@%@", command[@"name"], suffix] replacementRange:range];
+}
+
+- (void)showClaudeCommandResult:(id)sender {
+    [_composerOptionsPopover close];
+    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
+    NSString *text = nil;
+    for (PTWorkspaceTab *tab in _workspaceTabs) if ([tab.sessionID isEqual:sessionID]) text = tab.commandOutput;
+    text = text ?: PTL(@"暂无命令结果", @"No command result yet");
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 340)];
+    scroll.hasVerticalScroller = YES;
+    NSTextView *view = [[NSTextView alloc] initWithFrame:scroll.bounds];
+    view.editable = NO; view.selectable = YES; view.textContainerInset = NSMakeSize(14, 14);
+    view.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+    view.autoresizingMask = NSViewWidthSizable;
+    view.textContainer.widthTracksTextView = YES;
+    view.string = text; scroll.documentView = view;
+    NSViewController *controller = [NSViewController new]; controller.view = scroll;
+    _commandResultPopover = [NSPopover new];
+    _commandResultPopover.behavior = NSPopoverBehaviorTransient;
+    _commandResultPopover.contentViewController = controller;
+    _commandResultPopover.contentSize = scroll.frame.size;
+    NSView *anchor = [sessionID isEqual:_floatingSessionID] && _floatingPanel.visible ? _floatingEffortButton : _composerEffortButton;
+    [_commandResultPopover showRelativeToRect:anchor.bounds ofView:anchor preferredEdge:NSRectEdgeMaxY];
 }
 
 - (void)showComposerModelPage:(id)sender {
@@ -7046,6 +7728,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)showComposerOptions:(id)sender {
+    _configurationSessionID = sender == _floatingEffortButton ? _floatingSessionID : _selectedSession.sessionID;
     if (!_composerOptionsPopover) {
         _composerOptionsPopover = [[NSPopover alloc] init];
         _composerOptionsPopover.behavior = NSPopoverBehaviorTransient;
@@ -7077,12 +7760,13 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     NSArray<NSString *> *levels = [self composerEffortLevels];
     if (slider.selectedIndex < 0 || slider.selectedIndex >= (NSInteger)levels.count) return;
     NSString *effort = levels[slider.selectedIndex];
+    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
     [self sendOutgoingMessage:[NSString stringWithFormat:@"/effort %@", effort]
                     imagePNGs:@[]
-                 forSessionID:_selectedSession.sessionID
+                 forSessionID:sessionID
                       success:^{
         _selectedComposerEffort = effort;
-        _selectedSession.effort = effort;
+        [self sessionWithID:sessionID].effort = effort;
         [self updateComposerConfigurationButtons];
         _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"推理强度已切换为 %@", @"Effort changed to %@"),
             [self composerEffortTitle:effort]];
@@ -7092,19 +7776,21 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 }
 
 - (void)changeComposerModel:(PTAnimatedButton *)sender {
-    NSString *modelID = sender.identifier;
+    [self changeComposerToModel:sender.identifier];
+}
+
+- (void)changeComposerToModel:(NSString *)modelID {
     if (modelID.length == 0) return;
+    NSString *sessionID = [_configurationSessionID ?: _selectedSession.sessionID copy];
     [self sendOutgoingMessage:[NSString stringWithFormat:@"/model %@", modelID]
                     imagePNGs:@[]
-                 forSessionID:_selectedSession.sessionID
+                 forSessionID:sessionID
                       success:^{
-        _selectedComposerModelID = modelID;
-        _selectedSession.model = modelID;
-        [self updateComposerConfigurationButtons];
-        [self updateContextAndModelForSession:_selectedSession];
+        if (![self->_selectedSession.sessionID isEqual:sessionID]) return;
+        [self updateContextAndModelForSession:self->_selectedSession];
         _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"模型已切换为 %@", @"Model changed to %@"),
             [self composerModelShortTitle:modelID]];
-        [self showComposerModelPage:nil];
+        if (self->_composerOptionsPopover.shown) [self showComposerModelPage:nil];
     } failureResponder:nil];
 }
 
@@ -7113,7 +7799,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _agentState.boundSessionID = _bridge.sessionID ?: @"";
     _agentState.bridgeRunning = _bridge.running;
     BOOL ready = _agentState.commandsEnabled;
-    BOOL awaiting = _awaitingClaudeBaselineBySessionID[_selectedSession.sessionID] != nil;
+    BOOL awaiting = _bridge.responding || _awaitingClaudeBaselineBySessionID[_selectedSession.sessionID] != nil;
     _composerTextView.editable = ready;
     _sendButton.enabled = ready;
     _sendButton.title = awaiting ? @"■" : @"↑";
@@ -7121,7 +7807,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _sendButton.action = awaiting
         ? @selector(stopSelectedClaudeOutput:) : @selector(sendMessage:);
     _sendButton.toolTip = awaiting
-        ? PTL(@"停止 Claude 输出（向 Terminal 发送 Esc）", @"Stop Claude output (send Escape to Terminal)")
+        ? PTL(@"停止 Claude 输出", @"Stop Claude output")
         : PTL(@"发送消息", @"Send message");
     _imageButton.enabled = ready;
     _composerSurface.dropEnabled = ready;
@@ -7129,28 +7815,30 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _remoteButton.enabled = ready;
     _modelPicker.enabled = ready;
     _compactButton.enabled = ready;
+    _compactButton.title = _bridge.compacting ? PTL(@"压缩中…", @"Compacting…") : @"Compact";
     [self updateComposerConfigurationButtons];
 
     NSString *ttyState = _bridge.running
-        ? PTL(@"Terminal 已验证", @"Terminal verified")
-        : PTL(@"未连接 Terminal", @"Terminal not connected");
-    _inspectorConnectionLabel.stringValue = [NSString stringWithFormat:@"%@\n%@",
-        ttyState, ready ? PTL(@"当前选中会话可操作", @"Selected conversation is available")
+        ? PTL(@"Claude 后台已连接", @"Claude background session connected")
+        : PTL(@"Claude 后台未连接", @"Claude background session disconnected");
+    NSString *mode = [_bridge.permissionMode isEqual:@"bypassPermissions"] ? @"Bypass" : _bridge.permissionMode;
+    _inspectorConnectionLabel.stringValue = [NSString stringWithFormat:@"%@ · %@\n%@",
+        ttyState, mode ?: @"—", ready ? PTL(@"当前选中会话可操作", @"Selected conversation is available")
                         : PTL(@"请选择会话", @"Choose a conversation")];
     _composerTargetLabel.stringValue = awaiting
-        ? PTL(@"Claude 正在输出 · 点击停止键向 Terminal 发送 Esc",
-              @"Claude is responding · click Stop to send Escape to Terminal")
+        ? PTL(@"Claude 正在工作 · 点击停止键中断",
+              @"Claude is working · click Stop to interrupt")
         : ready
         ? [NSString stringWithFormat:PTL(@"发送给：%@ · 可添加或拖入附件 · ↩ 发送，⌘↩ 换行", @"To: %@ · add or drop attachments · ↩ send, ⌘↩ newline"),
             _selectedSession.title ?: PTL(@"当前会话", @"Current conversation")]
         : PTL(@"请选择会话", @"Choose a conversation");
     _bottomStatusLabel.stringValue = awaiting
-        ? PTL(@"■ 正在输出 · 停止键会向当前 Terminal 发送 Esc",
-              @"■ Responding · Stop sends Escape to the current Terminal")
+        ? PTL(@"■ 正在工作 · 可随时停止",
+              @"■ Working · Stop is available")
         : _bridge.running
-        ? [NSString stringWithFormat:PTL(@"● 已连接 · %@ · 等待操作 · Terminal 是唯一执行引擎", @"● Connected · %@ · ready · Terminal is the sole execution engine"),
+        ? [NSString stringWithFormat:PTL(@"● 已连接 · %@ · 等待操作 · Claude Code 后台执行", @"● Connected · %@ · ready · Claude Code runs in the background"),
             _selectedSession.title ?: PTL(@"当前会话", @"Current conversation")]
-        : PTL(@"○ Terminal 未连接 · 操作保持可用", @"○ Terminal not connected · controls remain available");
+        : PTL(@"○ Claude 后台未连接 · 操作时自动连接", @"○ Claude background session disconnected · controls remain available");
     [self updateFloatingComposerState];
 }
 
@@ -7158,7 +7846,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     if (!_floatingComposerTextView || !_floatingSendButton) return;
     PTSessionInfo *session = [self sessionWithID:_floatingSessionID];
     PTClaudeBridge *floatingBridge = [self bridgeForSessionID:_floatingSessionID];
-    BOOL awaiting = _awaitingClaudeBaselineBySessionID[_floatingSessionID] != nil;
+    BOOL awaiting = floatingBridge.responding || _awaitingClaudeBaselineBySessionID[_floatingSessionID] != nil;
     BOOL ready = _floatingPanel.visible && _floatingSessionID.length > 0;
     _floatingComposerTextView.editable = ready;
     _floatingSendButton.enabled = ready;
@@ -7167,23 +7855,23 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     _floatingSendButton.action = awaiting
         ? @selector(stopFloatingClaudeOutput:) : @selector(sendFloatingMessage:);
     _floatingSendButton.toolTip = awaiting
-        ? PTL(@"停止 Claude 输出（向 Terminal 发送 Esc）", @"Stop Claude output (send Escape to Terminal)")
+        ? PTL(@"停止 Claude 输出", @"Stop Claude output")
         : PTL(@"发送消息", @"Send message");
     _floatingImageButton.enabled = ready;
     _floatingComposerSurface.dropEnabled = ready;
     _floatingEffortButton.enabled = ready;
     if (awaiting) {
-        _floatingComposerLabel.stringValue = PTL(@"Claude 正在输出 · 点击停止键发送 Esc",
-                                                   @"Claude is responding · click Stop to send Escape");
+        _floatingComposerLabel.stringValue = PTL(@"Claude 正在工作 · 点击停止键中断",
+                                                   @"Claude is working · click Stop to interrupt");
     } else if (ready) {
         _floatingComposerLabel.stringValue = [NSString stringWithFormat:
             PTL(@"发送给：%@ · 可添加或拖入附件 · ↩ 发送，⌘↩ 换行", @"To: %@ · add or drop attachments · ↩ send, ⌘↩ newline"),
             session.title ?: PTL(@"悬浮会话", @"Floating conversation")];
     } else if (_agentState.sendInFlight && floatingBridge.running) {
-        _floatingComposerLabel.stringValue = PTL(@"正在写入 Terminal…", @"Writing to Terminal…");
+        _floatingComposerLabel.stringValue = PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…");
     } else {
         _floatingComposerLabel.stringValue = [NSString stringWithFormat:
-            PTL(@"发送给：%@ · Terminal 当前未连接", @"To: %@ · Terminal is not connected"),
+            PTL(@"发送给：%@ · Claude 后台尚未连接", @"To: %@ · Claude background session is not connected"),
             session.title ?: PTL(@"悬浮会话", @"Floating conversation")];
     }
 }
@@ -7477,42 +8165,9 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     [self updateUsageDisplays];
 }
 
-- (void)loadClaudeUsageSnapshotForSessionID:(NSString *)sessionID {
-    if (sessionID.length == 0 || ![_selectedSession.sessionID isEqual:sessionID]) return;
-    _planUsageSessionID = [sessionID copy];
-    NSString *path = PTClaudeUsageSnapshotPath(sessionID);
-    NSData *data = path.length ? [NSData dataWithContentsOfFile:path] : nil;
-    NSDictionary *snapshot = data
-        ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    NSDictionary *payload = PTClaudePlanUsageFromStatusLineSnapshot(snapshot, sessionID);
-    [self finishClaudeUsageWithPayload:payload error:payload
-        ? nil
-        : PTL(@"等待本会话下一次 API 响应", @"Waiting for this conversation's next API response")];
-}
-
-- (void)startWatchingClaudeUsageSnapshots {
-    NSString *directory = PTClaudeUsageSnapshotDirectory();
-    NSError *directoryError = nil;
-    [NSFileManager.defaultManager createDirectoryAtPath:directory
-                            withIntermediateDirectories:YES
-                                             attributes:nil
-                                                  error:&directoryError];
-    if (directoryError) {
-        _planUsageError = directoryError.localizedDescription;
-        [self updateUsageDisplays];
-        return;
-    }
-    __weak typeof(self) weakSelf = self;
-    [_usageSnapshotWatcher watchFileAtPath:directory onChange:^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            PTAppDelegate *self = weakSelf;
-            if (!self) return;
-            NSString *selectedSessionID = [self->_selectedSession.sessionID copy];
-            if (selectedSessionID.length > 0) {
-                [self loadClaudeUsageSnapshotForSessionID:selectedSessionID];
-            }
-        });
-    }];
+- (void)refreshClaudeUsage:(NSTimer *)timer {
+    (void)timer;
+    [[self bridgeForSessionID:_selectedSession.sessionID] refreshUsage];
 }
 
 - (void)reloadGitDirectoryPickerSelecting:(NSString *)selectedPath {
@@ -8418,6 +9073,12 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 
 - (void)updateContextAndModelForSession:(PTSessionInfo *)session {
     if (!session) return;
+    NSString *liveModel = [self bridgeForSessionID:session.sessionID].currentModel;
+    if (liveModel.length) session.model = liveModel;
+    NSString *liveEffort = [self bridgeForSessionID:session.sessionID].currentEffort;
+    if (liveEffort.length) session.effort = liveEffort;
+    NSNumber *liveContext = [self bridgeForSessionID:session.sessionID].contextTokens;
+    if (liveContext) session.contextUsed = liveContext.unsignedIntegerValue;
     if (session.model.length > 0) _selectedComposerModelID = session.model;
     if (session.effort.length > 0) _selectedComposerEffort = session.effort;
     NSUInteger window = session.contextWindow;
@@ -8458,6 +9119,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _store.globalModelChanged = ^(NSString *model) {
         PTAppDelegate *self = weakSelf;
         if (!self) return;
+        if (self->_bridge.currentModel.length) return;
         if (self->_selectedSession && self->_bridge.running &&
             [self->_bridge.sessionID isEqual:self->_selectedSession.sessionID]) {
             self->_selectedSession.model = model;
@@ -8468,6 +9130,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _store.globalEffortChanged = ^(NSString *effort) {
         PTAppDelegate *self = weakSelf;
         if (!self || effort.length == 0) return;
+        if (self->_bridge.currentEffort.length) return;
         self->_selectedComposerEffort = effort;
         if (self->_selectedSession && self->_bridge.running &&
             [self->_bridge.sessionID isEqual:self->_selectedSession.sessionID]) {
@@ -8678,8 +9341,16 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _activeWorkspaceTab.sessionID = _selectedSession.sessionID ?: @"";
     [self watchSelectedSessionTranscript];
     if (![_planUsageSessionID isEqual:_selectedSession.sessionID]) {
-        [self loadClaudeUsageSnapshotForSessionID:_selectedSession.sessionID];
+        _planUsageSessionID = [_selectedSession.sessionID copy];
+        [self finishClaudeUsageWithPayload:nil error:PTL(@"正在读取 Claude Code 套餐用量…", @"Reading Claude Code plan usage…")];
+        NSString *requestedID = _planUsageSessionID;
+        [self prepareBridgeForSessionID:requestedID completion:^(PTClaudeBridge *bridge) {
+            if (bridge) [bridge refreshUsage];
+            else if ([self->_selectedSession.sessionID isEqual:requestedID])
+                [self finishClaudeUsageWithPayload:nil error:self->_bridge.lastSendError];
+        }];
     }
+    [self updateContextAndModelForSession:_selectedSession];
     _conversationTitle.stringValue = _selectedSession.title ?: PTL(@"未命名会话", @"Untitled conversation");
     NSString *folder = _selectedSession.cwd.lastPathComponent.length ? _selectedSession.cwd.lastPathComponent : _selectedSession.cwd;
     NSString *model = _selectedSession.model.length ? _selectedSession.model : @"Claude";
@@ -8687,7 +9358,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         folder.length ? folder : PTL(@"未知目录", @"Unknown directory"), model,
         (unsigned long)PTConversationTurnCount(_selectedSession.assistantMessages)];
     _connectButton.enabled = YES;
-    [self updateContextAndModelForSession:_selectedSession];
     [self updateInspectorForSession:_selectedSession];
     [self refreshAgentStateAndControls];
     [self renderSession:_selectedSession];
@@ -8736,6 +9406,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 // 切换会话、消息数减少或同数量内容修订时使用当前完整快照。
 - (void)renderSession:(PTSessionInfo *)session {
     if (!_webReady || !session) return;
+    PTClaudeBridge *streamBridge = [self bridgeForSessionID:session.sessionID];
+    [streamBridge reconcileStreamWithMessages:session.assistantMessages];
     if (_renderInFlight) {
         if (!_pendingRenderSession ||
             ![_pendingRenderSession.sessionID isEqual:session.sessionID] ||
@@ -8769,6 +9441,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         @"interfaceLanguage": PTInterfaceLanguageCode(),
         @"awaitingReply": @(_awaitingClaudeBaselineBySessionID[session.sessionID] != nil)
     } mutableCopy];
+    payload[@"questionUpdates"] = PTQuestionUpdates(session.assistantMessages);
     if (!canAppend) payload[@"messages"] = session.assistantMessages ?: @[];
 
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
@@ -8808,6 +9481,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             self->_renderedSessionID = session.sessionID;
             self->_renderedMessageCount = messageCount;
             self->_renderedModifiedAt = session.modifiedAt;
+            [self presentClaudeStreamForBridge:streamBridge];
         }
 
         PTSessionInfo *pending = self->_pendingRenderSession;
@@ -8969,12 +9643,26 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         PTClaudeBridge *bridge = weakConnection;
         if (!self || !bridge || self->_renameConnections[sessionID] != bridge) return;
         NSString *pendingTitle = self->_pendingRenameTitles[sessionID];
-        [self->_renameConnections removeObjectForKey:sessionID];
         [self->_pendingRenameTitles removeObjectForKey:sessionID];
         bridge.statusChanged = nil;
         if (bridge.running && [bridge.sessionID isEqual:sessionID]) {
+            bridge.turnCompleted = ^{
+                PTAppDelegate *self = weakSelf;
+                PTClaudeBridge *bridge = weakConnection;
+                if (!self || !bridge) return;
+                NSString *nextTitle = self->_pendingRenameTitles[sessionID];
+                [self->_pendingRenameTitles removeObjectForKey:sessionID];
+                if (nextTitle.length) {
+                    [self sendClaudeRenameTitle:nextTitle usingBridge:bridge];
+                    return;
+                }
+                bridge.turnCompleted = nil;
+                [bridge stop];
+                [self->_renameConnections removeObjectForKey:sessionID];
+            };
             [self sendClaudeRenameTitle:pendingTitle usingBridge:bridge];
         } else {
+            [self->_renameConnections removeObjectForKey:sessionID];
             self->_statusLabel.stringValue = [NSString stringWithFormat:PTL(@"本地名称已保存，Claude 名称同步失败：%@", @"Local name saved; Claude name sync failed: %@"), status ?: @""];
         }
     };
@@ -9041,7 +9729,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
     BOOL sameConnection = _bridge.running && [_bridge.sessionID isEqual:_selectedSession.sessionID];
     _connectButton.title = sameConnection
-        ? PTL(@"已同步", @"Synced") : PTL(@"同步 Terminal", @"Sync");
+        ? PTL(@"已同步", @"Synced") : PTL(@"连接 Claude", @"Sync");
     [self refreshAgentStateAndControls];
 }
 
@@ -9142,6 +9830,15 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             ? _selectedSession.sessionID
             : (message.webView == _floatingConversationView ? _floatingSessionID : nil);
         if (text.length == 0 || sessionID.length == 0 || ![sessionID isEqual:expectedSessionID]) return;
+        NSString *toolUseID = body[@"toolUseId"];
+        NSDictionary *answers = [body[@"answers"] isKindOfClass:NSDictionary.class] ? body[@"answers"] : nil;
+        for (NSString *requestID in _protocolQuestions.allKeys) {
+            NSDictionary *request = _protocolQuestions[requestID];
+            if ([request[@"sessionID"] isEqual:sessionID] && [request[@"toolUseId"] isEqual:toolUseID]) {
+                [self writeQuestionResponseForRequestID:requestID answers:answers ?: @{}];
+                return;
+            }
+        }
         // 复用普通聊天发送的同一路径与 sendInFlight 互斥，跟老师手打消息走同一通道。
         [self sendOutgoingMessage:text
                          imagePNGs:@[]
@@ -9183,6 +9880,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 }
 
 - (void)refreshSessions:(id)sender {
+    if (sender == _refreshButton) [self refreshClaudeUsage:nil];
     if (sender == _refreshButton && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
         _refreshButton.alphaValue = 0.35;
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
@@ -9240,10 +9938,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 }
 
 - (BOOL)interruptClaudeOutputForSessionID:(NSString *)sessionID {
-    if (sessionID.length == 0 || !_awaitingClaudeBaselineBySessionID[sessionID]) return NO;
+    if (sessionID.length == 0) return NO;
     PTClaudeBridge *targetBridge = [self bridgeForSessionID:sessionID];
     if (!targetBridge.running || ![targetBridge sendEscape]) return NO;
-    [self finishAwaitingClaudeReplyForSessionID:sessionID];
+    // Keep Stop available until Claude confirms completion of the interrupted turn.
     return YES;
 }
 
@@ -9251,11 +9949,11 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     (void)sender;
     NSString *sessionID = _selectedSession.sessionID;
     if ([self interruptClaudeOutputForSessionID:sessionID]) {
-        _statusLabel.stringValue = PTL(@"已向 Terminal 发送 Esc，Claude 输出已终止",
-                                        @"Escape sent to Terminal; Claude output stopped");
+        _statusLabel.stringValue = PTL(@"已向 Claude Code 发送中断请求",
+                                        @"Interrupt request sent to Claude Code");
     } else {
-        _statusLabel.stringValue = PTL(@"当前会话没有可用的 Terminal 连接",
-                                        @"No Terminal connection is available for this conversation");
+        _statusLabel.stringValue = PTL(@"当前会话没有可用的 Claude 后台连接",
+                                        @"No Claude background connection is available for this conversation");
     }
 }
 
@@ -9263,11 +9961,11 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     (void)sender;
     NSString *sessionID = _floatingSessionID;
     if ([self interruptClaudeOutputForSessionID:sessionID]) {
-        _floatingComposerLabel.stringValue = PTL(@"已向 Terminal 发送 Esc，Claude 输出已终止",
-                                                  @"Escape sent to Terminal; Claude output stopped");
+        _floatingComposerLabel.stringValue = PTL(@"已向 Claude Code 发送中断请求",
+                                                  @"Interrupt request sent to Claude Code");
     } else {
-        _floatingComposerLabel.stringValue = PTL(@"当前会话没有可用的 Terminal 连接",
-                                                  @"No Terminal connection is available for this conversation");
+        _floatingComposerLabel.stringValue = PTL(@"当前会话没有可用的 Claude 后台连接",
+                                                  @"No Claude background connection is available for this conversation");
     }
 }
 
@@ -9281,46 +9979,39 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     PTClaudeBridge *targetBridge = [self bridgeForSessionID:sessionID];
     if (_agentState.sendInFlight) {
         if ([sessionID isEqual:_floatingSessionID]) {
-            _floatingComposerLabel.stringValue = PTL(@"正在写入 Terminal…", @"Writing to Terminal…");
+            _floatingComposerLabel.stringValue = PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…");
         } else {
-            _statusLabel.stringValue = PTL(@"正在写入 Terminal…", @"Writing to Terminal…");
+            _statusLabel.stringValue = PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…");
         }
         return NO;
     }
     if (!targetBridge) {
-        NSString *status = PTL(@"当前会话没有可用的 Terminal 连接", @"No Terminal connection is available for this conversation");
-        if ([sessionID isEqual:_floatingSessionID]) {
-            _floatingComposerLabel.stringValue = status;
-        } else {
-            _statusLabel.stringValue = status;
-        }
-        if (failureResponder) {
-            NSWindow *targetWindow = failureResponder == _floatingComposerTextView ? _floatingPanel : _window;
-            [targetWindow makeFirstResponder:failureResponder];
-        }
-        return NO;
+        [self prepareBridgeForSessionID:sessionID completion:^(PTClaudeBridge *bridge) {
+            if (bridge) [self sendOutgoingMessage:message imagePNGs:imagePNGs forSessionID:sessionID
+                success:success failureResponder:failureResponder];
+        }];
+        return YES;
     }
 
     _agentState.sendInFlight = YES;
     [self refreshAgentStateAndControls];
-    BOOL sent = [targetBridge sendMessage:outgoingMessage withImagePNGs:imagePNGs ?: @[]];
-    if (sent) {
-        if (success) success();
-    } else {
-        NSString *status = targetBridge.lastSendError ?: PTL(@"Terminal 未接受消息", @"Terminal did not accept the message");
-        if ([sessionID isEqual:_floatingSessionID]) {
-            _floatingComposerLabel.stringValue = status;
+    [targetBridge submitMessage:outgoingMessage withImagePNGs:imagePNGs ?: @[] completion:^(BOOL sent) {
+        if (sent) {
+            if (success) success();
         } else {
-            _statusLabel.stringValue = status;
+            NSString *status = targetBridge.lastSendError ?: PTL(@"Claude 未接受消息", @"Claude did not accept the message");
+            if ([sessionID isEqual:self->_floatingSessionID]) {
+                self->_floatingComposerLabel.stringValue = status;
+            }
+            if ([sessionID isEqual:self->_selectedSession.sessionID]) {
+                self->_statusLabel.stringValue = status;
+                if (failureResponder) [self->_window makeFirstResponder:failureResponder];
+            }
         }
-        if (failureResponder) {
-            NSWindow *targetWindow = failureResponder == _floatingComposerTextView ? _floatingPanel : _window;
-            [targetWindow makeFirstResponder:failureResponder];
-        }
-    }
-    _agentState.sendInFlight = NO;
-    [self refreshAgentStateAndControls];
-    return sent;
+        self->_agentState.sendInFlight = NO;
+        [self refreshAgentStateAndControls];
+    }];
+    return YES;
 }
 
 - (void)sendMessage:(id)sender {
@@ -9328,19 +10019,27 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     NSString *message = _composerTextView.string;
     NSArray<NSData *> *imagePNGs = [self pendingImagePNGsForClaude];
     NSArray<NSString *> *files = [self pendingFilesForClaude];
+    if (!imagePNGs.count && !files.count && [self handleLocalComposerCommand:message composer:_composerTextView]) return;
     NSString *outgoing = PTMessageByAppendingClaudeAttachMarkers(message, files);
-    // 只有 Terminal 真正接受后才清空。之前桥接失败时输入框仍被无条件清空，
-    // 从老师视角看就是“消息发不出去还凭空消失”，也丢掉了重试机会。
+    NSString *sessionID = [_selectedSession.sessionID copy];
+    PTWorkspaceTab *tab = _activeWorkspaceTab;
+    NSArray *images = [tab.pendingImages copy];
     [self sendOutgoingMessage:outgoing imagePNGs:imagePNGs
-                 forSessionID:_selectedSession.sessionID success:^{
-        [self beginAwaitingClaudeReplyForSessionID:self->_selectedSession.sessionID];
-        [_composerTextView clearAfterSuccessfulSubmissionMatchingText:message];
-        // 回车触发发送时，输入法可能在 keyDown: 返回后才结束当前事务；下一轮只在
-        // 内容仍等于已发送快照时补做一次，因此不会误删随后键入的新内容。
-        dispatch_async(dispatch_get_main_queue(), ^{
+                 forSessionID:sessionID success:^{
+        if (![self isConfigurationCommand:outgoing]) [self beginAwaitingClaudeReplyForSessionID:sessionID];
+        if (self->_activeWorkspaceTab == tab) {
             [self->_composerTextView clearAfterSuccessfulSubmissionMatchingText:message];
-        });
-        [self clearPendingImagesAfterSuccessfulSend];
+        } else if ([tab.draft isEqual:message]) {
+            tab.draft = @"";
+        }
+        [tab.pendingImages removeObjectsInArray:images];
+        [tab.pendingFiles removeObjectsInArray:files];
+        for (NSDictionary *image in images) {
+            if (![image[@"temporary"] boolValue]) continue;
+            [NSFileManager.defaultManager removeItemAtPath:image[@"path"] error:nil];
+            [self->_temporaryImagePaths removeObject:image[@"path"]];
+        }
+        if (self->_activeWorkspaceTab == tab) [self updateImagePreviews];
     } failureResponder:_composerTextView];
 }
 
@@ -9349,26 +10048,95 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     NSString *message = _floatingComposerTextView.string;
     NSArray<NSData *> *imagePNGs = [self floatingPendingImagePNGsForClaude];
     NSArray<NSString *> *files = [self floatingPendingFilesForClaude];
+    if (!imagePNGs.count && !files.count && [self handleLocalComposerCommand:message composer:_floatingComposerTextView]) return;
     NSString *outgoing = PTMessageByAppendingClaudeAttachMarkers(message, files);
+    NSString *sessionID = [_floatingSessionID copy];
+    NSMutableArray *pendingImages = _floatingPendingImages;
+    NSMutableArray *pendingFiles = _floatingPendingFiles;
+    NSArray *images = [pendingImages copy];
     [self sendOutgoingMessage:outgoing imagePNGs:imagePNGs
-                 forSessionID:_floatingSessionID success:^{
-        [self beginAwaitingClaudeReplyForSessionID:self->_floatingSessionID];
-        [_floatingComposerTextView clearAfterSuccessfulSubmissionMatchingText:message];
-        dispatch_async(dispatch_get_main_queue(), ^{
+                 forSessionID:sessionID success:^{
+        if (![self isConfigurationCommand:outgoing]) [self beginAwaitingClaudeReplyForSessionID:sessionID];
+        if ([self->_floatingSessionID isEqual:sessionID]) {
             [self->_floatingComposerTextView clearAfterSuccessfulSubmissionMatchingText:message];
-        });
-        [self clearFloatingPendingImagesAfterSuccessfulSend];
+        }
+        [pendingImages removeObjectsInArray:images];
+        [pendingFiles removeObjectsInArray:files];
+        for (NSDictionary *image in images) {
+            if ([image[@"temporary"] boolValue])
+                [NSFileManager.defaultManager removeItemAtPath:image[@"path"] error:nil];
+        }
+        if ([self->_floatingSessionID isEqual:sessionID]) [self updateFloatingImagePreviews];
     } failureResponder:_floatingComposerTextView];
 }
 
 - (void)compactConversation:(id)sender {
     (void)sender;
+    NSString *sessionID = [_selectedSession.sessionID copy];
     [self sendOutgoingMessage:@"/compact"
                     imagePNGs:@[]
-                 forSessionID:_selectedSession.sessionID
+                 forSessionID:sessionID
                       success:^{
-        self->_statusLabel.stringValue = PTL(@"已向 Terminal 发送 /compact", @"Sent /compact to Terminal");
+        [self beginAwaitingClaudeReplyForSessionID:sessionID];
+        self->_statusLabel.stringValue = PTL(@"已向 Claude Code 发送 /compact", @"Sent /compact to Claude Code");
     } failureResponder:nil];
+}
+
+- (BOOL)isConfigurationCommand:(NSString *)text {
+    NSString *command = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return [command hasPrefix:@"/model "] || [command hasPrefix:@"/effort "] || [command hasPrefix:@"/mode "] ||
+        [@[@"/plan", @"/auto", @"/bypass", @"/remote-control"] containsObject:command];
+}
+
+- (BOOL)handleLocalComposerCommand:(NSString *)text composer:(PTComposerTextView *)composer {
+    NSString *command = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (![@[@"/config", @"/model", @"/effort", @"/mode", @"/permissions", @"/help", @"/commands"] containsObject:command]) return NO;
+    [composer clearAfterSuccessfulSubmissionMatchingText:text];
+    if ([@[@"/help", @"/commands"] containsObject:command]) {
+        [composer insertText:@"/" replacementRange:composer.selectedRange];
+        [self showClaudeCommands:composer];
+        return YES;
+    }
+    [self showComposerOptions:composer == _floatingComposerTextView ? _floatingEffortButton : _composerEffortButton];
+    if ([command isEqual:@"/config"]) [self showComposerAdvancedPage:nil];
+    else if ([command isEqual:@"/model"]) [self showComposerModelPage:nil];
+    else if ([@[@"/mode", @"/permissions"] containsObject:command]) [self showComposerModePage:nil];
+    return YES;
+}
+
+- (void)presentClaudeToolRequest:(NSString *)requestID request:(NSDictionary *)request bridge:(PTClaudeBridge *)bridge {
+    // These requests originate in Claude Code's selected mode. The host only
+    // renders and returns the user's answer; it does not introduce a policy.
+    NSDictionary *input = request[@"input"] ?: @{};
+    if ([request[@"tool_name"] isEqual:@"AskUserQuestion"]) {
+        _protocolQuestions[requestID] = @{@"bridge": bridge, @"sessionID": bridge.sessionID,
+            @"toolUseId": request[@"tool_use_id"] ?: @"", @"input": input};
+        [_pendingQuestionRequests addObject:@{@"id": requestID, @"questions": input[@"questions"] ?: @[]}];
+        [self presentNextQuestionRequestIfIdle];
+        return;
+    }
+    NSString *sessionID = [bridge.sessionID copy];
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = [NSString stringWithFormat:@"Claude Code · %@ · %@", [self sessionWithID:sessionID].title ?: sessionID, request[@"tool_name"] ?: @""];
+    alert.informativeText = request[@"decision_reason"] ?: PTL(@"Claude Code 请求执行以下操作", @"Claude Code requests the following action");
+    [alert addButtonWithTitle:PTL(@"允许", @"Allow")];
+    [alert addButtonWithTitle:PTL(@"拒绝", @"Deny")];
+    NSData *json = [NSJSONSerialization dataWithJSONObject:input options:NSJSONWritingPrettyPrinted error:nil];
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 460, 220)];
+    scroll.hasVerticalScroller = YES;
+    NSTextView *details = [[NSTextView alloc] initWithFrame:scroll.bounds];
+    details.editable = NO; details.autoresizingMask = NSViewWidthSizable;
+    details.textContainer.widthTracksTextView = YES;
+    details.string = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] ?: @"";
+    scroll.documentView = details; alert.accessoryView = scroll;
+    _protocolAlerts[requestID] = alert;
+    [alert beginSheetModalForWindow:_window completionHandler:^(NSModalResponse result) {
+        [self->_protocolAlerts removeObjectForKey:requestID];
+        if (![bridge.sessionID isEqual:sessionID]) return;
+        [bridge answerToolRequest:requestID response:result == NSAlertFirstButtonReturn
+            ? @{@"behavior": @"allow", @"updatedInput": input}
+            : @{@"behavior": @"deny", @"message": @"User declined this action."}];
+    }];
 }
 
 - (void)enableRemoteControl:(id)sender {
@@ -9377,23 +10145,13 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
                     imagePNGs:@[]
                  forSessionID:_selectedSession.sessionID
                       success:^{
-        self->_statusLabel.stringValue = PTL(@"已向 Terminal 发送 /remote-control", @"Sent /remote-control to Terminal");
+        self->_statusLabel.stringValue = PTL(@"已向 Claude Code 发送 /remote-control", @"Sent /remote-control to Claude Code");
     } failureResponder:nil];
 }
 
 - (void)changeModel:(id)sender {
-    NSString *modelID = _modelPicker.selectedItem.representedObject;
-    if (modelID.length == 0) return;
-    [self refreshAgentStateAndControls];
-    BOOL sent = [self sendOutgoingMessage:[NSString stringWithFormat:@"/model %@", modelID]
-                    imagePNGs:@[]
-                 forSessionID:_selectedSession.sessionID
-                      success:^{
-        _statusLabel.stringValue = [NSString stringWithFormat:@"已在 Terminal 请求切换到 %@", modelID];
-    } failureResponder:nil];
-    if (!sent) {
-        [self updateContextAndModelForSession:_selectedSession];
-    }
+    _configurationSessionID = _selectedSession.sessionID;
+    [self changeComposerToModel:_modelPicker.selectedItem.representedObject];
 }
 
 #pragma mark - ask_via_prettyterm MCP 桥（独立弹窗，不经过 transcript）
@@ -9592,6 +10350,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 }
 
 - (void)closeQuestionPanel:(id)sender {
+    if (_protocolQuestions[_questionPanelRequestID]) {
+        [self writeQuestionResponseForRequestID:_questionPanelRequestID answers:@{}];
+        return;
+    }
     (void)sender;
     [_questionPanel orderOut:nil];
 }
@@ -9802,6 +10564,25 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 }
 
 - (void)writeQuestionResponseForRequestID:(NSString *)requestID answers:(NSDictionary<NSString *, NSString *> *)answers {
+    NSDictionary *protocol = _protocolQuestions[requestID];
+    if (protocol) {
+        NSMutableDictionary *input = [protocol[@"input"] mutableCopy];
+        input[@"answers"] = answers;
+        [protocol[@"bridge"] answerToolRequest:requestID response:answers.count
+            ? @{@"behavior": @"allow", @"updatedInput": input}
+            : @{@"behavior": @"deny", @"message": @"User dismissed the question."}];
+        [_protocolQuestions removeObjectForKey:requestID];
+        NSIndexSet *answeredRequests = [_pendingQuestionRequests indexesOfObjectsPassingTest:^BOOL(NSDictionary *item, NSUInteger index, BOOL *stop) {
+            (void)index; (void)stop; return [item[@"id"] isEqual:requestID];
+        }];
+        [_pendingQuestionRequests removeObjectsAtIndexes:answeredRequests];
+        if ([_questionPanelRequestID isEqual:requestID]) {
+            [_questionPanel orderOut:nil];
+            _questionPanelRequestID = nil;
+        }
+        [self presentNextQuestionRequestIfIdle];
+        return;
+    }
     NSString *directory = self.questionRequestDirectory;
     NSString *responsePath = [directory stringByAppendingPathComponent:
         [NSString stringWithFormat:@"%@.response.json", requestID]];

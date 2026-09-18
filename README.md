@@ -1,6 +1,8 @@
 # PrettyTerm Beta
 
-PrettyTerm is a lightweight native macOS companion for Claude Code sessions running in Apple Terminal. It reads local Claude Code transcripts, presents them in a focused conversation interface, and sends messages back to the exact Terminal session selected by the user.
+PrettyTerm is a lightweight native macOS interface for Claude Code. It runs Claude Code in the background, sends text and images together, streams responses into a focused conversation interface, and reads local transcripts to preserve conversation history.
+
+Current release: **0.9.9 (Build 1)** — [download the macOS beta](https://github.com/starshipmiyabi/PrettyTerm/releases/tag/v0.9.9-beta.1).
 
 > [!IMPORTANT]
 > PrettyTerm is beta software. It is an independent community project and is not affiliated with or endorsed by Anthropic.
@@ -9,13 +11,13 @@ PrettyTerm is a lightweight native macOS companion for Claude Code sessions runn
 
 - Native AppKit interface with no full Xcode project required.
 - Dedicated home page for choosing a project and starting a new Claude Code conversation.
-- Independent conversation tabs that retain their own draft, attachments, and Terminal binding.
+- Independent conversation tabs that retain their own draft, attachments, and Claude session.
 - Local session discovery from `~/.claude/projects`.
-- Exact Terminal binding using TTY, process, and Claude session metadata checks.
+- Managed background Claude Code sessions with structured image-and-text input and live streaming output.
 - Markdown rendering for headings, lists, quotes, links, code blocks, and tables.
 - Bundled MathJax rendering for inline and display LaTeX.
 - Expandable thinking, tool, error, and line-by-line diff events; per-file diffs start collapsed.
-- Grouped tool activity, exact Claude-output copying, and Escape interruption for an active reply.
+- Grouped tool activity, exact Claude-output copying, and a Stop button available throughout Claude's work.
 - Codex-style edited-file summaries at the end of each turn, with one-click access to that turn's recorded `Edit` / `Write` review without running Git.
 - Large in-app Review and Files pages that push the conversation aside, retain draggable split widths, and transition with one consistent motion curve.
 - Project file browsing for Markdown, source code, and plain text; Markdown opens as rendered content with MathJax, while source files keep complete text and line numbers.
@@ -24,10 +26,11 @@ PrettyTerm is a lightweight native macOS companion for Claude Code sessions runn
 - Remembered Git observation directories discovered from the selected Claude Code transcript, plus manually added directories.
 - Always-on-top floating conversation window.
 - Custom rounded composers shared by the main and floating windows, with text, image, file-picker, and drag-and-drop input.
-- In-composer model and reasoning-effort controls that send the exact `/model` and `/effort` commands to the verified Terminal session.
+- In-composer model, reasoning-effort, and permission-mode controls connected directly to the background Claude session.
+- Searchable slash-command suggestions with icons, descriptions, keyboard navigation, and live matching as the user types.
 - Custom inline `AskUserQuestion` cards plus a borderless native panel for the independent `ask_via_prettyterm` MCP bridge.
-- One-click **Compact** control that sends the exact `/compact` command to the currently verified Terminal conversation.
-- Transcript-aware waiting animation that appears after a successful message send and disappears when Claude's first real reply or tool event reaches the local JSONL transcript.
+- One-click **Compact** with compaction status and token counts supplied by Claude Code.
+- Live text, thinking, and tool output that merges into persisted history, plus a circular jump-to-bottom button when reading earlier messages.
 - Warm beige and deep-orange light and dark appearances designed to reduce glare.
 - Transparent orange PrettyTerm flower identity shared by the app icon, title bar, and home page.
 - Built-in Simplified Chinese and English interface selection, persisted locally across launches.
@@ -35,19 +38,19 @@ PrettyTerm is a lightweight native macOS companion for Claude Code sessions runn
 ## Requirements
 
 - macOS 13 Ventura or later.
-- Claude Code installed and running in Apple Terminal.
-- Permission for PrettyTerm to automate Terminal when macOS requests it.
+- Claude Code installed and signed in, with support for streaming JSON and session control requests. The current integration was developed against Claude Code 2.1.275.
+- Claude Code available as `claude` in the user's login shell. Terminal does not need to remain open.
 
-Building from source additionally requires the macOS Command Line Tools and Node.js for the JavaScript tests.
+Building from source additionally requires the macOS Command Line Tools. Running the JavaScript tests separately requires Node.js.
 
 ## Install a Release
 
 1. Download the latest `PrettyTerm-Beta-*.dmg` from [Releases](https://github.com/starshipmiyabi/PrettyTerm/releases).
 2. Open the disk image and drag `PrettyTerm Beta.app` to the **Applications** shortcut.
-3. Start Claude Code in Apple Terminal.
-4. Open PrettyTerm, choose a session, and click **Sync Terminal** before sending.
+3. Ensure Claude Code is installed and signed in.
+4. Open PrettyTerm and select an existing conversation, or choose a project on the home page to start one. Claude connects in the background.
 
-Because beta builds may use ad-hoc signing, macOS can request Terminal automation permission again after an update.
+When updating, replace the application and quit and reopen PrettyTerm to load the new build.
 
 ## Build from Source
 
@@ -83,15 +86,15 @@ Create the versioned DMG and `SHA256SUMS.txt` with:
 
 ## How It Works
 
-PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders the conversation in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. A session handshake matches metadata-only appends to the loaded conversation. When the inspector changes width, PrettyTerm preserves a character-level reading anchor so text reflow stays at the same passage. Sending remains anchored to Apple Terminal: PrettyTerm matches the selected Claude PID, TTY, exact process name, and session before writing to the bound tab. Every text submission ends with one additional, independently delivered Return after the body. After Terminal accepts a message, a transcript-aware waiting signal remains visible until Claude's first real reply or tool event arrives.
+PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders the conversation in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. A session handshake matches metadata-only appends to the loaded conversation. When the inspector changes width, PrettyTerm preserves a character-level reading anchor so text reflow stays at the same passage. Sending uses a managed Claude Code process over streaming JSON. The same process receives image and text blocks and emits live response events; selecting a conversation connects its background session without opening Terminal.
 
-PrettyTerm does not replace Claude Code or run a separate agent service. The Remote button sends `/remote-control` to the selected Claude Code session.
+PrettyTerm uses the installed Claude Code executable for requests, tools, authentication, and session persistence. The Remote button enables Remote Control through the selected background session's control protocol.
 
 ## Composer and Question Flows
 
-The main and floating composers use the same custom warm controls. Images selected, pasted, or dropped into a composer are sent immediately through Claude Code's image attachment path: original PNG bytes are preserved, converted formats bypass the lossy `NSImage -> TIFF` round trip, and no UI-text acknowledgement gate can hold back the message body. Other selected or dropped files are appended as exact, deduplicated `<attach>/absolute/path</attach>` markers, including paths containing spaces, without opening Claude Code's interactive `@` autocomplete. Model and reasoning-effort changes are sent only to the currently verified Terminal session; changing the visual control never changes a different session.
+The main and floating composers use the same custom warm controls. Images selected, pasted, or dropped into a composer remain attached until Send is pressed. All images and the accompanying text are then submitted as one structured user message. Original PNG bytes are preserved, and converted formats bypass the lossy `NSImage -> TIFF` round trip. Sent images also appear in conversation history as expandable thumbnails. Other selected or dropped files are appended as exact, deduplicated `<attach>/absolute/path</attach>` markers, including paths containing spaces, without opening Claude Code's interactive `@` autocomplete. Model changes use Claude Code's set_model control request. The selected session connects automatically, and the acknowledged model remains displayed when older transcript records refresh. Reasoning-effort changes are sent to the same background session.
 
-When Claude Code records an `AskUserQuestion` tool call in the transcript, PrettyTerm renders it as an inline question card with vertical single-choice or multiple-choice options and an optional free-text answer. The matching transcript tool result updates that card in place with the recorded answer.
+When Claude Code records an `AskUserQuestion` tool call in the transcript, PrettyTerm renders it as an inline question card with vertical single-choice or multiple-choice options and an optional free-text answer. Answers to active protocol questions are returned on the same Claude connection. The matching live or transcript tool result updates that card in place with the recorded answer, instead of leaving a separate tool-result card at the bottom.
 
 The independent `ask_via_prettyterm` MCP bridge uses request and response files under `~/.claude/prettyterm-questions`. PrettyTerm presents each request in a custom borderless native panel with vertically arranged answer controls. It writes only the answers selected or typed by the user; it does not generate an answer automatically.
 
@@ -99,13 +102,25 @@ The independent `ask_via_prettyterm` MCP bridge uses request and response files 
 
 The context card always keeps the latest total token count, percentage, and progress meter visible. Its optional details are sourced from Claude Code's real `/context` transcript records and start collapsed. When available, PrettyTerm shows System prompt, System tools, Memory files, Skills, Messages, Free space, and Autocompact buffer without estimating missing categories or counting deferred tools as loaded context.
 
-Plan-limit data comes from Claude Code's zero-turn `/usage` command running with a UTC environment. PrettyTerm accepts both exact-hour and minute reset formats, refreshes once per minute, and presents only countdown durations in the selected interface language.
+Plan-limit data comes from Claude Code's structured `get_usage` control request with `skip_behaviors`, at connection, after completed turns and once per minute. Native `rate_limit_event` updates also refresh the meter during responses. This path uses no model turn and needs no Terminal status-line file. Reset times arrive as timestamps and are displayed as countdowns.
 
-## Terminal Submission Reliability
+## Managed Claude Session Input
 
-Visual wrapping inside PrettyTerm's composer is layout-only and never inserts newline characters into the outgoing message. Apple Terminal can deliver a long `do script` payload in several roughly 1,022-byte chunks, with its automatically appended Return arriving beside the final body chunk. Interactive terminal applications may interpret that body-adjacent Return as part of pasted input instead of a submit action.
+PrettyTerm manages a background Claude Code process using streaming JSON over stdin/stdout. Each send contains all image blocks and the text in one user message. Claude accepts that message directly; sending no longer depends on Terminal clipboard operations, image-cache files, or a simulated Return.
 
-PrettyTerm therefore completes every text command with one additional Return delivered independently after the body. The Return-only automation uses an empty `do script`, which makes Terminal emit exactly one CR; explicitly supplying CR would make Terminal append another and produce two. The same verified TTY, PID, process-name, and Claude session binding protects both the body and final submit action. This applies to visually wrapped single-line text, true multiline text, model changes, and the Compact command.
+Partial output is enabled on the same connection. Text, thinking blocks and tool inputs update in place as events arrive, in both the main conversation and its floating view. Completed blocks adopt their transcript identifiers and merge into persisted history without being displayed twice. History remains file-backed; live output does not wait for transcript polling or require a Terminal window.
+
+Connecting an existing conversation ends its matching interactive Claude process and resumes the same session ID in the background. Shell configuration, Claude authentication and project settings remain owned by Claude Code. The input is cleared after Claude echoes the submitted message UUID. The Stop button remains available while Claude is working, including tool activity, and sends the protocol's interrupt request. Working state clears when the corresponding work completes. Model changes and Remote Control use their corresponding control requests.
+
+Requests, authentication, tools and prompt-cache markers remain owned by Claude Code. PrettyTerm resumes the same session ID and keeps the process running between sends. Model changes use Claude Code's normal cache behavior: switching models builds that model's cache; unchanged prefixes can be reused while still within their cache lifetime.
+
+## Commands without Terminal
+
+Typing `/` opens an in-window command palette with icons and descriptions. Further typing matches command names, localized titles, and descriptions; arrow keys select an item, Return or Tab inserts it, and Escape closes the palette. Selecting a suggestion fills the composer without sending it. The command list comes from the running Claude Code process. Built-ins, project commands, skills and plugins use that process and its command lifecycle; `commands_changed` refreshes the palette when Claude discovers more commands. `/commands` and `/help` open the palette as well. Commands that require a terminal UI are not advertised by Claude Code in this mode.
+
+`/config`, `/model`, `/effort` and `/mode` open PrettyTerm controls. Model and effort arguments use session control requests. Mode choices include Plan, Auto, Bypass, Default and Accept edits, using Claude Code's `set_permission_mode` protocol. Native tool requests and questions are answered in PrettyTerm and sent back on that connection.
+
+`/compact [instructions]` and the Compact button run Claude Code's compaction on the existing conversation. The UI displays its compacting status, completion or error, and before/after token counts when returned. Synthetic configuration acknowledgements do not enter the live conversation history. Command output appears in the status area and can be opened from **Advanced → View command result** or the `/` menu.
 
 ## Git Inspector and Directory Scope
 
@@ -125,22 +140,21 @@ The **Commit or Push** panel offers **Commit**, **Commit and Push**, and **Push*
 
 ## Interface Language
 
-Use the language selector in the title bar to choose **中文** or **English**. The preference is saved locally and applies to the native window, conversation chrome, turn review, Git review, menus, and macOS permission descriptions. Switching language rebuilds only the presentation layer: the selected Claude session, unsent draft, pending image attachments, Terminal binding, remembered Git directories, open Review/Files pages, selected preview file, and panel widths remain intact.
+Use the language selector in the title bar to choose **中文** or **English**. The preference is saved locally and applies to the native window, conversation chrome, turn review, Git review, menus, and macOS permission descriptions. Switching language rebuilds only the presentation layer: the selected Claude session, unsent draft, pending image attachments, Claude connection, remembered Git directories, open Review/Files pages, selected preview file, and panel widths remain intact.
 
 ## Privacy and Network Access
 
 - Conversation transcripts are read from the local machine.
 - PrettyTerm does not upload transcript contents to its own server. An explicit Git push sends repository commits only to that repository's configured remote.
-- PrettyTerm does not read Claude Code credentials or request Keychain authorization. The plan-usage panel runs Claude Code's zero-turn local `/usage` command, so Claude Code owns its existing login and token refresh path; the command reports zero model turns and zero API-equivalent cost.
+- PrettyTerm does not read Claude Code credentials or request Keychain authorization. Claude Code owns login and token refresh; the plan-usage panel uses its `get_usage` control request without creating a model turn.
 - The obsolete Accessibility-based input experiment and its permission description have been removed. File and transcript reads use the application's direct, non-sandboxed filesystem access.
 - The conversation WebView renders Markdown links directly and leaves bundled MathJax extensions available.
 - API-equivalent cost is an estimate based on transcript usage data and public API pricing; it is not a subscription charge.
 
 ## Current Limitations
 
-- Apple Terminal is currently the only supported terminal application.
-- Sending targets a live Claude Code process in Apple Terminal.
-- Some slash commands and terminal-only workflows are best executed directly in Terminal.
+- Sending uses a PrettyTerm-managed Claude Code process. Reconnect an existing conversation to transfer it from its interactive terminal process.
+- Available slash commands depend on the installed Claude Code version and its headless command list. Terminal-only interactive commands are not included in that list.
 - Beta builds are not notarized.
 
 ## Project Layout

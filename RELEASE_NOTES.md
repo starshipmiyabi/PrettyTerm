@@ -1,3 +1,27 @@
+# PrettyTerm Beta 0.9.9 (Build 7)
+
+Build 7 updates code and file viewing, makes conversation controls reflect and persist Claude Code's effective settings, and reduces transcript memory retained for unopened conversations.
+
+## Download and Update
+
+Download `PrettyTerm-Beta-0.9.9-build7-macOS.dmg`, open it, and drag PrettyTerm Beta to Applications. Replace the existing application, then quit and reopen it. `SHA256SUMS.txt` accompanies the disk image.
+
+Requires macOS 13 or later and an installed, signed-in Claude Code executable with streaming JSON and session-control support. The beta uses ad-hoc signing and is not notarized.
+
+## Changes Since Build 1
+
+- Adds syntax highlighting, language labels, and a copy button to conversation code blocks. Source-file previews now show line numbers with syntax highlighting.
+- Opens image files directly in Files and renders Jupyter notebooks with Markdown cells, code cells, and supported outputs.
+- Reads back the effective model and reasoning effort after a Claude Code control request, saves confirmed model, effort, and permission-mode choices to `~/.claude/settings.json`, and records configuration requests and responses in `~/Library/Logs/PrettyTerm/configuration.jsonl`. The saved permission mode is used when a background session starts again.
+- Adds Sonnet 4.6 and Opus 5.5 to the model picker and keeps the configuration controls in sync with the selected session.
+- Keeps complete transcripts for every conversation open in a tab or floating window. Unopened conversations retain summary data for the sidebar, reducing memory spent on their message and image content.
+
+## Build
+
+The application was compiled and packaged for this release. No test suite or interactive runtime tests were run during this publication.
+
+---
+
 # PrettyTerm Beta 0.9.9 (Build 1)
 
 This release moves conversation input and live output to a managed background Claude Code session. Text, images, commands, usage information, model selection, and interruption are available in PrettyTerm without keeping Terminal open.

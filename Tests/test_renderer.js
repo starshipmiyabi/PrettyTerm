@@ -220,7 +220,7 @@ test('file preview compiles Markdown into a standalone rendered document', async
   assert.match(html, /class="file-document markdown-document"/);
   assert.match(html, /<h1>Heading<\/h1>/);
   assert.match(html, /<ul><li>first<\/li><li>second<\/li><\/ul>/);
-  assert.match(html, /<pre><code class="language-js">const value = 1;<\/code><\/pre>/);
+  assert.match(html, /<pre><code class="language-js"><span class="tok-keyword">const<\/span> value = <span class="tok-number">1<\/span>;<\/code><\/pre>/);
   assert.match(html, /<span class="inline-math">\\\(x\+1\\\)<\/span>/);
   assert.doesNotMatch(html, /># Heading</);
 });
@@ -235,9 +235,88 @@ test('file preview renders complete escaped source with literal line numbers', a
 
   assert.match(html, /class="file-document source-document"/);
   assert.equal((html.match(/class="source-line"/g) || []).length, 4);
-  assert.match(html, /class="line-number">1<\/span><code>if \(a &lt; b\) \{<\/code>/);
-  assert.match(html, /class="line-number">2<\/span><code>  return &quot;&lt;done&gt;&quot;;<\/code>/);
+  assert.match(html, /class="line-number">1<\/span><code><span class="tok-keyword">if<\/span> \(a &lt; b\) \{<\/code>/);
+  assert.match(html, /class="line-number">2<\/span><code>  <span class="tok-keyword">return<\/span> <span class="tok-string">&quot;&lt;done&gt;&quot;<\/span>;<\/code>/);
   assert.match(html, /class="line-number">4<\/span><code><\/code>/);
+});
+
+test('file preview keeps multi-line tokens well-formed on every source line', async () => {
+  const html = await renderer.renderFilePreview({
+    kind: 'source',
+    title: 'main.go',
+    path: '/tmp/main.go',
+    text: '/* one\ntwo */\nfunc main() {}'
+  });
+  assert.match(html, /class="line-number">1<\/span><code><span class="tok-comment">\/\* one<\/span><\/code>/);
+  assert.match(html, /class="line-number">2<\/span><code><span class="tok-comment">two \*\/<\/span><\/code>/);
+  assert.match(html, /<span class="tok-keyword">func<\/span> <span class="tok-function">main<\/span>/);
+});
+
+test('file preview picks a highlighter from file names and extensions', async () => {
+  const cases = [
+    ['Dockerfile', 'FROM python:3.12\nRUN pip install x', /<span class="tok-keyword">FROM<\/span> python:3\.12[\s\S]*<span class="tok-keyword">RUN<\/span> <span class="tok-command">pip<\/span> install x/],
+    ['config.yaml', 'name: pt # c\nok: true', /<span class="tok-property">name<\/span>: pt <span class="tok-comment"># c<\/span>[\s\S]*<span class="tok-literal">true<\/span>/],
+    ['pyproject.toml', '[project]\nversion = "1.0"', /<span class="tok-keyword">\[project\]<\/span>[\s\S]*<span class="tok-property">version<\/span> = <span class="tok-string">&quot;1.0&quot;<\/span>/],
+    ['.env', 'API_KEY=abc', /<span class="tok-property">API_KEY<\/span>=abc/],
+    ['index.html', '<a href="x">it\'s &amp;</a>', /<span class="tok-keyword">&lt;a<\/span> <span class="tok-property">href<\/span>=<span class="tok-string">&quot;x&quot;<\/span><span class="tok-keyword">&gt;<\/span>it&#39;s <span class="tok-literal">&amp;amp;<\/span>/],
+    ['style.css', '.a { color: #fff; margin: 2px; }', /<span class="tok-function">a<\/span> \{ <span class="tok-property">color<\/span>: <span class="tok-number">#fff<\/span>; <span class="tok-property">margin<\/span>: <span class="tok-number">2px<\/span>/],
+    ['query.sql', 'select id from t where x = \'a\' -- c', /<span class="tok-keyword">select<\/span> id <span class="tok-keyword">from<\/span> t <span class="tok-keyword">where<\/span> x = <span class="tok-string">&#39;a&#39;<\/span> <span class="tok-comment">-- c<\/span>/],
+    ['paper.tex', '\\section{A} $x^2$ % c \\% ok', /<span class="tok-keyword">\\section<\/span>\{A\} <span class="tok-string">\$x\^2\$<\/span> <span class="tok-comment">% c \\% ok<\/span>/],
+    ['kernel.cu', '__global__ void k() {}', /<span class="tok-keyword">__global__<\/span> <span class="tok-keyword">void<\/span> <span class="tok-function">k<\/span>/],
+    ['app.rb', 'def hi # c\n  @name\nend', /<span class="tok-keyword">def<\/span> hi <span class="tok-comment"># c<\/span>[\s\S]*<span class="tok-variable">@name<\/span>[\s\S]*<span class="tok-keyword">end<\/span>/],
+    ['init.lua', 'local x = nil -- c', /<span class="tok-keyword">local<\/span> x = <span class="tok-literal">nil<\/span> <span class="tok-comment">-- c<\/span>/],
+    ['fix.patch', '@@ -1 +1 @@\n-old\n+new', /<span class="tok-property">@@ -1 \+1 @@<\/span>[\s\S]*<span class="tok-variable">-old<\/span>[\s\S]*<span class="tok-string">\+new<\/span>/],
+    ['notes.txt', 'if "x"', /<code>if &quot;x&quot;<\/code>/]
+  ];
+  for (const [title, text, pattern] of cases) {
+    const html = await renderer.renderFilePreview({ kind: 'source', title, path: `/tmp/${title}`, text });
+    assert.match(html, pattern, title);
+  }
+});
+
+test('notebook preview renders markdown, highlighted code, and safe outputs', async () => {
+  const notebook = {
+    metadata: { language_info: { name: 'python' } },
+    cells: [
+      { cell_type: 'markdown', source: ['# Title\n', 'text'] },
+      {
+        cell_type: 'code', execution_count: 3, source: ['import os\n', 'print(1)'],
+        outputs: [
+          { output_type: 'stream', name: 'stdout', text: ['10%\r50%\r100%\n', 'done'] },
+          { output_type: 'execute_result', data: { 'text/plain': ['<df>'], 'text/html': ['<script>x()</script>'] } },
+          { output_type: 'display_data', data: { 'image/png': 'iVBORw0K\nGgo=' } },
+          { output_type: 'display_data', data: { 'image/png': '" onerror="x()' } },
+          { output_type: 'error', ename: 'ValueError', evalue: 'bad', traceback: ['\u001b[31mValueError\u001b[0m: bad'] }
+        ]
+      }
+    ]
+  };
+  const html = await renderer.renderFilePreview({
+    kind: 'notebook', title: 'a.ipynb', path: '/tmp/a.ipynb', text: JSON.stringify(notebook)
+  });
+  assert.match(html, /class="file-document notebook-document"/);
+  assert.match(html, /<section class="nb-cell nb-markdown"><h1>Title<\/h1><p>text<\/p><\/section>/);
+  assert.match(html, /<div class="nb-prompt">In \[3\]:<\/div><div class="code-block">/);
+  assert.match(html, /<span class="tok-keyword">import<\/span> os/);
+  assert.match(html, /<pre class="nb-output">100%\ndone<\/pre>/);
+  assert.match(html, /<pre class="nb-output">&lt;df&gt;<\/pre>/);
+  assert.doesNotMatch(html, /<script>|onerror/);
+  assert.match(html, /<img src="data:image\/png;base64,iVBORw0KGgo=" alt="">/);
+  assert.match(html, /<pre class="nb-output nb-error">ValueError: bad<\/pre>/);
+
+  const broken = await renderer.renderFilePreview({ kind: 'notebook', title: 'b.ipynb', path: '/tmp/b.ipynb', text: '{"cells": 1' });
+  assert.match(broken, /class="file-source-body"/);
+});
+
+test('image preview only embeds image data URLs', async () => {
+  const html = await renderer.renderFilePreview({
+    kind: 'image', title: 'a".png', path: '/tmp/a.png', dataURL: 'data:image/png;base64,AAAA'
+  });
+  assert.match(html, /<div class="file-image-body"><img src="data:image\/png;base64,AAAA" alt="a&quot;.png"><\/div>/);
+  const rejected = await renderer.renderFilePreview({
+    kind: 'image', title: 'x.png', path: '/tmp/x.png', dataURL: 'javascript:alert(1)'
+  });
+  assert.doesNotMatch(rejected, /<img/);
 });
 
 test('live LaTeX waits for MathJax startup and serializes every incremental typeset', async () => {
@@ -473,4 +552,43 @@ test('an already-answered question displays the recorded answer with no input co
   assert.match(html, /方案 A/);
   assert.doesNotMatch(html, /question-option/);
   assert.doesNotMatch(html, /question-submit/);
+});
+
+test('fenced code blocks get a language header, copy button, and shell highlighting', () => {
+  const html = renderer.renderMarkdown([
+    '```bash',
+    'conda activate PythonProject',
+    '',
+    'labelImg \\',
+    "  '/Volumes/data/visible' \\",
+    '  --verbose $HOME # done',
+    'ls | grep -v x',
+    '```'
+  ].join('\n'));
+
+  assert.match(html, /<div class="code-block"><div class="code-block-header">/);
+  assert.match(html, /<span class="code-block-icon" aria-hidden="true">&lt;\/&gt;<\/span>Bash<\/span>/);
+  assert.match(html, /<button type="button" class="code-copy-button"/);
+  assert.match(html, /<span class="tok-command">conda<\/span> activate PythonProject/);
+  assert.match(html, /<span class="tok-command">labelImg<\/span> \\/);
+  assert.match(html, /<span class="tok-string">&#39;\/Volumes\/data\/visible&#39;<\/span>/);
+  assert.match(html, /<span class="tok-flag">--verbose<\/span> <span class="tok-variable">\$HOME<\/span> <span class="tok-comment"># done<\/span>/);
+  assert.match(html, /<span class="tok-command">ls<\/span> \| <span class="tok-command">grep<\/span> <span class="tok-flag">-v<\/span> x/);
+});
+
+test('code highlighting covers python, json, and escapes markup', () => {
+  const python = renderer.renderMarkdown('```python\n@cache\ndef f(x):  # note\n    return None if x else "a<b>"\n```');
+  assert.match(python, /<span class="tok-decorator">@cache<\/span>/);
+  assert.match(python, /<span class="tok-keyword">def<\/span> <span class="tok-function">f<\/span>\(x\):  <span class="tok-comment"># note<\/span>/);
+  assert.match(python, /<span class="tok-literal">None<\/span>/);
+  assert.match(python, /<span class="tok-string">&quot;a&lt;b&gt;&quot;<\/span>/);
+
+  const json = renderer.renderMarkdown('```json\n{"name": "pt", "n": 2, "ok": true}\n```');
+  assert.match(json, /<span class="tok-property">&quot;name&quot;<\/span>: <span class="tok-string">&quot;pt&quot;<\/span>/);
+  assert.match(json, /<span class="tok-number">2<\/span>/);
+  assert.match(json, /<span class="tok-literal">true<\/span>/);
+
+  const plain = renderer.renderMarkdown('```\n<script>alert(1)</script>\n```');
+  assert.match(plain, /<pre><code>&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/code><\/pre>/);
+  assert.match(plain, /<\/span>代码<\/span>/);
 });

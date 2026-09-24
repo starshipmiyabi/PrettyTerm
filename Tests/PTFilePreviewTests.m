@@ -29,6 +29,18 @@ int main(void) {
             @"NSInteger answer = 42;\nreturn answer;\n");
         NSURL *plain = PTWriteText(root, @"Notes.txt", @"alpha\nbeta\ngamma\n");
         NSURL *extensionless = PTWriteText(root, @"Makefile", @"all:\n\tprintf ok\n");
+        NSURL *typescript = PTWriteText(root, @"main.ts", @"const value: number = 1;\n");
+        NSURL *toml = PTWriteText(root, @"pyproject.toml", @"[project]\nname = \"pt\"\n");
+        NSURL *notebook = PTWriteText(root, @"analysis.ipynb", @"{\"cells\": []}\n");
+        NSURL *image = [root URLByAppendingPathComponent:@"photo.png"];
+        NSBitmapImageRep *pixels = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+            pixelsWide:2 pixelsHigh:2 bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+            colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+        PTAssert([[pixels representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+            writeToURL:image atomically:YES], @"PNG fixture must be written");
+        NSURL *tiff = [root URLByAppendingPathComponent:@"scan.tiff"];
+        PTAssert([pixels.TIFFRepresentation writeToURL:tiff atomically:YES],
+            @"TIFF fixture must be written");
         NSURL *unsupported = [root URLByAppendingPathComponent:@"Slides.pdf"];
         NSData *pdfBytes = [@"%PDF-1.7\n" dataUsingEncoding:NSUTF8StringEncoding];
         PTAssert([pdfBytes writeToURL:unsupported atomically:YES], @"PDF fixture must be written");
@@ -45,6 +57,24 @@ int main(void) {
             @"source, txt, and decodable extensionless text must use the source preview kind");
         PTAssert([PTFilePreviewKindForURL(unsupported) isEqual:@"unsupported"],
             @"PDF must remain outside the text preview feature");
+        PTAssert([PTFilePreviewKindForURL(typescript) isEqual:@"source"] &&
+                 [PTFilePreviewKindForURL(toml) isEqual:@"source"],
+            @"code files that UTType misclassifies must still use the source preview kind");
+        PTAssert([PTFilePreviewKindForURL(notebook) isEqual:@"notebook"],
+            @"Jupyter notebooks must use the notebook preview kind");
+        PTAssert([PTFilePreviewKindForURL(image) isEqual:@"image"] &&
+                 [PTFilePreviewKindForURL(tiff) isEqual:@"image"],
+            @"images must use the image preview kind");
+
+        NSError *imageError = nil;
+        NSDictionary *imagePayload = PTFilePreviewPayloadForURL(image, &imageError);
+        PTAssert(imageError == nil && [imagePayload[@"kind"] isEqual:@"image"] &&
+                 [imagePayload[@"dataURL"] hasPrefix:@"data:image/png;base64,"] &&
+                 imagePayload[@"text"] == nil,
+            @"web images must be embedded as data URLs with their own MIME type");
+        NSDictionary *tiffPayload = PTFilePreviewPayloadForURL(tiff, nil);
+        PTAssert([tiffPayload[@"dataURL"] hasPrefix:@"data:image/png;base64,"],
+            @"non-web image formats must be converted to PNG");
 
         NSError *payloadError = nil;
         NSDictionary *payload = PTFilePreviewPayloadForURL(markdown, &payloadError);
@@ -59,8 +89,10 @@ int main(void) {
         NSArray<NSDictionary *> *children = PTFileTreeChildren(root, &treeError);
         PTAssert(treeError == nil, @"previewable directory children must load");
         NSArray *names = [children valueForKey:@"name"];
-        PTAssert([names isEqual:@[@"Sources", @"Guide.md", @"Makefile", @"Notes.txt", @"Review.m"]],
-            @"tree must sort directories first and include only previewable text files");
+        PTAssert([names isEqual:@[@"Sources", @"analysis.ipynb", @"Guide.md", @"main.ts",
+                                  @"Makefile", @"Notes.txt", @"photo.png", @"pyproject.toml",
+                                  @"Review.m", @"scan.tiff"]],
+            @"tree must sort directories first and include only previewable files");
         PTAssert(![names containsObject:@"Slides.pdf"],
             @"unsupported files must not enter the preview tree");
         PTAssert([children.firstObject[@"directory"] boolValue] &&

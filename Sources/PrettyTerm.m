@@ -237,6 +237,7 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 
 @interface PTEffortSlider : NSControl <NSGestureRecognizerDelegate>
 @property(nonatomic) NSInteger selectedIndex;
+@property(nonatomic) NSInteger submittedIndex;
 @end
 
 @implementation PTFirstMouseButton
@@ -757,12 +758,13 @@ static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
 }
 
 - (void)setSelectedIndex:(NSInteger)selectedIndex {
-    NSInteger next = MIN(4, MAX(0, selectedIndex));
+    NSInteger next = MIN(4, MAX(-1, selectedIndex));
     if (_selectedIndex == next) return;
+    BOOL animate = _selectedIndex >= 0 && next >= 0;
     CGFloat oldX = [self xForIndex:_selectedIndex];
     _selectedIndex = next;
     [self setNeedsLayout:YES];
-    if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+    if (animate && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
         CGFloat nextX = [self xForIndex:next];
         CABasicAnimation *thumb = [CABasicAnimation animationWithKeyPath:@"position.x"];
         thumb.fromValue = @(oldX);
@@ -779,6 +781,8 @@ static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
     CGFloat right = MAX(left, self.bounds.size.width - 19);
     CGFloat centerY = NSMidY(self.bounds);
     CGFloat selectedX = [self xForIndex:self.selectedIndex];
+    _thumbLayer.hidden = self.selectedIndex < 0;
+    _fillLayer.hidden = self.selectedIndex < 0;
     [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
         _trackLayer.backgroundColor = PTWarmChipColor().CGColor;
         _fillLayer.backgroundColor = PTWarmAccentColor().CGColor;
@@ -815,12 +819,17 @@ static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
 }
 
 - (void)sendDeferredActionFromIndex:(NSInteger)startIndex {
-    if (self.selectedIndex != startIndex && self.action && self.target) {
-        // 手势必须先完整结束，再提交会改变应用状态的命令。
+    (void)startIndex;
+    NSInteger requestedIndex = self.selectedIndex;
+    if (self.action && self.target) {
+        // Capture the gesture value before asynchronous configuration refreshes can move the thumb.
         __weak typeof(self) weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
             PTEffortSlider *self = weakSelf;
-            if (self && self.action && self.target) [self sendAction:self.action to:self.target];
+            if (self && self.action && self.target) {
+                self.submittedIndex = requestedIndex;
+                [self sendAction:self.action to:self.target];
+            }
         });
     }
 }
@@ -1263,6 +1272,8 @@ static void PTCollectTranscriptDirectories(id value,
 @property(nonatomic, strong) NSDate *modifiedAt;
 @property(nonatomic, strong) NSArray<NSString *> *accessedDirectories;
 @property(nonatomic, strong) NSArray<NSDictionary *> *assistantMessages;
+@property(nonatomic) NSUInteger conversationTurnCount;
+@property(nonatomic) BOOL fullTranscriptLoaded;
 @property(nonatomic, strong) NSArray<NSDictionary *> *changedFiles;
 @property(nonatomic, strong) NSArray<NSDictionary *> *tasks;
 @property(nonatomic) NSUInteger contextUsed;
@@ -1310,6 +1321,12 @@ static NSUInteger PTConversationTurnCount(NSArray<NSDictionary *> *messages) {
     return count;
 }
 
+static NSUInteger PTSessionTurnCount(PTSessionInfo *session) {
+    if (session.conversationTurnCount || session.assistantMessages.count == 0)
+        return session.conversationTurnCount;
+    return PTConversationTurnCount(session.assistantMessages);
+}
+
 static NSArray<NSDictionary *> *PTLoadTasksForSession(NSString *sessionID) {
     if (!sessionID.length) return @[];
     NSString *tasksDir = [NSHomeDirectory() stringByAppendingPathComponent:
@@ -1337,7 +1354,8 @@ static PTSessionInfo *PTParseSessionData(
     NSData *data,
     NSString *filePath,
     NSDate *modifiedAt,
-    PTSessionInfo *baseSession
+    PTSessionInfo *baseSession,
+    BOOL includeMessages
 ) {
     if (!data) return nil;
     // Claude 还在往这个文件追加写的时候，文件末尾可能截在一个多字节 UTF-8
@@ -1366,6 +1384,8 @@ static PTSessionInfo *PTParseSessionData(
         ? baseSession.sessionID : filePath.lastPathComponent.stringByDeletingPathExtension;
     session.filePath = filePath;
     session.modifiedAt = modifiedAt;
+    session.fullTranscriptLoaded = includeMessages;
+    session.conversationTurnCount = baseSession.conversationTurnCount;
     session.cwd = baseSession.cwd ?: @"";
     session.model = baseSession.model ?: @"";
     session.effort = baseSession.effort ?: @"";
@@ -1386,7 +1406,7 @@ static PTSessionInfo *PTParseSessionData(
     NSString *generatedTitle = baseSession.parseGeneratedTitle ?: @"";
     NSString *lastPrompt = baseSession.parseLastPrompt ?: @"";
     NSString *firstPrompt = baseSession.parseFirstPrompt ?: @"";
-    NSMutableArray<NSDictionary *> *messages = baseSession
+    NSMutableArray<NSDictionary *> *messages = includeMessages && baseSession
         ? [baseSession.assistantMessages mutableCopy] : [NSMutableArray array];
     NSMutableSet<NSString *> *messageKeys = baseSession
         ? [baseSession.parseMessageKeys mutableCopy] : [NSMutableSet set];
@@ -1409,7 +1429,7 @@ static PTSessionInfo *PTParseSessionData(
         }
     }
 
-    for (NSString *line in [source componentsSeparatedByString:@"\n"]) {
+    for (NSString *line in [source componentsSeparatedByString:@"\n"]) { @autoreleasepool {
         if (line.length < 2) continue;
         NSData *lineData = [line dataUsingEncoding:NSUTF8StringEncoding];
         NSDictionary *object = [NSJSONSerialization JSONObjectWithData:lineData options:0 error:nil];
@@ -1417,7 +1437,7 @@ static PTSessionInfo *PTParseSessionData(
 
         // Remember every structured directory the Agent actually touches: cwd values,
         // Read/Edit/Write paths, Bash absolute arguments, tool results, and file snapshots.
-        PTCollectTranscriptDirectories(object, nil, accessedDirectories);
+        if (includeMessages) PTCollectTranscriptDirectories(object, nil, accessedDirectories);
 
         NSString *type = object[@"type"];
         NSString *objectSessionID = object[@"sessionId"];
@@ -1452,7 +1472,7 @@ static PTSessionInfo *PTParseSessionData(
             NSString *candidate = object[@"title"] ?: object[@"aiTitle"];
             if ([candidate isKindOfClass:NSString.class]) generatedTitle = candidate;
         } else if ([type isEqual:@"last-prompt"] && [object[@"lastPrompt"] isKindOfClass:NSString.class]) {
-            lastPrompt = object[@"lastPrompt"];
+            lastPrompt = includeMessages ? object[@"lastPrompt"] : PTShortText(object[@"lastPrompt"], 58);
         } else if ([type isEqual:@"user"]) {
             if ([object[@"isSidechain"] boolValue]) continue;
             NSDictionary *message = object[@"message"];
@@ -1465,7 +1485,7 @@ static PTSessionInfo *PTParseSessionData(
             NSArray *structuredPatch = [toolUseResult[@"structuredPatch"] isKindOfClass:NSArray.class]
                 ? toolUseResult[@"structuredPatch"] : nil;
             NSString *patchKey = [NSString stringWithFormat:@"%@:patch", object[@"uuid"] ?: @""];
-            if (structuredPatch.count > 0 && object[@"uuid"] && ![messageKeys containsObject:patchKey]) {
+            if (includeMessages && structuredPatch.count > 0 && object[@"uuid"] && ![messageKeys containsObject:patchKey]) {
                 [messageKeys addObject:patchKey];
                 for (NSDictionary *hunk in structuredPatch) {
                     NSArray *hunkLines = [hunk[@"lines"] isKindOfClass:NSArray.class] ? hunk[@"lines"] : nil;
@@ -1479,7 +1499,7 @@ static PTSessionInfo *PTParseSessionData(
             }
 
             id rawContent = message[@"content"];
-            if ([rawContent isKindOfClass:NSArray.class]) {
+            if (includeMessages && [rawContent isKindOfClass:NSArray.class]) {
                 NSUInteger resultIndex = 0;
                 for (NSDictionary *block in (NSArray *)rawContent) {
                     if (![block isKindOfClass:NSDictionary.class] ||
@@ -1516,7 +1536,23 @@ static PTSessionInfo *PTParseSessionData(
                 }
             }
             NSString *text = PTTextFromMessageContent(message[@"content"]);
-            NSArray<NSString *> *images = PTImagesFromMessageContent(message[@"content"]);
+            NSArray<NSString *> *images = includeMessages
+                ? PTImagesFromMessageContent(rawContent) : @[];
+            BOOL hasImage = images.count > 0;
+            if (!includeMessages && [rawContent isKindOfClass:NSArray.class]) {
+                for (NSDictionary *block in (NSArray *)rawContent) {
+                    NSDictionary *imageSource = [block isKindOfClass:NSDictionary.class] &&
+                        [block[@"type"] isEqual:@"image"] ? block[@"source"] : nil;
+                    if ([imageSource isKindOfClass:NSDictionary.class] &&
+                        (([imageSource[@"type"] isEqual:@"base64"] &&
+                          [imageSource[@"data"] isKindOfClass:NSString.class]) ||
+                         ([imageSource[@"type"] isEqual:@"url"] &&
+                          [imageSource[@"url"] isKindOfClass:NSString.class]))) {
+                        hasImage = YES;
+                        break;
+                    }
+                }
+            }
             NSDictionary *contextSnapshot = PTContextSnapshotFromText(text);
             if (contextSnapshot) {
                 session.contextUsed = [contextSnapshot[@"used"] unsignedIntegerValue];
@@ -1527,21 +1563,24 @@ static PTSessionInfo *PTParseSessionData(
             if (addedDirectory.length > 0) [accessedDirectories addObject:addedDirectory];
             BOOL isMeta = [object[@"isMeta"] boolValue];
             if (firstPrompt.length == 0 && text.length > 0 && !isMeta) {
-                firstPrompt = text;
+                firstPrompt = includeMessages ? text : PTShortText(text, 58);
             }
             // 图片消息也是完整的用户回合；工具结果没有顶层文字或图片。
-            if ((text.length > 0 || images.count > 0) && !isMeta) {
+            if ((text.length > 0 || hasImage) && !isMeta) {
                 NSString *uuid = object[@"uuid"] ?: message[@"id"] ?: NSUUID.UUID.UUIDString;
                 NSString *key = [NSString stringWithFormat:@"%@:user", uuid];
                 if (![messageKeys containsObject:key]) {
                     [messageKeys addObject:key];
-                    [messages addObject:@{
-                        @"messageKey": key,
-                        @"text": text,
-                        @"images": images,
-                        @"timestamp": object[@"timestamp"] ?: @"",
-                        @"role": @"user"
-                    }];
+                    session.conversationTurnCount++;
+                    if (includeMessages) {
+                        [messages addObject:@{
+                            @"messageKey": key,
+                            @"text": text,
+                            @"images": images,
+                            @"timestamp": object[@"timestamp"] ?: @"",
+                            @"role": @"user"
+                        }];
+                    }
                 }
             }
         } else if ([type isEqual:@"assistant"]) {
@@ -1596,6 +1635,7 @@ static PTSessionInfo *PTParseSessionData(
                     [usage[@"cache_read_input_tokens"] unsignedIntegerValue];
             }
 
+            if (!includeMessages) continue;
             NSArray *content = message[@"content"];
             if (![content isKindOfClass:NSArray.class]) continue;
             NSUInteger blockIndex = 0;
@@ -1645,7 +1685,7 @@ static PTSessionInfo *PTParseSessionData(
                 blockIndex++;
             }
         }
-    }
+    } }
 
     NSString *title = customTitle.length ? customTitle :
         (generatedTitle.length ? generatedTitle :
@@ -1662,9 +1702,10 @@ static PTSessionInfo *PTParseSessionData(
     session.codeLinesRemoved = codeLinesRemoved;
     session.accessedDirectories = accessedDirectories.array;
     session.assistantMessages = messages;
-    session.changedFiles = PTAggregateChangedFiles(messages);
+    session.changedFiles = includeMessages ? PTAggregateChangedFiles(messages) : @[];
     session.tasks = PTLoadTasksForSession(session.sessionID);
-    if (session.assistantMessages.count == 0 && firstPrompt.length == 0 && customTitle.length == 0) {
+    if (session.assistantMessages.count == 0 && session.conversationTurnCount == 0 &&
+        firstPrompt.length == 0 && customTitle.length == 0) {
         return nil;
     }
     return session;
@@ -1703,10 +1744,11 @@ static NSData *PTReadFileDataFromOffset(NSString *filePath, NSUInteger offset) {
     }
 }
 
-static PTSessionInfo *PTParseSession(
+static PTSessionInfo *PTParseSessionWithDetail(
     NSString *filePath,
     NSDate *modifiedAt,
-    NSUInteger *parsedSize
+    NSUInteger *parsedSize,
+    BOOL includeMessages
 ) {
     NSData *data = [NSData dataWithContentsOfFile:filePath options:NSDataReadingMappedIfSafe error:nil];
     if (!data) return nil;
@@ -1715,15 +1757,24 @@ static PTSessionInfo *PTParseSession(
     if (completeLength == 0) return nil;
     NSData *completeData = completeLength == data.length
         ? data : [data subdataWithRange:NSMakeRange(0, completeLength)];
-    return PTParseSessionData(completeData, filePath, modifiedAt, nil);
+    return PTParseSessionData(completeData, filePath, modifiedAt, nil, includeMessages);
 }
 
-static PTSessionInfo *PTParseSessionAppending(
+static PTSessionInfo *PTParseSession(
+    NSString *filePath,
+    NSDate *modifiedAt,
+    NSUInteger *parsedSize
+) {
+    return PTParseSessionWithDetail(filePath, modifiedAt, parsedSize, YES);
+}
+
+static PTSessionInfo *PTParseSessionAppendingWithDetail(
     NSString *filePath,
     NSDate *modifiedAt,
     NSUInteger previousParsedSize,
     PTSessionInfo *baseSession,
-    NSUInteger *parsedSize
+    NSUInteger *parsedSize,
+    BOOL includeMessages
 ) {
     NSData *newData = PTReadFileDataFromOffset(filePath, previousParsedSize);
     if (!newData) return nil;
@@ -1735,13 +1786,25 @@ static PTSessionInfo *PTParseSessionAppending(
     }
     NSData *completeData = completeLength == newData.length
         ? newData : [newData subdataWithRange:NSMakeRange(0, completeLength)];
-    return PTParseSessionData(completeData, filePath, modifiedAt, baseSession);
+    return PTParseSessionData(completeData, filePath, modifiedAt, baseSession, includeMessages);
+}
+
+static __attribute__((unused)) PTSessionInfo *PTParseSessionAppending(
+    NSString *filePath,
+    NSDate *modifiedAt,
+    NSUInteger previousParsedSize,
+    PTSessionInfo *baseSession,
+    NSUInteger *parsedSize
+) {
+    return PTParseSessionAppendingWithDetail(
+        filePath, modifiedAt, previousParsedSize, baseSession, parsedSize, YES);
 }
 
 @interface PTSessionStore : NSObject
 @property(nonatomic, copy) void (^sessionsChanged)(NSArray<PTSessionInfo *> *sessions);
 @property(nonatomic, copy) void (^globalModelChanged)(NSString *model);
 @property(nonatomic, copy) void (^globalEffortChanged)(NSString *effort);
+@property(atomic, copy) NSSet<NSString *> *fullSessionIDs;
 - (void)refresh;
 - (void)refreshChangedPath:(NSString *)filePath
                 completion:(void (^)(PTSessionInfo * _Nullable session))completion;
@@ -1764,6 +1827,7 @@ static PTSessionInfo *PTParseSessionAppending(
     if (self) {
         _queue = dispatch_queue_create("com.yuuka.prettyterm.session-reader", DISPATCH_QUEUE_SERIAL);
         _cache = [NSMutableDictionary dictionary];
+        _fullSessionIDs = [NSSet set];
         _refreshGate = [[PTRefreshGate alloc] init];
         _settingsFD = -1;
     }
@@ -1835,7 +1899,8 @@ static PTSessionInfo *PTParseSessionAppending(
 
         NSMutableArray<PTSessionInfo *> *sessions = [NSMutableArray array];
         NSMutableSet<NSString *> *seenPaths = [NSMutableSet set];
-        for (NSURL *url in enumerator) {
+        NSSet<NSString *> *fullSessionIDs = self.fullSessionIDs;
+        for (NSURL *url in enumerator) { @autoreleasepool {
             if (![url.pathExtension.lowercaseString isEqual:@"jsonl"]) continue;
             NSNumber *regular = nil;
             NSDate *modified = nil;
@@ -1845,20 +1910,26 @@ static PTSessionInfo *PTParseSessionAppending(
             [url getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
             [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
             [seenPaths addObject:url.path];
+            BOOL includeMessages = [fullSessionIDs containsObject:
+                url.lastPathComponent.stringByDeletingPathExtension];
 
             NSDictionary *cached = self->_cache[url.path];
             PTSessionInfo *session = nil;
             NSUInteger parsedSize = 0;
-            if (cached && [cached[@"modified"] isEqual:modified] && [cached[@"size"] isEqual:size]) {
+            if (cached && [cached[@"modified"] isEqual:modified] && [cached[@"size"] isEqual:size] &&
+                ((PTSessionInfo *)cached[@"session"]).fullTranscriptLoaded == includeMessages) {
                 session = cached[@"session"];
             } else {
                 NSUInteger previousParsedSize = [cached[@"parsedSize"] unsignedIntegerValue];
-                BOOL canAppend = cached[@"session"] && size.unsignedIntegerValue > previousParsedSize;
+                BOOL canAppend = cached[@"session"] &&
+                    ((PTSessionInfo *)cached[@"session"]).fullTranscriptLoaded == includeMessages &&
+                    size.unsignedIntegerValue > previousParsedSize;
                 session = canAppend
-                    ? PTParseSessionAppending(
+                    ? PTParseSessionAppendingWithDetail(
                         url.path, modified ?: NSDate.distantPast, previousParsedSize,
-                        cached[@"session"], &parsedSize)
-                    : PTParseSession(url.path, modified ?: NSDate.distantPast, &parsedSize);
+                        cached[@"session"], &parsedSize, includeMessages)
+                    : PTParseSessionWithDetail(url.path, modified ?: NSDate.distantPast,
+                        &parsedSize, includeMessages);
                 if (session) {
                     self->_cache[url.path] = @{
                         @"modified": modified ?: NSDate.distantPast,
@@ -1871,7 +1942,7 @@ static PTSessionInfo *PTParseSessionAppending(
                 }
             }
             if (session) [sessions addObject:session];
-        }
+        } }
 
         for (NSString *path in self->_cache.allKeys.copy) {
             if (![seenPaths containsObject:path]) [self->_cache removeObjectForKey:path];
@@ -1904,15 +1975,20 @@ static PTSessionInfo *PTParseSessionAppending(
         [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
 
         NSDictionary *cached = self->_cache[filePath];
+        BOOL includeMessages = [self.fullSessionIDs containsObject:
+            filePath.lastPathComponent.stringByDeletingPathExtension];
         NSUInteger previousParsedSize = [cached[@"parsedSize"] unsignedIntegerValue];
         NSUInteger parsedSize = 0;
         PTSessionInfo *session = nil;
         if (regular.boolValue) {
-            BOOL canAppend = cached[@"session"] && size.unsignedIntegerValue >= previousParsedSize;
+            BOOL canAppend = cached[@"session"] &&
+                ((PTSessionInfo *)cached[@"session"]).fullTranscriptLoaded == includeMessages &&
+                size.unsignedIntegerValue >= previousParsedSize;
             session = canAppend
-                ? PTParseSessionAppending(filePath, modified ?: NSDate.distantPast,
-                    previousParsedSize, cached[@"session"], &parsedSize)
-                : PTParseSession(filePath, modified ?: NSDate.distantPast, &parsedSize);
+                ? PTParseSessionAppendingWithDetail(filePath, modified ?: NSDate.distantPast,
+                    previousParsedSize, cached[@"session"], &parsedSize, includeMessages)
+                : PTParseSessionWithDetail(filePath, modified ?: NSDate.distantPast,
+                    &parsedSize, includeMessages);
         }
         if (session) {
             self->_cache[filePath] = @{
@@ -1990,6 +2066,7 @@ static PTSessionInfo *PTParseSessionAppending(
 - (void)connectToSession:(PTSessionInfo *)session;
 - (void)connectToSession:(PTSessionInfo *)session completion:(void (^)(BOOL))completion;
 - (void)refreshUsage;
+- (void)refreshSettingsWithCompletion:(void (^)(BOOL))completion;
 - (void)startNewSession:(PTSessionInfo *)session prompt:(NSString *)prompt;
 - (void)startNewSessionInDirectory:(NSString *)directory;
 - (BOOL)sendMessage:(NSString *)message;
@@ -2438,9 +2515,90 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         }];
 }
 
+- (void)recordConfigurationEvent:(NSDictionary *)event {
+    NSMutableDictionary *entry = [event mutableCopy];
+    entry[@"timestamp"] = [[NSISO8601DateFormatter new] stringFromDate:NSDate.date];
+    entry[@"session_id"] = _sessionID ?: @"";
+    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/PrettyTerm"];
+    NSError *error = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&error]) {
+        NSLog(@"PrettyTerm configuration log: %@", error.localizedDescription);
+        return;
+    }
+    NSString *path = [directory stringByAppendingPathComponent:@"configuration.jsonl"];
+    NSMutableData *data = [[NSJSONSerialization dataWithJSONObject:entry options:0 error:&error] mutableCopy];
+    if (!data) { NSLog(@"PrettyTerm configuration log: %@", error.localizedDescription); return; }
+    [data appendBytes:"\n" length:1];
+    if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
+        if (![data writeToFile:path options:0 error:&error]) NSLog(@"PrettyTerm configuration log: %@", error.localizedDescription);
+        return;
+    }
+    NSFileHandle *file = [NSFileHandle fileHandleForWritingToURL:[NSURL fileURLWithPath:path] error:&error];
+    if (!file || ![file seekToEndReturningOffset:NULL error:&error] || ![file writeData:data error:&error])
+        NSLog(@"PrettyTerm configuration log: %@", error.localizedDescription);
+    [file closeAndReturnError:nil];
+}
+
+- (BOOL)persistConfigurationForControl:(NSDictionary *)control {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@".claude/settings.json"];
+    NSError *error = nil;
+    NSMutableDictionary *settings = [NSMutableDictionary dictionary];
+    if ([NSFileManager.defaultManager fileExistsAtPath:path]) {
+        NSData *data = [NSData dataWithContentsOfFile:path options:0 error:&error];
+        id parsed = data ? [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error] : nil;
+        if (![parsed isKindOfClass:NSDictionary.class]) {
+            [self reportError:[NSString stringWithFormat:PTL(@"当前会话已应用，配置文件读取失败：%@", @"Session updated; could not read settings: %@"), error.localizedDescription ?: path]];
+            [self recordConfigurationEvent:@{@"event": @"save_failed", @"error": self.lastSendError}];
+            return NO;
+        }
+        settings = parsed;
+    }
+    NSMutableDictionary *changed = [NSMutableDictionary dictionary];
+    if (control[@"model"] && _currentModel.length) {
+        settings[@"model"] = _currentModel;
+        changed[@"model"] = _currentModel;
+    }
+    if (control[@"settings"][@"effortLevel"] && _currentModel.length) {
+        NSString *modelKey = [[_currentModel.lowercaseString stringByReplacingOccurrencesOfString:@"[1m]" withString:@""] stringByReplacingOccurrencesOfString:@"[2m]" withString:@""];
+        NSMutableDictionary *models = [settings[@"modelSettings"] mutableCopy] ?: [NSMutableDictionary dictionary];
+        NSMutableDictionary *model = [models[modelKey] mutableCopy] ?: [NSMutableDictionary dictionary];
+        if (_currentEffort.length) model[@"effortLevel"] = _currentEffort;
+        else [model removeObjectForKey:@"effortLevel"];
+        models[modelKey] = model;
+        settings[@"modelSettings"] = models;
+        changed[@"modelSettings"] = @{modelKey: @{ @"effortLevel": _currentEffort.length ? _currentEffort : (id)NSNull.null }};
+    }
+    if (control[@"mode"] && _permissionMode.length) {
+        NSMutableDictionary *permissions = [settings[@"permissions"] mutableCopy] ?: [NSMutableDictionary dictionary];
+        permissions[@"defaultMode"] = _permissionMode;
+        settings[@"permissions"] = permissions;
+        changed[@"permissions"] = @{@"defaultMode": _permissionMode};
+    }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:settings options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&error];
+    BOOL saved = data && [NSFileManager.defaultManager createDirectoryAtPath:path.stringByDeletingLastPathComponent
+        withIntermediateDirectories:YES attributes:nil error:&error] && [data writeToFile:path options:NSDataWritingAtomic error:&error];
+    [self recordConfigurationEvent:@{@"event": saved ? @"saved" : @"save_failed", @"path": path,
+        @"changed": changed, @"error": error.localizedDescription ?: @""}];
+    if (!saved) [self reportError:[NSString stringWithFormat:PTL(@"当前会话已应用，配置保存失败：%@", @"Session updated; could not save settings: %@"), error.localizedDescription]];
+    return saved;
+}
+
 - (void)queryControl:(NSDictionary *)request completion:(void (^)(NSDictionary *, NSString *))completion {
     NSString *requestID = NSUUID.UUID.UUIDString.lowercaseString;
-    _pendingQueries[requestID] = [completion copy];
+    NSString *subtype = request[@"subtype"];
+    BOOL configuration = [@[@"set_model", @"set_permission_mode", @"apply_flag_settings", @"get_settings"] containsObject:subtype];
+    if (configuration) [self recordConfigurationEvent:@{@"event": @"request", @"request_id": requestID, @"request": request}];
+    __weak typeof(self) weakSelf = self;
+    _pendingQueries[requestID] = [^(NSDictionary *body, NSString *error) {
+        if (configuration) {
+            NSMutableDictionary *result = [NSMutableDictionary dictionary];
+            if ([body[@"applied"] isKindOfClass:NSDictionary.class]) result[@"applied"] = body[@"applied"];
+            if ([body[@"mode"] isKindOfClass:NSString.class]) result[@"mode"] = body[@"mode"];
+            [weakSelf recordConfigurationEvent:@{@"event": @"response", @"request_id": requestID,
+                @"subtype": subtype, @"result": result, @"error": error ?: @""}];
+        }
+        completion(body, error);
+    } copy];
     [self writeFrame:@{@"type": @"control_request", @"request_id": requestID, @"request": request}
         completion:^(BOOL written) {
             if (written) return;
@@ -2451,14 +2609,23 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 
 - (void)refreshSettings {
+    [self refreshSettingsWithCompletion:nil];
+}
+
+- (void)refreshSettingsWithCompletion:(void (^)(BOOL))completion {
     __weak typeof(self) weakSelf = self;
     [self queryControl:@{@"subtype": @"get_settings"} completion:^(NSDictionary *body, NSString *error) {
         PTClaudeBridge *self = weakSelf;
-        if (!self || error) return;
-        NSDictionary *applied = body[@"applied"];
-        if ([applied[@"model"] isKindOfClass:NSString.class]) self->_currentModel = applied[@"model"];
-        if ([applied[@"effort"] isKindOfClass:NSString.class]) self->_currentEffort = applied[@"effort"];
+        if (!self) return;
+        NSDictionary *applied = [body[@"applied"] isKindOfClass:NSDictionary.class] ? body[@"applied"] : nil;
+        BOOL received = !error && [applied[@"model"] isKindOfClass:NSString.class] &&
+            ([applied[@"effort"] isKindOfClass:NSString.class] || applied[@"effort"] == NSNull.null);
+        self->_currentModel = received ? applied[@"model"] : nil;
+        // An explicit null means Claude has no named effective effort, not the previously selected level.
+        self->_currentEffort = received ? ([applied[@"effort"] isKindOfClass:NSString.class] ? applied[@"effort"] : @"") : nil;
+        if (!received) [self reportError:error ?: PTL(@"未读取到 Claude 当前配置", @"Could not read Claude's current settings")];
         if (self.modelChanged) self.modelChanged();
+        if (completion) completion(received);
     }];
 }
 
@@ -2722,9 +2889,15 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _processEnded = NO;
     _task.executableURL = [NSURL fileURLWithPath:@"/bin/zsh"];
     _task.currentDirectoryURL = [NSURL fileURLWithPath:cwd];
-    // 加载用户已有 shell 环境、代理和认证；保持原 Claude --yolo 的 UTC/权限模式。
+    NSData *settingsData = [NSData dataWithContentsOfFile:[NSHomeDirectory() stringByAppendingPathComponent:@".claude/settings.json"]];
+    NSDictionary *settings = settingsData ? [NSJSONSerialization JSONObjectWithData:settingsData options:0 error:nil] : nil;
+    NSString *configuredMode = settings[@"permissions"][@"defaultMode"];
+    // 未保存模式时延续原有 Bypass；保存后按老师选择的模式启动，仍可随时切回 Bypass。
+    NSString *launchMode = [configuredMode isKindOfClass:NSString.class] && configuredMode.length ? configuredMode : @"bypassPermissions";
+    _permissionMode = launchMode;
     _task.arguments = @[@"-lic", @"export TZ=UTC\nexec \"$(whence -p claude)\" \"$@\"",
-        @"PrettyTerm", @"--dangerously-skip-permissions", @"--permission-prompt-tool", @"stdio", @"--print",
+        @"PrettyTerm", @"--allow-dangerously-skip-permissions", @"--permission-mode", launchMode,
+        @"--permission-prompt-tool", @"stdio", @"--print",
         @"--input-format", @"stream-json", @"--output-format", @"stream-json",
         @"--verbose", @"--replay-user-messages", @"--include-partial-messages",
         resume ? @"--resume" : @"--session-id", _sessionID];
@@ -2825,31 +2998,32 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         if (mode) control = @{@"subtype": @"set_permission_mode", @"mode": mode};
     }
     if (control) {
-        NSString *requestID = NSUUID.UUID.UUIDString.lowercaseString;
-        NSString *model = control[@"model"];
         __weak typeof(self) weakSelf = self;
-        _pendingControls[requestID] = [^(BOOL accepted) {
+        [self queryControl:control completion:^(NSDictionary *body, NSString *error) {
             PTClaudeBridge *self = weakSelf;
             if (!self) return;
-            if (accepted && model) {
-                self->_currentModel = [model copy];
+            if (error) {
+                [self reportError:error];
                 if (self.modelChanged) self.modelChanged();
+                if (completion) completion(NO);
+                return;
             }
-            if (accepted && control[@"mode"]) self->_permissionMode = control[@"mode"];
-            if (accepted && control[@"settings"][@"effortLevel"]) self->_currentEffort = control[@"settings"][@"effortLevel"];
-            if (accepted) {
+            if (control[@"mode"]) {
+                NSString *mode = [body[@"mode"] isKindOfClass:NSString.class] ? body[@"mode"] : nil;
+                self->_permissionMode = mode;
+                if (!mode.length) [self reportError:PTL(@"Claude 未返回当前模式", @"Claude did not return its current mode")];
                 if (self.modelChanged) self.modelChanged();
-                [self refreshSettings];
+                BOOL saved = mode.length > 0 && [self persistConfigurationForControl:control];
+                if (completion) completion(saved);
+            } else if (control[@"model"] || control[@"settings"][@"effortLevel"]) {
+                [self refreshSettingsWithCompletion:^(BOOL received) {
+                    BOOL saved = received && [self persistConfigurationForControl:control];
+                    if (completion) completion(saved);
+                }];
+            } else if (completion) {
+                completion(YES);
             }
-            if (completion) completion(accepted);
-        } copy];
-        [self writeFrame:@{@"type": @"control_request", @"request_id": requestID, @"request": control}
-            completion:^(BOOL written) {
-                if (written) return;
-                void (^callback)(BOOL) = self->_pendingControls[requestID];
-                [self->_pendingControls removeObjectForKey:requestID];
-                if (callback) callback(NO);
-            }];
+        }];
         return;
     }
     NSMutableArray *content = [NSMutableArray array];
@@ -3123,7 +3297,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     // folder 为 @"" 时不是 nil，?: 不会生效，得显式判断 length 才能落到"未知目录"
     self.detailLabel.stringValue = [NSString stringWithFormat:PTL(@"%@ · %lu 轮对话", @"%@ · %lu turns"),
         folder.length ? folder : PTL(@"未知目录", @"Unknown directory"),
-        (unsigned long)PTConversationTurnCount(session.assistantMessages)];
+        (unsigned long)PTSessionTurnCount(session)];
     NSTimeInterval age = -session.modifiedAt.timeIntervalSinceNow;
     BOOL active = age < 600;
     self.activityDot.layer.backgroundColor =
@@ -3420,6 +3594,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 @interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate, NSMenuDelegate, NSTextFieldDelegate>
 - (void)updateWorkspaceTabBar;
+- (void)syncFullSessionIDs;
 - (PTSessionInfo *)sessionWithID:(NSString *)sessionID;
 - (CGFloat)adaptiveInspectorWidth;
 - (void)applyAdaptiveInspectorWidth;
@@ -3476,6 +3651,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSTextField *_composerEffortPopoverTitle;
     NSString *_selectedComposerModelID;
     NSString *_selectedComposerEffort;
+    NSString *_composerConfigurationPage;
     PTComposerTextView *_composerTextView;
     NSTextField *_composerTargetLabel;
     NSButton *_imageButton;
@@ -4969,7 +5145,9 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         if (!self || !strongTab) return;
         PTSessionInfo *session = [self sessionWithID:strongTab.bridge.sessionID];
         session.model = strongTab.bridge.currentModel;
-        if (strongTab.bridge.currentEffort.length) session.effort = strongTab.bridge.currentEffort;
+        session.effort = strongTab.bridge.currentEffort;
+        [self updateComposerConfigurationButtons];
+        [self refreshComposerConfigurationPopoverForSessionID:strongTab.bridge.sessionID];
         if ([session.sessionID isEqual:self->_selectedSession.sessionID]) [self showSelectedSession];
     };
     tab.bridge.commandOutputChanged = ^(NSString *text) {
@@ -5127,6 +5305,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     [_workspaceTabs removeObjectAtIndex:index];
 
     if (!closingActiveTab) {
+        [self syncFullSessionIDs];
         [self updateWorkspaceTabBar];
         [self updateFloatingComposerState];
         return;
@@ -5146,6 +5325,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         [self showEmptyWorkspaceTab];
         [self updateWorkspaceTabBar];
     }
+    [self syncFullSessionIDs];
 }
 
 - (void)updateWorkspaceTabBar {
@@ -5837,8 +6017,9 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     [_modelPicker addItemWithTitle:PTL(@"当前模型", @"Current model")];
     NSArray<NSArray<NSString *> *> *models = @[
         @[@"Claude Fable 5", @"claude-fable-5"],
-        @[@"Claude Opus 5", @"claude-opus-5"],
+        @[@"Claude Opus 5.5", @"claude-opus-5-5"],
         @[@"Claude Sonnet 5", @"claude-sonnet-5"],
+        @[@"Claude Sonnet 4.6", @"claude-sonnet-4-6"],
         @[@"Claude Haiku 4.5", @"claude-haiku-4-5"]
     ];
     for (NSArray<NSString *> *entry in models) {
@@ -6837,6 +7018,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _floatingRenderGeneration += 1;
     if (!wasVisible) [self positionFloatingPanelNearMainWindow];
     [_floatingPanel orderFrontRegardless];
+    [self syncFullSessionIDs];
     [self refreshFloatingConversation];
     [self updateFloatingControls];
     [self updateFloatingComposerState];
@@ -6852,6 +7034,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _pendingFloatingSession = nil;
     [self clearFloatingPendingImagesAfterSuccessfulSend];
     _floatingComposerTextView.string = @"";
+    [self syncFullSessionIDs];
     [self updateFloatingControls];
     [self updateFloatingComposerState];
 }
@@ -7352,8 +7535,9 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 - (NSArray<NSArray<NSString *> *> *)composerModelEntries {
     return @[
         @[@"Claude Fable 5", @"Fable 5", @"claude-fable-5"],
-        @[@"Claude Opus 5", @"Opus 5", @"claude-opus-5"],
+        @[@"Claude Opus 5.5", @"Opus 5.5", @"claude-opus-5-5"],
         @[@"Claude Sonnet 5", @"Sonnet 5", @"claude-sonnet-5"],
+        @[@"Claude Sonnet 4.6", @"Sonnet 4.6", @"claude-sonnet-4-6"],
         @[@"Claude Haiku 4.5", @"Haiku 4.5", @"claude-haiku-4-5"]
     ];
 }
@@ -7363,6 +7547,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 
 - (NSString *)composerEffortTitle:(NSString *)effort {
+    if (!effort) return PTL(@"未读取", @"Unknown");
+    if (!effort.length) return PTL(@"默认", @"Default");
     NSDictionary *titles = @{
         @"low": @[PTL(@"低", @"Low"), @""],
         @"medium": @[PTL(@"中", @"Medium"), @""],
@@ -7381,14 +7567,52 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     return modelID.length ? modelID : PTL(@"当前模型", @"Current model");
 }
 
+- (NSString *)composerModelForSessionID:(NSString *)sessionID {
+    PTClaudeBridge *bridge = [self bridgeForSessionID:sessionID];
+    if (bridge) return bridge.currentModel;
+    if (sessionID.length) return [self sessionWithID:sessionID].model;
+    return _selectedComposerModelID;
+}
+
+- (NSString *)composerEffortForSessionID:(NSString *)sessionID {
+    PTClaudeBridge *bridge = [self bridgeForSessionID:sessionID];
+    if (bridge) return bridge.currentEffort;
+    if (sessionID.length) return [self sessionWithID:sessionID].effort;
+    return _selectedComposerEffort;
+}
+
 - (void)updateComposerConfigurationButtons {
-    NSString *effortTitle = [self composerEffortTitle:_selectedComposerEffort];
-    _composerEffortButton.title = [NSString stringWithFormat:@"%@ ⌄", effortTitle];
-    _floatingEffortButton.title = [NSString stringWithFormat:@"%@ ⌄", effortTitle];
-    _composerEffortButton.toolTip = [NSString stringWithFormat:
-        PTL(@"模型：%@ · 推理强度：%@", @"Model: %@ · Effort: %@"),
-        [self composerModelShortTitle:_selectedComposerModelID], effortTitle];
-    _floatingEffortButton.toolTip = _composerEffortButton.toolTip;
+    for (PTAnimatedButton *button in [NSArray arrayWithObjects:_composerEffortButton, _floatingEffortButton, nil]) {
+        NSString *sessionID = button == _floatingEffortButton ? _floatingSessionID : _selectedSession.sessionID;
+        NSString *effort = [self composerEffortTitle:[self composerEffortForSessionID:sessionID]];
+        button.title = [NSString stringWithFormat:@"%@ ⌄", effort];
+        button.toolTip = [NSString stringWithFormat:PTL(@"模型：%@ · 推理强度：%@", @"Model: %@ · Effort: %@"),
+            [self composerModelShortTitle:[self composerModelForSessionID:sessionID]], effort];
+    }
+}
+
+- (void)showConfigurationStatus:(NSString *)status forSessionID:(NSString *)sessionID {
+    for (PTWorkspaceTab *tab in _workspaceTabs) {
+        if ([tab.sessionID isEqual:sessionID]) {
+            tab.status = status;
+            tab.commandOutput = status;
+        }
+    }
+    if ([_selectedSession.sessionID isEqual:sessionID]) _statusLabel.stringValue = status;
+    if ([_floatingSessionID isEqual:sessionID]) _floatingComposerLabel.stringValue = status;
+}
+
+- (void)refreshComposerConfigurationPopoverForSessionID:(NSString *)sessionID {
+    if (!_composerOptionsPopover.shown || ![_configurationSessionID isEqual:sessionID]) return;
+    if ([_composerConfigurationPage isEqual:@"effort"]) {
+        NSString *effort = [self composerEffortForSessionID:sessionID];
+        _composerEffortPopoverTitle.stringValue = [NSString stringWithFormat:PTL(@"推理强度 · %@", @"Reasoning effort · %@"),
+            [self composerEffortTitle:effort]];
+        NSUInteger index = [[self composerEffortLevels] indexOfObject:effort ?: @""];
+        _composerEffortSlider.selectedIndex = index == NSNotFound ? -1 : (NSInteger)index;
+    } else if ([_composerConfigurationPage isEqual:@"model"]) [self showComposerModelPage:nil];
+    else if ([_composerConfigurationPage isEqual:@"mode"]) [self showComposerModePage:nil];
+    else if ([_composerConfigurationPage isEqual:@"advanced"]) [self showComposerAdvancedPage:nil];
 }
 
 - (PTAnimatedButton *)composerPopoverButtonWithTitle:(NSString *)title
@@ -7433,13 +7657,15 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 - (void)showComposerEffortPage:(id)sender {
     (void)sender;
+    _composerConfigurationPage = @"effort";
+    NSString *effort = [self composerEffortForSessionID:_configurationSessionID ?: _selectedSession.sessionID];
     NSTextField *title = [self label:[NSString stringWithFormat:PTL(@"推理强度 · %@", @"Reasoning effort · %@"),
-        [self composerEffortTitle:_selectedComposerEffort]] size:15 weight:NSFontWeightSemibold color:NSColor.labelColor];
+        [self composerEffortTitle:effort]] size:15 weight:NSFontWeightSemibold color:NSColor.labelColor];
     _composerEffortPopoverTitle = title;
     _composerEffortSlider = [[PTEffortSlider alloc] initWithFrame:NSZeroRect];
     _composerEffortSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    NSInteger index = [[self composerEffortLevels] indexOfObject:_selectedComposerEffort ?: @""];
-    _composerEffortSlider.selectedIndex = index == NSNotFound ? 1 : index;
+    NSUInteger index = [[self composerEffortLevels] indexOfObject:effort ?: @""];
+    _composerEffortSlider.selectedIndex = index == NSNotFound ? -1 : (NSInteger)index;
     _composerEffortSlider.target = self;
     _composerEffortSlider.action = @selector(changeComposerEffort:);
     [_composerEffortSlider.heightAnchor constraintEqualToConstant:62].active = YES;
@@ -7465,11 +7691,13 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 - (void)showComposerAdvancedPage:(id)sender {
     (void)sender;
+    _composerConfigurationPage = @"advanced";
     _composerEffortPopoverTitle = nil;
     PTAnimatedButton *back = [self composerPopoverButtonWithTitle:PTL(@"‹  高级", @"‹  Advanced")
         action:@selector(showComposerEffortPage:) identifier:nil];
-    NSString *model = [self composerModelShortTitle:_selectedComposerModelID];
-    NSString *effort = [self composerEffortTitle:_selectedComposerEffort];
+    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
+    NSString *model = [self composerModelShortTitle:[self composerModelForSessionID:sessionID]];
+    NSString *effort = [self composerEffortTitle:[self composerEffortForSessionID:sessionID]];
     PTAnimatedButton *modelRow = [self composerPopoverButtonWithTitle:
         [NSString stringWithFormat:PTL(@"模型   ·   %@   ›", @"Model   ·   %@   ›"), model]
         action:@selector(showComposerModelPage:) identifier:nil];
@@ -7477,7 +7705,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         [NSString stringWithFormat:PTL(@"推理强度   ·   %@   ›", @"Effort   ·   %@   ›"), effort]
         action:@selector(showComposerEffortPage:) identifier:nil];
     PTClaudeBridge *bridge = [self bridgeForSessionID:_configurationSessionID ?: _selectedSession.sessionID];
-    NSString *mode = bridge.permissionMode ?: @"bypassPermissions";
+    NSString *mode = bridge.permissionMode ?: PTL(@"未读取", @"Unknown");
     PTAnimatedButton *modeRow = [self composerPopoverButtonWithTitle:
         [NSString stringWithFormat:PTL(@"模式   ·   %@   ›", @"Mode   ·   %@   ›"), mode]
         action:@selector(showComposerModePage:) identifier:nil];
@@ -7489,6 +7717,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 
 - (void)showComposerModePage:(id)sender {
+    (void)sender;
+    _composerConfigurationPage = @"mode";
     NSMutableArray *views = [NSMutableArray arrayWithObject:[self composerPopoverButtonWithTitle:PTL(@"‹  模式", @"‹  Mode") action:@selector(showComposerAdvancedPage:) identifier:nil]];
     NSString *mode = [self bridgeForSessionID:_configurationSessionID ?: _selectedSession.sessionID].permissionMode;
     for (NSArray *entry in @[@[@"Plan", @"plan"], @[@"Auto", @"auto"], @[@"Bypass", @"bypass"], @[@"Default", @"default"], @[@"Accept edits", @"acceptEdits"]]) {
@@ -7502,8 +7732,9 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 - (void)changeComposerMode:(PTAnimatedButton *)sender {
     NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
     [self sendOutgoingMessage:[@"/mode " stringByAppendingString:sender.identifier] imagePNGs:@[] forSessionID:sessionID success:^{
-        [self showComposerModePage:nil];
-        self->_statusLabel.stringValue = [NSString stringWithFormat:PTL(@"模式已切换为 %@", @"Mode changed to %@"), sender.identifier];
+        [self refreshComposerConfigurationPopoverForSessionID:sessionID];
+        [self showConfigurationStatus:[NSString stringWithFormat:PTL(@"当前模式：%@", @"Current mode: %@"),
+            [self bridgeForSessionID:sessionID].permissionMode] forSessionID:sessionID];
     } failureResponder:nil];
 }
 
@@ -7714,12 +7945,14 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 - (void)showComposerModelPage:(id)sender {
     (void)sender;
+    _composerConfigurationPage = @"model";
+    NSString *model = [self composerModelForSessionID:_configurationSessionID ?: _selectedSession.sessionID];
     _composerEffortPopoverTitle = nil;
     PTAnimatedButton *back = [self composerPopoverButtonWithTitle:PTL(@"‹  选择模型", @"‹  Choose model")
         action:@selector(showComposerAdvancedPage:) identifier:nil];
     NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObject:back];
     for (NSArray<NSString *> *entry in [self composerModelEntries]) {
-        NSString *mark = [entry[2] isEqual:_selectedComposerModelID] ? @"✓  " : @"    ";
+        NSString *mark = [entry[2] isEqual:model] ? @"✓  " : @"    ";
         PTAnimatedButton *row = [self composerPopoverButtonWithTitle:
             [mark stringByAppendingString:entry[0]] action:@selector(changeComposerModel:) identifier:entry[2]];
         [views addObject:row];
@@ -7754,24 +7987,22 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     }
     [self showComposerEffortPage:nil];
     [_composerOptionsPopover showRelativeToRect:[sender bounds] ofView:sender preferredEdge:NSRectEdgeMaxY];
+    [[self bridgeForSessionID:_configurationSessionID] refreshSettingsWithCompletion:nil];
 }
 
 - (void)changeComposerEffort:(PTEffortSlider *)slider {
     NSArray<NSString *> *levels = [self composerEffortLevels];
-    if (slider.selectedIndex < 0 || slider.selectedIndex >= (NSInteger)levels.count) return;
-    NSString *effort = levels[slider.selectedIndex];
+    if (slider.submittedIndex < 0 || slider.submittedIndex >= (NSInteger)levels.count) return;
+    NSString *effort = levels[slider.submittedIndex];
     NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
     [self sendOutgoingMessage:[NSString stringWithFormat:@"/effort %@", effort]
                     imagePNGs:@[]
                  forSessionID:sessionID
                       success:^{
-        _selectedComposerEffort = effort;
-        [self sessionWithID:sessionID].effort = effort;
         [self updateComposerConfigurationButtons];
-        _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"推理强度已切换为 %@", @"Effort changed to %@"),
-            [self composerEffortTitle:effort]];
-        _composerEffortPopoverTitle.stringValue = [NSString stringWithFormat:
-            PTL(@"推理强度 · %@", @"Reasoning effort · %@"), [self composerEffortTitle:effort]];
+        [self refreshComposerConfigurationPopoverForSessionID:sessionID];
+        [self showConfigurationStatus:[NSString stringWithFormat:PTL(@"当前推理强度：%@", @"Current effort: %@"),
+            [self composerEffortTitle:[self composerEffortForSessionID:sessionID]]] forSessionID:sessionID];
     } failureResponder:nil];
 }
 
@@ -7786,11 +8017,10 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
                     imagePNGs:@[]
                  forSessionID:sessionID
                       success:^{
-        if (![self->_selectedSession.sessionID isEqual:sessionID]) return;
-        [self updateContextAndModelForSession:self->_selectedSession];
-        _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"模型已切换为 %@", @"Model changed to %@"),
-            [self composerModelShortTitle:modelID]];
-        if (self->_composerOptionsPopover.shown) [self showComposerModelPage:nil];
+        [self updateComposerConfigurationButtons];
+        [self refreshComposerConfigurationPopoverForSessionID:sessionID];
+        [self showConfigurationStatus:[NSString stringWithFormat:PTL(@"当前模型：%@", @"Current model: %@"),
+            [self composerModelShortTitle:[self composerModelForSessionID:sessionID]]] forSessionID:sessionID];
     } failureResponder:nil];
 }
 
@@ -9079,8 +9309,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     if (liveEffort.length) session.effort = liveEffort;
     NSNumber *liveContext = [self bridgeForSessionID:session.sessionID].contextTokens;
     if (liveContext) session.contextUsed = liveContext.unsignedIntegerValue;
-    if (session.model.length > 0) _selectedComposerModelID = session.model;
-    if (session.effort.length > 0) _selectedComposerEffort = session.effort;
+
     NSUInteger window = session.contextWindow;
     NSUInteger used = session.contextUsed;
     if (used > 0 && window > 0) {
@@ -9267,11 +9496,12 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
     NSMutableArray<NSString *> *signatureParts = [NSMutableArray arrayWithCapacity:sessions.count];
     for (PTSessionInfo *session in sessions) {
-        [self reconcileAwaitingClaudeReplyWithSession:session];
-        [signatureParts addObject:[NSString stringWithFormat:@"%@|%.6f|%lu|%@|%@",
+        if (session.fullTranscriptLoaded) [self reconcileAwaitingClaudeReplyWithSession:session];
+        [signatureParts addObject:[NSString stringWithFormat:@"%@|%.6f|%lu|%d|%@|%@",
             session.sessionID,
             session.modifiedAt.timeIntervalSince1970,
-            (unsigned long)session.assistantMessages.count,
+            (unsigned long)PTSessionTurnCount(session),
+            session.fullTranscriptLoaded,
             session.title,
             session.cwd]];
     }
@@ -9336,9 +9566,23 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     [self finishHomeSessionIfAvailable];
 }
 
+- (void)syncFullSessionIDs {
+    if (!_store) return;
+    NSMutableSet<NSString *> *sessionIDs = [NSMutableSet set];
+    for (PTWorkspaceTab *tab in _workspaceTabs) {
+        if (tab.sessionID.length) [sessionIDs addObject:tab.sessionID];
+    }
+    if (_floatingPanel.visible && _floatingSessionID.length)
+        [sessionIDs addObject:_floatingSessionID];
+    if ([sessionIDs isEqualToSet:_store.fullSessionIDs]) return;
+    _store.fullSessionIDs = sessionIDs;
+    [_store refresh];
+}
+
 - (void)showSelectedSession {
     if (!_selectedSession) return;
     _activeWorkspaceTab.sessionID = _selectedSession.sessionID ?: @"";
+    [self syncFullSessionIDs];
     [self watchSelectedSessionTranscript];
     if (![_planUsageSessionID isEqual:_selectedSession.sessionID]) {
         _planUsageSessionID = [_selectedSession.sessionID copy];
@@ -9356,7 +9600,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     NSString *model = _selectedSession.model.length ? _selectedSession.model : @"Claude";
     _conversationDetail.stringValue = [NSString stringWithFormat:PTL(@"%@ · %@ · %lu 轮对话", @"%@ · %@ · %lu turns"),
         folder.length ? folder : PTL(@"未知目录", @"Unknown directory"), model,
-        (unsigned long)PTConversationTurnCount(_selectedSession.assistantMessages)];
+        (unsigned long)PTSessionTurnCount(_selectedSession)];
     _connectButton.enabled = YES;
     [self updateInspectorForSession:_selectedSession];
     [self refreshAgentStateAndControls];
@@ -9816,10 +10060,13 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
         [pasteboard clearContents];
         [pasteboard setString:text forType:NSPasteboardTypeString];
+        NSString *status = [body[@"kind"] isEqual:@"code"]
+            ? PTL(@"已复制代码", @"Code copied")
+            : PTL(@"已复制 Claude 输出", @"Claude output copied");
         if (message.webView == _conversationView) {
-            _statusLabel.stringValue = PTL(@"已复制 Claude 输出", @"Claude output copied");
+            _statusLabel.stringValue = status;
         } else {
-            _floatingComposerLabel.stringValue = PTL(@"已复制 Claude 输出", @"Claude output copied");
+            _floatingComposerLabel.stringValue = status;
         }
         return;
     }
@@ -9977,7 +10224,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     NSString *outgoingMessage = PTMessageForClaudeAttachments(message, imagePNGs.count);
     if (outgoingMessage.length == 0) return NO;
     PTClaudeBridge *targetBridge = [self bridgeForSessionID:sessionID];
-    if (_agentState.sendInFlight) {
+    BOOL configuration = !imagePNGs.count && [self isConfigurationCommand:outgoingMessage];
+    if (!configuration && _agentState.sendInFlight) {
         if ([sessionID isEqual:_floatingSessionID]) {
             _floatingComposerLabel.stringValue = PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…");
         } else {
@@ -9993,7 +10241,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         return YES;
     }
 
-    _agentState.sendInFlight = YES;
+    if (!configuration) _agentState.sendInFlight = YES;
     [self refreshAgentStateAndControls];
     [targetBridge submitMessage:outgoingMessage withImagePNGs:imagePNGs ?: @[] completion:^(BOOL sent) {
         if (sent) {
@@ -10008,7 +10256,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
                 if (failureResponder) [self->_window makeFirstResponder:failureResponder];
             }
         }
-        self->_agentState.sendInFlight = NO;
+        if (!configuration) self->_agentState.sendInFlight = NO;
         [self refreshAgentStateAndControls];
     }];
     return YES;

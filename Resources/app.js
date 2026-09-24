@@ -106,7 +106,7 @@
   const strings = {
     'zh-Hans': {
       quote: '引用选中内容', expandInput: '展开输入', lines: '行', codeChange: '代码改动',
-      copyOutput: '复制',
+      copyOutput: '复制', copyCode: '复制代码', copied: '已复制', code: '代码',
       jumpToBottom: '回到底部',
       attachedImage: '图片 {count} · 点击展开或收起',
       showMoreFiles: '再显示 {count} 个文件', editedFiles: '已编辑 {count} 个文件',
@@ -121,7 +121,7 @@
     },
     en: {
       quote: 'Quote selection', expandInput: 'Expand input', lines: 'lines', codeChange: 'Code change',
-      copyOutput: 'Copy',
+      copyOutput: 'Copy', copyCode: 'Copy code', copied: 'Copied', code: 'Code',
       jumpToBottom: 'Jump to bottom',
       attachedImage: 'Image {count} · Click to expand or collapse',
       showMoreFiles: 'Show {count} more files', editedFiles: 'Edited {count} files',
@@ -335,6 +335,295 @@
       cells.every(cell => /^:?-{3,}:?$/.test(cell));
   }
 
+  const wordSet = value => new Set(value.split(' '));
+  const CODE_LANGUAGE_NAMES = {
+    bash: 'Bash', sh: 'Shell', shell: 'Shell', zsh: 'Zsh', console: 'Console',
+    python: 'Python', py: 'Python', javascript: 'JavaScript', js: 'JavaScript', jsx: 'JSX',
+    typescript: 'TypeScript', ts: 'TypeScript', tsx: 'TSX', json: 'JSON',
+    objc: 'Objective-C', 'objective-c': 'Objective-C', objectivec: 'Objective-C',
+    c: 'C', cpp: 'C++', 'c++': 'C++', swift: 'Swift', go: 'Go', rust: 'Rust', rs: 'Rust',
+    java: 'Java', kotlin: 'Kotlin', html: 'HTML', css: 'CSS', yaml: 'YAML', yml: 'YAML',
+    sql: 'SQL', latex: 'LaTeX', tex: 'LaTeX', markdown: 'Markdown', md: 'Markdown', diff: 'Diff',
+    patch: 'Diff', toml: 'TOML', ini: 'INI', env: '.env', dockerfile: 'Dockerfile',
+    makefile: 'Makefile', fish: 'Fish', ruby: 'Ruby', rb: 'Ruby', r: 'R', julia: 'Julia',
+    jl: 'Julia', lua: 'Lua', php: 'PHP', scala: 'Scala', dart: 'Dart', cs: 'C#', csharp: 'C#',
+    cu: 'CUDA', cuda: 'CUDA', xml: 'XML', vue: 'Vue', svelte: 'Svelte', scss: 'SCSS',
+    less: 'Less', perl: 'Perl', pl: 'Perl', kt: 'Kotlin', jsonl: 'JSON Lines'
+  };
+  const CODE_FAMILIES = {};
+  [
+    ['shell', 'bash sh shell zsh console terminal fish ksh dockerfile docker makefile make mk'],
+    ['python', 'python py python3 pyw pyi ipython'],
+    ['json', 'json jsonl ndjson geojson webmanifest'],
+    ['clike', 'javascript js jsx mjs cjs typescript ts tsx mts cts objc objective-c objectivec m mm c h cpp c++ cc cxx hpp hh hxx cu cuh cuda swift go golang rust rs java kotlin kt kts scala sc dart cs csharp php groovy gradle zig proto glsl hlsl metal jsonc json5'],
+    ['yaml', 'yaml yml'],
+    ['ini', 'toml ini cfg conf config env dotenv properties editorconfig gitconfig'],
+    ['markup', 'html htm xhtml xml svg vue svelte plist xaml xsl'],
+    ['css', 'css scss sass less'],
+    ['sql', 'sql psql mysql sqlite pgsql'],
+    ['latex', 'tex latex sty cls bib'],
+    ['lua', 'lua'],
+    ['hash', 'ruby rb rake gemspec r julia jl perl pl pm elixir ex exs nim'],
+    ['diff', 'diff patch']
+  ].forEach(([family, names]) => names.split(' ').forEach(name => { CODE_FAMILIES[name] = family; }));
+  const CODE_KEYWORDS = {
+    shell: wordSet('if then else elif fi for while until do done case esac in function select return exit export local readonly declare unset source alias sudo time exec nohup end set begin switch FROM RUN CMD LABEL EXPOSE ENV ADD COPY ENTRYPOINT VOLUME USER WORKDIR ARG ONBUILD STOPSIGNAL HEALTHCHECK SHELL MAINTAINER'),
+    python: wordSet('and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case'),
+    clike: wordSet('abstract as async await break case catch class const continue default defer delete do else enum export extends extern final finally fn for func function go guard if impl implements import in instanceof interface let loop match mod module mut new package private protected protocol pub public return static struct super switch throw throws try type typedef typeof union unsafe use var void volatile where while yield extension init deinit lazy weak override include define ifdef ifndef endif pragma property nonatomic strong readonly implementation end namespace using template typename operator virtual friend inline constexpr noexcept auto sizeof goto signed unsigned long short int float double char bool fun val trait sealed internal companion chan range fallthrough __global__ __device__ __host__ __shared__ __constant__'),
+    lua: wordSet('and break do else elseif end for function goto if in local not or repeat return then until while'),
+    hash: wordSet('if else elsif elseif unless while until for foreach in do end def class module return yield begin rescue ensure raise then case when break next redo retry function repeat library require require_relative include import using export struct mutable let local global const my our sub use package defmodule defp fn quote macro abstract type and or not alias')
+  };
+  const CODE_LITERALS = wordSet('true false null undefined nil NULL None True False TRUE FALSE YES NO NA Inf NaN nothing this self');
+  const CONFIG_LITERALS = wordSet('true false null yes no on off True False Null Yes No On Off TRUE FALSE NULL YES NO ON OFF ~');
+  const SQL_KEYWORDS = wordSet('SELECT FROM WHERE AND OR NOT INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE DROP ALTER ADD INDEX VIEW PRIMARY KEY FOREIGN REFERENCES JOIN INNER LEFT RIGHT FULL OUTER CROSS ON AS GROUP BY ORDER HAVING LIMIT OFFSET UNION ALL DISTINCT CASE WHEN THEN ELSE END IS IN LIKE BETWEEN EXISTS WITH RETURNING DEFAULT CONSTRAINT UNIQUE CHECK ASC DESC BEGIN COMMIT ROLLBACK TRANSACTION IF REPLACE DATABASE SCHEMA GRANT REVOKE TRIGGER PROCEDURE FUNCTION RETURNS DECLARE INTEGER INT BIGINT SMALLINT TEXT VARCHAR CHAR BOOLEAN REAL FLOAT DOUBLE DECIMAL NUMERIC DATE TIMESTAMP SERIAL AUTOINCREMENT');
+  const SQL_LITERALS = wordSet('NULL TRUE FALSE');
+  const SHELL_COMMAND_PREFIXES = wordSet('if then else elif do while until sudo time exec nohup RUN CMD ENTRYPOINT');
+  const LINE_ANCHORED_FAMILIES = wordSet('yaml ini diff');
+  const NUMBER_RULE = /\b(?:0[xX][\da-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/;
+  const CODE_RULES = {
+    shell: [
+      ['comment', /#.*/],
+      ['string', /'[^']*'|"(?:\\[\s\S]|[^"\\])*"/],
+      ['variable', /\$\{[^}\n]*\}|\$[A-Za-z_]\w*|\$[0-9@#?*$!]/],
+      ['flag', /--?[A-Za-z][\w-]*/],
+      ['word', /[\w./~:@%+,=-]+/]
+    ],
+    python: [
+      ['comment', /#.*/],
+      ['string', /[rRbBuUfF]{0,2}(?:"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')/],
+      ['number', NUMBER_RULE],
+      ['decorator', /@[A-Za-z_][\w.]*/],
+      ['word', /[A-Za-z_]\w*/]
+    ],
+    clike: [
+      ['comment', /\/\/.*|\/\*[\s\S]*?(?:\*\/|$)/],
+      ['string', /@?"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\[\s\S]|[^`\\])*`/],
+      ['number', NUMBER_RULE],
+      ['word', /[A-Za-z_$][\w$]*/]
+    ],
+    json: [
+      ['string', /"(?:\\.|[^"\\\n])*"/],
+      ['number', /-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/],
+      ['word', /[A-Za-z_]\w*/]
+    ],
+    yaml: [
+      ['comment', /#.*/],
+      ['property', /[A-Za-z_][\w.-]*(?=[ \t]*:(?:[ \t]|$))/],
+      ['string', /"(?:\\.|[^"\\\n])*"|'(?:''|[^'\n])*'/],
+      ['variable', /[&*][A-Za-z_][\w-]*/],
+      ['number', NUMBER_RULE],
+      ['word', /[A-Za-z_~][\w-]*/]
+    ],
+    ini: [
+      ['comment', /^[ \t]*[#;].*|[ \t]#.*/],
+      ['keyword', /^[ \t]*\[\[?[^\]\n]*\]\]?/],
+      ['property', /^[ \t]*(?:export[ \t]+)?[A-Za-z_][\w.-]*(?=[ \t]*[=:])/],
+      ['string', /"(?:\\.|[^"\\\n])*"|'[^'\n]*'/],
+      ['variable', /\$\{[^}\n]*\}|\$[A-Za-z_]\w*/],
+      ['number', NUMBER_RULE],
+      ['word', /[A-Za-z_][\w-]*/]
+    ],
+    markup: [
+      ['comment', /<!--[\s\S]*?(?:-->|$)/],
+      ['keyword', /<![A-Za-z][^>]*>|<\?[\s\S]*?\?>/],
+      ['tag', /<\/?[A-Za-z][\w:.-]*/],
+      ['tagEnd', /\/?>/],
+      ['string', /"[^"]*"|'[^']*'/],
+      ['entity', /&#?\w+;/],
+      ['word', /[A-Za-z_:@#][\w:.-]*/]
+    ],
+    css: [
+      ['comment', /\/\*[\s\S]*?(?:\*\/|$)|\/\/.*/],
+      ['string', /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/],
+      ['keyword', /@[\w-]+/],
+      ['variable', /\$[\w-]+|--[\w-]+/],
+      ['color', /#[\da-fA-F]{3,8}\b/],
+      ['number', /-?(?:\d+\.?\d*|\.\d+)(?:%|[A-Za-z]+)?/],
+      ['word', /[A-Za-z_-][\w-]*/]
+    ],
+    sql: [
+      ['comment', /--.*|\/\*[\s\S]*?(?:\*\/|$)/],
+      ['string', /'(?:''|[^'])*'/],
+      ['property', /"[^"\n]*"|`[^`\n]*`/],
+      ['number', NUMBER_RULE],
+      ['word', /[A-Za-z_][\w$]*/]
+    ],
+    latex: [
+      ['string', /\$\$[\s\S]*?\$\$|\$(?:\\.|[^$\\\n])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]/],
+      ['keyword', /\\(?:[A-Za-z@]+\*?|[^A-Za-z@\n])/],
+      ['comment', /%.*/]
+    ],
+    lua: [
+      ['comment', /--\[\[[\s\S]*?(?:\]\]|$)|--.*/],
+      ['string', /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\[\[[\s\S]*?\]\]/],
+      ['number', NUMBER_RULE],
+      ['word', /[A-Za-z_]\w*/]
+    ],
+    hash: [
+      ['comment', /#.*/],
+      ['string', /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/],
+      ['number', NUMBER_RULE],
+      ['variable', /[@$][A-Za-z_]\w*|:[A-Za-z_]\w*/],
+      ['word', /[A-Za-z_]\w*[?!]?/]
+    ],
+    diff: [
+      ['keyword', /^(?:diff |index |--- |\+\+\+ ).*/],
+      ['property', /^@@.*/],
+      ['string', /^\+.*/],
+      ['variable', /^-.*/]
+    ]
+  };
+  const CODE_PATTERNS = new Map();
+  const CODE_HIGHLIGHT_LIMIT = 300000;
+
+  function codePattern(family) {
+    if (!CODE_PATTERNS.has(family)) {
+      const source = CODE_RULES[family].map(([, rule]) => `(${rule.source})`).join('|');
+      CODE_PATTERNS.set(family, new RegExp(source, LINE_ANCHORED_FAMILIES.has(family) ? 'gm' : 'g'));
+    }
+    return CODE_PATTERNS.get(family);
+  }
+
+  // Returns [className, text] pairs; className '' means unstyled text.
+  function codeTokens(language, source) {
+    const text = String(source == null ? '' : source);
+    const family = CODE_FAMILIES[String(language || '').toLowerCase()];
+    if (!family || text.length > CODE_HIGHLIGHT_LIMIT) return [['', text]];
+    const rules = CODE_RULES[family];
+    const keywords = CODE_KEYWORDS[family] || new Set();
+    const pattern = codePattern(family);
+    pattern.lastIndex = 0;
+    const tokens = [];
+    let cursor = 0;
+    let commandPosition = true;
+    let inTag = false;
+    let depth = 0;
+    const plain = value => {
+      if (!value) return;
+      // A trailing backslash continues the same shell command on the next line.
+      if (family === 'shell' && /\n|\|\|?|&&|;|\(|`/.test(value.replace(/\\\n/g, ''))) commandPosition = true;
+      if (family === 'css') {
+        for (const character of value) {
+          if (character === '{') depth++;
+          else if (character === '}') depth = Math.max(0, depth - 1);
+        }
+      }
+      tokens.push(['', value]);
+    };
+    let match;
+    while ((match = pattern.exec(text))) {
+      const value = match[0];
+      if (!value) {
+        pattern.lastIndex++;
+        continue;
+      }
+      plain(text.slice(cursor, match.index));
+      cursor = match.index;
+      const kind = rules[match.slice(1).findIndex(group => group !== undefined)][0];
+      const previous = match.index > 0 ? text[match.index - 1] : '\n';
+      const following = text.slice(pattern.lastIndex, pattern.lastIndex + 40);
+      let className = kind;
+      if (family === 'shell') {
+        if ((kind === 'comment' || kind === 'flag') && !/\s/.test(previous)) className = null;
+        else if (kind === 'word') {
+          if (!commandPosition) className = '';
+          else if (/^[A-Za-z_]\w*=/.test(value)) className = 'variable';
+          else className = keywords.has(value) ? 'keyword' : 'command';
+        }
+      } else if (family === 'markup') {
+        if (kind === 'tag') {
+          className = 'keyword';
+          inTag = true;
+        } else if (kind === 'tagEnd') {
+          className = inTag ? 'keyword' : '';
+          inTag = false;
+        } else if (kind === 'string') className = inTag ? 'string' : null;
+        else if (kind === 'entity') className = 'literal';
+        else if (kind === 'word') className = inTag ? 'property' : '';
+      } else if (family === 'css') {
+        if (kind === 'comment' && value.startsWith('//') && !/\s/.test(previous)) className = null;
+        else if (kind === 'color') className = depth > 0 ? 'number' : 'function';
+        else if (kind === 'word') {
+          if (/^\(/.test(following)) className = 'function';
+          else if (depth > 0) className = /^[ \t]*:(?!:)/.test(following) ? 'property' : '';
+          else className = 'function';
+        }
+      } else if (family === 'sql') {
+        if (kind === 'word') {
+          const upper = value.toUpperCase();
+          if (SQL_LITERALS.has(upper)) className = 'literal';
+          else if (SQL_KEYWORDS.has(upper)) className = 'keyword';
+          else className = /^[ \t]*\(/.test(following) ? 'function' : '';
+        }
+      } else if (family === 'yaml' || family === 'ini') {
+        if (kind === 'comment' && family === 'yaml' && !/\s/.test(previous)) className = null;
+        else if (kind === 'word') className = CONFIG_LITERALS.has(value) ? 'literal' : '';
+      } else if (kind === 'word') {
+        if (CODE_LITERALS.has(value)) className = 'literal';
+        else if (keywords.has(value)) className = 'keyword';
+        else className = /^[ \t]*\(/.test(following) ? 'function' : '';
+      } else if (kind === 'string' && family === 'json') {
+        className = /^\s*:/.test(following) ? 'property' : 'string';
+      }
+      if (className === null) {
+        plain(value[0]);
+        cursor = match.index + 1;
+        pattern.lastIndex = cursor;
+        continue;
+      }
+      if (family === 'shell' && kind !== 'comment') {
+        if (className === 'keyword') commandPosition = SHELL_COMMAND_PREFIXES.has(value);
+        else if (!(kind === 'word' && className === 'variable')) commandPosition = false;
+      }
+      tokens.push([className, value]);
+      cursor = pattern.lastIndex;
+    }
+    plain(text.slice(cursor));
+    return tokens;
+  }
+
+  function tokenHTML(className, value) {
+    return className ? `<span class="tok-${className}">${escapeHTML(value)}</span>` : escapeHTML(value);
+  }
+
+  function highlightCode(language, source) {
+    return codeTokens(language, source).map(([className, value]) => tokenHTML(className, value)).join('');
+  }
+
+  // Splits multi-line tokens so each source line stays independently well-formed.
+  function highlightCodeLines(language, source) {
+    const lines = [''];
+    codeTokens(language, source).forEach(([className, value]) => {
+      value.split('\n').forEach((part, index) => {
+        if (index > 0) lines.push('');
+        if (part) lines[lines.length - 1] += tokenHTML(className, part);
+      });
+    });
+    return lines;
+  }
+
+  function fileLanguage(title) {
+    const name = String(title || '').toLowerCase();
+    const special = {
+      dockerfile: 'dockerfile', containerfile: 'dockerfile', makefile: 'makefile',
+      gnumakefile: 'makefile', '.bashrc': 'bash', '.bash_profile': 'bash', '.profile': 'sh',
+      '.zshrc': 'zsh', '.zprofile': 'zsh', '.zshenv': 'zsh', '.env': 'env',
+      '.gitconfig': 'ini', '.editorconfig': 'ini'
+    };
+    if (Object.prototype.hasOwnProperty.call(special, name)) return special[name];
+    if (name.startsWith('dockerfile.') || name.endsWith('.dockerfile')) return 'dockerfile';
+    if (name.startsWith('.env.')) return 'env';
+    const dot = name.lastIndexOf('.');
+    return dot > 0 ? name.slice(dot + 1) : '';
+  }
+
+  function renderCodeBlock(language, lines) {
+    const name = String(language || '').trim().split(/\s+/)[0];
+    const label = CODE_LANGUAGE_NAMES[name.toLowerCase()] || name || t('code');
+    const languageClass = name ? ` class="language-${escapeHTML(name)}"` : '';
+    return `<div class="code-block"><div class="code-block-header"><span class="code-block-language"><span class="code-block-icon" aria-hidden="true">&lt;/&gt;</span>${escapeHTML(label)}</span><button type="button" class="code-copy-button" title="${escapeHTML(t('copyCode'))}" aria-label="${escapeHTML(t('copyCode'))}"><span class="code-copy-icon" aria-hidden="true">⧉</span><span class="code-copy-done">✓ ${escapeHTML(t('copied'))}</span></button></div><pre><code${languageClass}>${highlightCode(name, lines.join('\n'))}</code></pre></div>`;
+  }
+
   function renderMarkdown(value) {
     const lines = cleanTranscriptText(value).replace(/\r\n?/g, '\n').split('\n');
     const html = [];
@@ -370,7 +659,7 @@
       const trimmed = line.trim();
       if (fence) {
         if (/^```/.test(trimmed)) {
-          html.push(`<pre><code${fence.language ? ` class="language-${escapeHTML(fence.language)}"` : ''}>${escapeHTML(fence.lines.join('\n'))}</code></pre>`);
+          html.push(renderCodeBlock(fence.language, fence.lines));
           fence = null;
         } else {
           fence.lines.push(line);
@@ -460,14 +749,78 @@
     }
 
     closeList();
-    if (fence) html.push(`<pre><code>${escapeHTML(fence.lines.join('\n'))}</code></pre>`);
+    if (fence) html.push(renderCodeBlock(fence.language, fence.lines));
     if (math) html.push(`<p>${inlineMarkup(`$$\n${math.join('\n')}`)}</p>`);
     return html.join('');
   }
 
+  function renderSourceLines(language, text) {
+    const lines = highlightCodeLines(language, text.replace(/\r\n?/g, '\n'));
+    return `<div class="file-source-body">${lines.map((line, index) =>
+      `<div class="source-line"><span class="line-number">${index + 1}</span><code>${line}</code></div>`
+    ).join('')}</div>`;
+  }
+
+  function notebookText(value) {
+    return Array.isArray(value) ? value.join('') : String(value == null ? '' : value);
+  }
+
+  function renderNotebookOutput(output) {
+    output = output && typeof output === 'object' ? output : {};
+    if (output.output_type === 'stream') {
+      // Progress bars rewrite a line with \r; show only each line's final state.
+      const text = notebookText(output.text).replace(/\r\n/g, '\n').split('\n')
+        .map(line => line.slice(line.lastIndexOf('\r') + 1)).join('\n');
+      return `<pre class="nb-output${output.name === 'stderr' ? ' nb-stderr' : ''}">${escapeHTML(text)}</pre>`;
+    }
+    if (output.output_type === 'error') {
+      const trace = Array.isArray(output.traceback) && output.traceback.length
+        ? output.traceback.join('\n')
+        : `${output.ename || 'Error'}: ${output.evalue || ''}`;
+      return `<pre class="nb-output nb-error">${escapeHTML(cleanTranscriptText(trace))}</pre>`;
+    }
+    const data = output.data && typeof output.data === 'object' ? output.data : {};
+    for (const type of ['image/png', 'image/jpeg', 'image/gif']) {
+      const encoded = notebookText(data[type]).replace(/\s+/g, '');
+      if (encoded && /^[A-Za-z0-9+/=]+$/.test(encoded)) {
+        return `<div class="nb-output nb-image"><img src="data:${type};base64,${encoded}" alt=""></div>`;
+      }
+    }
+    if (data['image/svg+xml']) {
+      const svg = encodeURIComponent(notebookText(data['image/svg+xml']));
+      return `<div class="nb-output nb-image"><img src="data:image/svg+xml;charset=utf-8,${escapeHTML(svg)}" alt=""></div>`;
+    }
+    if (data['text/markdown']) {
+      return `<div class="nb-output nb-markdown-output">${renderMarkdown(notebookText(data['text/markdown']))}</div>`;
+    }
+    if (data['text/plain'] != null) return `<pre class="nb-output">${escapeHTML(notebookText(data['text/plain']))}</pre>`;
+    return '';
+  }
+
+  function renderNotebook(text) {
+    let notebook;
+    try { notebook = JSON.parse(text); } catch (_) { return ''; }
+    if (!notebook || !Array.isArray(notebook.cells)) return '';
+    const metadata = notebook.metadata && typeof notebook.metadata === 'object' ? notebook.metadata : {};
+    const language = String((metadata.language_info && metadata.language_info.name) ||
+      (metadata.kernelspec && metadata.kernelspec.language) || 'python');
+    const cells = notebook.cells.map(cell => {
+      cell = cell && typeof cell === 'object' ? cell : {};
+      const source = notebookText(cell.source);
+      if (cell.cell_type === 'markdown') return `<section class="nb-cell nb-markdown">${renderMarkdown(source)}</section>`;
+      if (cell.cell_type !== 'code') return `<section class="nb-cell nb-raw"><pre>${escapeHTML(source)}</pre></section>`;
+      const count = Number.isInteger(cell.execution_count) ? cell.execution_count : ' ';
+      const outputs = (Array.isArray(cell.outputs) ? cell.outputs : []).map(renderNotebookOutput).join('');
+      return `<section class="nb-cell nb-code"><div class="nb-prompt">In [${count}]:</div>` +
+        `${renderCodeBlock(language, source.split('\n'))}` +
+        `${outputs ? `<div class="nb-outputs">${outputs}</div>` : ''}</section>`;
+    }).join('');
+    return `<div class="file-notebook-body">${cells}</div>`;
+  }
+
   async function renderFilePreview(payload) {
     const document = payload && typeof payload === 'object' ? payload : {};
-    const kind = document.kind === 'markdown' ? 'markdown' : 'source';
+    const kind = ['markdown', 'image', 'notebook'].includes(document.kind) ? document.kind : 'source';
     const title = String(document.title || '');
     const path = String(document.path || '');
     const text = String(document.text == null ? '' : document.text);
@@ -476,11 +829,15 @@
     let body = '';
     if (kind === 'markdown') {
       body = `<div class="file-markdown-body">${renderMarkdown(text)}</div>`;
+    } else if (kind === 'image') {
+      const source = String(document.dataURL || '');
+      body = /^data:image\/[\w.+-]+;base64,/.test(source)
+        ? `<div class="file-image-body"><img src="${escapeHTML(source)}" alt="${escapeHTML(title)}"></div>`
+        : '';
+    } else if (kind === 'notebook') {
+      body = renderNotebook(text) || renderSourceLines('json', text);
     } else {
-      const lines = text.replace(/\r\n?/g, '\n').split('\n');
-      body = `<div class="file-source-body">${lines.map((line, index) =>
-        `<div class="source-line"><span class="line-number">${index + 1}</span><code>${escapeHTML(line)}</code></div>`
-      ).join('')}</div>`;
+      body = renderSourceLines(fileLanguage(title), text);
     }
     const html = `<article class="file-document ${kind}-document">${header}${body}</article>`;
     const root = rootElement();
@@ -825,6 +1182,45 @@
         text: button.dataset.copyText || '',
         sessionId: String(state.session && (state.session.sessionId || state.session.id) || '')
       });
+    });
+  }
+
+  function copyTextFallback(text) {
+    const area = scope.document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    scope.document.body.appendChild(area);
+    area.select();
+    let copied = false;
+    try { copied = scope.document.execCommand('copy'); } catch (_) { copied = false; }
+    area.remove();
+    return copied;
+  }
+
+  function installCodeCopyBridge() {
+    if (!scope || !scope.document) return;
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      const button = target && typeof target.closest === 'function'
+        ? target.closest('.code-copy-button') : null;
+      if (!button) return;
+      const block = button.closest('.code-block');
+      const code = block && block.querySelector('pre code');
+      const text = code ? code.textContent : '';
+      if (!text) return;
+      const bridge = scope.webkit && scope.webkit.messageHandlers &&
+        scope.webkit.messageHandlers.copyAssistantOutput;
+      const sessionId = String(state.session && (state.session.sessionId || state.session.id) || '');
+      // The file preview web view has no native bridge, so it copies in-page.
+      if (bridge && typeof bridge.postMessage === 'function' && sessionId) {
+        bridge.postMessage({ text, sessionId, kind: 'code' });
+      } else if (!copyTextFallback(text)) {
+        return;
+      }
+      button.classList.add('copied');
+      scope.clearTimeout(button.copiedTimer);
+      button.copiedTimer = scope.setTimeout(() => button.classList.remove('copied'), 1600);
     });
   }
 
@@ -1401,6 +1797,7 @@
   installGitReviewBridge();
   installTranscriptFileBridge();
   installAssistantCopyBridge();
+  installCodeCopyBridge();
   installMessageImageBridge();
   installQuestionCardBridge();
   installStableViewport();

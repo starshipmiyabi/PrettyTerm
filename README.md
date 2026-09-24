@@ -2,7 +2,7 @@
 
 PrettyTerm is a lightweight native macOS interface for Claude Code. It runs Claude Code in the background, sends text and images together, streams responses into a focused conversation interface, and reads local transcripts to preserve conversation history.
 
-Current release: **0.9.9 (Build 1)** — [download the macOS beta](https://github.com/starshipmiyabi/PrettyTerm/releases/tag/v0.9.9-beta.1).
+Current release: **0.9.9 (Build 7)** — [download the macOS beta](https://github.com/starshipmiyabi/PrettyTerm/releases/tag/v0.9.9-beta.7).
 
 > [!IMPORTANT]
 > PrettyTerm is beta software. It is an independent community project and is not affiliated with or endorsed by Anthropic.
@@ -14,19 +14,19 @@ Current release: **0.9.9 (Build 1)** — [download the macOS beta](https://githu
 - Independent conversation tabs that retain their own draft, attachments, and Claude session.
 - Local session discovery from `~/.claude/projects`.
 - Managed background Claude Code sessions with structured image-and-text input and live streaming output.
-- Markdown rendering for headings, lists, quotes, links, code blocks, and tables.
+- Markdown rendering for headings, lists, quotes, links, syntax-highlighted code blocks with one-click copying, and tables.
 - Bundled MathJax rendering for inline and display LaTeX.
 - Expandable thinking, tool, error, and line-by-line diff events; per-file diffs start collapsed.
 - Grouped tool activity, exact Claude-output copying, and a Stop button available throughout Claude's work.
 - Codex-style edited-file summaries at the end of each turn, with one-click access to that turn's recorded `Edit` / `Write` review without running Git.
 - Large in-app Review and Files pages that push the conversation aside, retain draggable split widths, and transition with one consistent motion curve.
-- Project file browsing for Markdown, source code, and plain text; Markdown opens as rendered content with MathJax, while source files keep complete text and line numbers.
+- Project file browsing for Markdown, source code, plain text, images, and Jupyter notebooks; Markdown opens as rendered content with MathJax, source files keep complete text and line numbers, and notebook cells show their outputs.
 - Persistent conversation renaming and project-group collapse state.
 - Inspector for connection state, persistent context usage metering with collapsible `/context` category details, plan limits, estimated API-equivalent cost, changed files, tasks, an expandable native Git review, and explicit Git publishing actions.
 - Remembered Git observation directories discovered from the selected Claude Code transcript, plus manually added directories.
 - Always-on-top floating conversation window.
 - Custom rounded composers shared by the main and floating windows, with text, image, file-picker, and drag-and-drop input.
-- In-composer model, reasoning-effort, and permission-mode controls connected directly to the background Claude session.
+- In-composer model, reasoning-effort, and permission-mode controls connected directly to the background Claude session, with confirmed settings saved to Claude Code's configuration.
 - Searchable slash-command suggestions with icons, descriptions, keyboard navigation, and live matching as the user types.
 - Custom inline `AskUserQuestion` cards plus a borderless native panel for the independent `ask_via_prettyterm` MCP bridge.
 - One-click **Compact** with compaction status and token counts supplied by Claude Code.
@@ -86,7 +86,7 @@ Create the versioned DMG and `SHA256SUMS.txt` with:
 
 ## How It Works
 
-PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders the conversation in a local `WKWebView`. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. A session handshake matches metadata-only appends to the loaded conversation. When the inspector changes width, PrettyTerm preserves a character-level reading anchor so text reflow stays at the same passage. Sending uses a managed Claude Code process over streaming JSON. The same process receives image and text blocks and emits live response events; selecting a conversation connects its background session without opening Terminal.
+PrettyTerm watches Claude Code JSONL transcripts under `~/.claude/projects` and renders the conversation in a local `WKWebView`. Conversations open in any tab or the floating window keep their complete transcript loaded; unopened conversations retain lightweight summaries for the sidebar. Active transcripts are parsed from their last completed byte offset, and newly appended messages are added without replacing the existing conversation DOM. A session handshake matches metadata-only appends to the loaded conversation. When the inspector changes width, PrettyTerm preserves a character-level reading anchor so text reflow stays at the same passage. Sending uses a managed Claude Code process over streaming JSON. The same process receives image and text blocks and emits live response events; selecting a conversation connects its background session without opening Terminal.
 
 PrettyTerm uses the installed Claude Code executable for requests, tools, authentication, and session persistence. The Remote button enables Remote Control through the selected background session's control protocol.
 
@@ -118,7 +118,7 @@ Requests, authentication, tools and prompt-cache markers remain owned by Claude 
 
 Typing `/` opens an in-window command palette with icons and descriptions. Further typing matches command names, localized titles, and descriptions; arrow keys select an item, Return or Tab inserts it, and Escape closes the palette. Selecting a suggestion fills the composer without sending it. The command list comes from the running Claude Code process. Built-ins, project commands, skills and plugins use that process and its command lifecycle; `commands_changed` refreshes the palette when Claude discovers more commands. `/commands` and `/help` open the palette as well. Commands that require a terminal UI are not advertised by Claude Code in this mode.
 
-`/config`, `/model`, `/effort` and `/mode` open PrettyTerm controls. Model and effort arguments use session control requests. Mode choices include Plan, Auto, Bypass, Default and Accept edits, using Claude Code's `set_permission_mode` protocol. Native tool requests and questions are answered in PrettyTerm and sent back on that connection.
+`/config`, `/model`, `/effort` and `/mode` open PrettyTerm controls. Model and effort arguments use session control requests. Mode choices include Plan, Auto, Bypass, Default and Accept edits, using Claude Code's `set_permission_mode` protocol. After a control request succeeds, PrettyTerm reads the effective session settings and saves the confirmed choice to `~/.claude/settings.json`; the saved permission mode is also used when the background session starts again. Configuration requests and responses are recorded in `~/Library/Logs/PrettyTerm/configuration.jsonl`. The model picker includes Sonnet 4.6 and Opus 5.5. Native tool requests and questions are answered in PrettyTerm and sent back on that connection.
 
 `/compact [instructions]` and the Compact button run Claude Code's compaction on the existing conversation. The UI displays its compacting status, completion or error, and before/after token counts when returned. Synthetic configuration acknowledgements do not enter the live conversation history. Command output appears in the status area and can be opened from **Advanced → View command result** or the `/` menu.
 

@@ -1,0 +1,5 @@
+/* Upstream: lobehub/lobehub@00167e7b0f014e640194be732dd251931d663874 (src/styles/stylex.css)
+ * Gives the entry chunk a CSS asset so StyleX rules append into app.css reliably. */
+:root {
+  --lh-stylex: 1;
+}

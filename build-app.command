@@ -10,6 +10,17 @@ build_dir="$project_dir/.build"
 
 mkdir -p "$macos_dir" "$resources_dir" "$build_dir"
 
+if ! command -v node >/dev/null 2>&1; then
+  export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+fi
+
+vite_bin="$project_dir/Frontend/node_modules/.bin/vite"
+if [[ ! -x "$vite_bin" ]]; then
+  print -u2 "Missing $vite_bin; install Frontend dependencies first."
+  exit 1
+fi
+"$vite_bin" build --config "$project_dir/Frontend/vite.config.ts" --logLevel warn
+
 clang \
   -fobjc-arc \
   -fmodules \
@@ -18,23 +29,24 @@ clang \
   -mmacosx-version-min=13.0 \
   -framework AppKit \
   -framework WebKit \
+  -framework ImageIO \
   -framework UniformTypeIdentifiers \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTAppearance.m" \
   "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Sources/PrettyTerm.m" \
   -o "$macos_dir/PrettyTerm"
 
 cp "$project_dir/Info.plist" "$contents_dir/Info.plist"
-cp "$project_dir/Resources/tex-svg.js" "$resources_dir/tex-svg.js"
-cp "$project_dir/Resources/mermaid.min.js" "$resources_dir/mermaid.min.js"
-cp "$project_dir/Resources/index.html" "$resources_dir/index.html"
 cp "$project_dir/Resources/PrettyTerm.icns" "$resources_dir/PrettyTerm.icns"
 cp "$project_dir/Resources/PrettyTermLogo.png" "$resources_dir/PrettyTermLogo.png"
-if [[ -f "$project_dir/Resources/app.js" ]]; then
-  cp "$project_dir/Resources/app.js" "$resources_dir/app.js"
-fi
+rm -f "$resources_dir/tex-svg.js" "$resources_dir/mermaid.min.js" \
+  "$resources_dir/appearance.css" "$resources_dir/index.html" "$resources_dir/app.js"
+rm -rf "$resources_dir/frontend"
+ditto "$build_dir/frontend" "$resources_dir/frontend"
 for localization in zh-Hans.lproj en.lproj; do
   if [[ -d "$project_dir/Resources/$localization" ]]; then
     ditto "$project_dir/Resources/$localization" "$resources_dir/$localization"

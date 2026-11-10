@@ -7,16 +7,6 @@ contents_dir="$app_dir/Contents"
 resources_dir="$contents_dir/Resources"
 mkdir -p "$project_dir/.build"
 
-if [[ -f "$project_dir/Tests/test_renderer.js" ]]; then
-  node "$project_dir/Tests/test_renderer.js"
-fi
-if [[ -f "$project_dir/Tests/test_appearance.js" ]]; then
-  node "$project_dir/Tests/test_appearance.js"
-fi
-if [[ -f "$project_dir/Tests/test_floating_window.js" ]]; then
-  node "$project_dir/Tests/test_floating_window.js"
-fi
-
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework AppKit \
   -framework UniformTypeIdentifiers \
@@ -29,6 +19,7 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework AppKit \
   -I"$project_dir/Sources" \
+  "$project_dir/Sources/PTAppearance.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Tests/PTGitReviewTests.m" \
   -o "$project_dir/.build/PTGitReviewTests"
@@ -53,9 +44,12 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -Wno-nullability-completeness \
   -framework AppKit \
   -framework WebKit \
+  -framework ImageIO \
   -framework UniformTypeIdentifiers \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTAppearance.m" \
   "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Tests/PTSessionParserTests.m" \
@@ -64,9 +58,11 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
 
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -Wno-nullability-completeness \
-  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers \
+  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers -framework ImageIO \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTAppearance.m" \
   "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Tests/PTClaudeLaunchTests.m" \
@@ -75,9 +71,11 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
 
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -Wno-nullability-completeness \
-  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers \
+  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers -framework ImageIO \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTAppearance.m" \
   "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Tests/PTHomeTests.m" \
@@ -86,9 +84,11 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
 
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -Wno-nullability-completeness \
-  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers \
+  -framework AppKit -framework WebKit -framework UniformTypeIdentifiers -framework ImageIO \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTAppearance.m" \
   "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   "$project_dir/Tests/PTRenameTests.m" \
@@ -105,24 +105,38 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework AppKit \
   -framework WebKit \
+  -framework ImageIO \
   -framework UniformTypeIdentifiers \
   "$project_dir/.build/PrettyTermForInteractionTests.o" \
   "$project_dir/.build/PTWindowInteractionTests.o" \
   "$project_dir/Sources/PTAgentState.m" \
+  "$project_dir/Sources/PTAppearance.m" \
   "$project_dir/Sources/PTFilePreview.m" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
   "$project_dir/Sources/PTGitReview.m" \
   "$project_dir/Sources/PTUsageMetrics.m" \
   -o "$project_dir/.build/PTWindowInteractionTests"
 "$project_dir/.build/PTWindowInteractionTests"
 
+"$project_dir/build-app.command"
+
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -framework AppKit \
   -framework WebKit \
-  "$project_dir/Tests/PTViewportAnchorTests.m" \
-  -o "$project_dir/.build/PTViewportAnchorTests"
-"$project_dir/.build/PTViewportAnchorTests" "$project_dir"
+  -I"$project_dir/Sources" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
+  "$project_dir/Tests/PTFrontendBridgeTests.m" \
+  -o "$project_dir/.build/PTFrontendBridgeTests"
+"$project_dir/.build/PTFrontendBridgeTests" "$project_dir"
 
-"$project_dir/build-app.command"
+clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
+  -framework AppKit \
+  -framework WebKit \
+  -I"$project_dir/Sources" \
+  "$project_dir/Sources/PTFrontendBridge.m" \
+  "$project_dir/Tests/PTRenderingPerformanceTests.m" \
+  -o "$project_dir/.build/PTRenderingPerformanceTests"
+"$project_dir/.build/PTRenderingPerformanceTests" "$project_dir" "$resources_dir" --assert
 
 codesign --verify --deep --strict --verbose=2 "$app_dir"
 codesign_details="$(codesign -dvv "$app_dir" 2>&1)"
@@ -137,7 +151,7 @@ cmp "$project_dir/Info.plist" "$contents_dir/Info.plist"
   exit 1
 }
 
-for resource in PrettyTerm.icns PrettyTermLogo.png app.js mermaid.min.js; do
+for resource in PrettyTerm.icns PrettyTermLogo.png; do
   packaged_resource="$resources_dir/$resource"
   [[ -s "$packaged_resource" ]] || {
     print -u2 "Missing packaged resource: $packaged_resource"
@@ -146,21 +160,45 @@ for resource in PrettyTerm.icns PrettyTermLogo.png app.js mermaid.min.js; do
   cmp "$project_dir/Resources/$resource" "$packaged_resource"
 done
 
-for language in zh-Hans en; do
-  packaged_strings="$resources_dir/$language.lproj/InfoPlist.strings"
-  [[ -s "$packaged_strings" ]] || {
-    print -u2 "Missing packaged localization: $packaged_strings"
-    exit 1
-  }
-  cmp "$project_dir/Resources/$language.lproj/InfoPlist.strings" "$packaged_strings"
-done
+diff -qr "$project_dir/.build/frontend" "$resources_dir/frontend"
+python3 - "$resources_dir/frontend" <<'PYTHON'
+import json
+import re
+import sys
+from html.parser import HTMLParser
+from pathlib import Path
 
-[[ "$(plutil -extract CFBundleIdentifier raw -o - "$contents_dir/Info.plist")" == "com.yuuka.prettyterm.beta" ]]
-[[ "$(plutil -extract CFBundleDisplayName raw -o - "$contents_dir/Info.plist")" == "PrettyTerm Beta" ]]
-[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "0.9.8" ]]
-[[ "$(plutil -extract CFBundleVersion raw -o - "$contents_dir/Info.plist")" == "29" ]]
-[[ "$(plutil -extract PTReleaseChannel raw -o - "$contents_dir/Info.plist")" == "beta" ]]
-[[ "$(plutil -extract CFBundleDevelopmentRegion raw -o - "$contents_dir/Info.plist")" == "zh-Hans" ]]
-[[ "$(plutil -extract CFBundleIconFile raw -o - "$contents_dir/Info.plist")" == "PrettyTerm.icns" ]]
+root = Path(sys.argv[1])
+manifest = json.loads((root / ".vite/manifest.json").read_text())
+assert manifest and any(entry.get("isEntry") for entry in manifest.values())
 
-print "Verification passed: $app_dir"
+class Entrypoint(HTMLParser):
+    scripts = []
+    assets = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "script":
+            path = attrs.get("src") or attrs.get("data-src")
+            if path:
+                assert attrs.get("type") != "module"
+                assert "crossorigin" not in attrs
+                self.scripts.append(path)
+        if tag == "link" and attrs.get("rel") == "stylesheet":
+            self.assets.append(attrs["href"])
+
+page = Entrypoint()
+page.feed((root / "index.html").read_text())
+assert page.scripts, "missing SystemJS entry scripts"
+boot_css = root / "assets/boot.css"
+assert "--lh-stylex" in boot_css.read_text(), "missing StyleX boot stylesheet"
+for path in page.scripts + page.assets:
+    assert (root / path).is_file(), path
+for entry in manifest.values():
+    for path in [entry["file"], *entry.get("css", []), *entry.get("assets", [])]:
+        assert (root / path).is_file(), path
+    chunk = root / entry["file"]
+    if chunk.suffix == ".js":
+        for stylesheet in re.findall(r'new URL\("([^"]+\.css)",', chunk.read_text()):
+            assert (chunk.parent / stylesheet).is_file(), stylesheet
+PYTHON

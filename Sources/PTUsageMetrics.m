@@ -48,15 +48,15 @@ static BOOL PTPricingForModel(NSString *model, NSDate *date, PTModelPricing *pri
     return YES;
 }
 
-double PTAPIEquivalentCostForUsage(NSString *model,
-                                   NSDictionary *usage,
-                                   NSDate *pricingDate,
-                                   BOOL *supported) {
+PTAPIUsageCost PTAPIEquivalentCostBreakdownForUsage(NSString *model,
+                                                     NSDictionary *usage,
+                                                     NSDate *pricingDate,
+                                                     BOOL *supported) {
     PTModelPricing pricing = {0};
     BOOL known = [usage isKindOfClass:NSDictionary.class] &&
         PTPricingForModel(model, pricingDate ?: NSDate.date, &pricing);
     if (supported) *supported = known;
-    if (!known) return 0;
+    if (!known) return (PTAPIUsageCost){0};
 
     double input = [usage[@"input_tokens"] doubleValue];
     double output = [usage[@"output_tokens"] doubleValue];
@@ -70,11 +70,21 @@ double PTAPIEquivalentCostForUsage(NSString *model,
     if (classifiedCache < cacheWriteTotal) cacheWrite5m += cacheWriteTotal - classifiedCache;
 
     // 所有单价均为 USD / 1M tokens。
-    return (input * pricing.input +
-            cacheWrite5m * pricing.cacheWrite5m +
-            cacheWrite1h * pricing.cacheWrite1h +
-            cacheRead * pricing.cacheRead +
-            output * pricing.output) / 1000000.0;
+    PTAPIUsageCost cost = {
+        .input = input * pricing.input / 1000000.0,
+        .output = output * pricing.output / 1000000.0,
+        .cacheRead = cacheRead * pricing.cacheRead / 1000000.0,
+        .cacheWrite = (cacheWrite5m * pricing.cacheWrite5m + cacheWrite1h * pricing.cacheWrite1h) / 1000000.0,
+    };
+    cost.total = cost.input + cost.output + cost.cacheRead + cost.cacheWrite;
+    return cost;
+}
+
+double PTAPIEquivalentCostForUsage(NSString *model,
+                                   NSDictionary *usage,
+                                   NSDate *pricingDate,
+                                   BOOL *supported) {
+    return PTAPIEquivalentCostBreakdownForUsage(model, usage, pricingDate, supported).total;
 }
 
 NSString *PTAPIEquivalentCostDisplay(double costUSD) {

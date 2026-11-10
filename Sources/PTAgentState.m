@@ -387,6 +387,42 @@ static NSString *PTInspectableText(id value) {
     return [value description] ?: @"";
 }
 
+static id PTCompactToolValue(id value, NSUInteger maxStringLength) {
+    if ([value isKindOfClass:NSString.class]) {
+        NSString *text = (NSString *)value;
+        return text.length > maxStringLength ? [text substringToIndex:maxStringLength] : text;
+    }
+    if ([value isKindOfClass:NSNumber.class]) return value;
+    if ([value isKindOfClass:NSArray.class]) {
+        NSMutableArray *items = [NSMutableArray array];
+        for (id item in (NSArray *)value) {
+            if ([item isKindOfClass:NSString.class]) {
+                [items addObject:PTCompactToolValue(item, 400)];
+                if (items.count >= 4) break;
+            }
+        }
+        return items.count ? items : nil;
+    }
+    return nil;
+}
+
+static NSDictionary *PTCompactToolInput(NSDictionary *input) {
+    if (![input isKindOfClass:NSDictionary.class] || input.count == 0) return @{};
+    NSArray<NSString *> *keys = @[
+        @"name", @"title", @"skill", @"description", @"prompt",
+        @"command", @"cmd", @"script",
+        @"query", @"q", @"pattern", @"keywords",
+        @"file_path", @"filePath", @"path", @"filename", @"file",
+        @"url", @"urls", @"subagent_type", @"offset", @"limit"
+    ];
+    NSMutableDictionary *compact = [NSMutableDictionary dictionary];
+    for (NSString *key in keys) {
+        id val = PTCompactToolValue(input[key], 6000);
+        if (val) compact[key] = val;
+    }
+    return compact;
+}
+
 NSDictionary *PTEventFromAssistantBlock(
     NSDictionary *block,
     NSString *messageKey,
@@ -414,9 +450,13 @@ NSDictionary *PTEventFromAssistantBlock(
     if (![type isEqual:@"tool_use"]) return nil;
 
     NSString *toolName = [block[@"name"] isKindOfClass:NSString.class] ? block[@"name"] : @"工具调用";
+    NSString *toolUseId = [block[@"id"] isKindOfClass:NSString.class] ? block[@"id"] : @"";
     NSDictionary *input = [block[@"input"] isKindOfClass:NSDictionary.class] ? block[@"input"] : @{};
+    NSDictionary *compactInput = PTCompactToolInput(input);
     NSMutableDictionary *event = [base mutableCopy];
     event[@"toolName"] = toolName;
+    if (toolUseId.length > 0) event[@"toolUseId"] = toolUseId;
+    if (compactInput.count > 0) event[@"toolInput"] = compactInput;
     if ([toolName isEqual:@"Edit"] || [toolName isEqual:@"Write"]) {
         NSString *filePath = [input[@"file_path"] isKindOfClass:NSString.class] ? input[@"file_path"] : @"";
         NSString *oldText = [toolName isEqual:@"Edit"] && [input[@"old_string"] isKindOfClass:NSString.class]
@@ -435,7 +475,6 @@ NSDictionary *PTEventFromAssistantBlock(
     }
     if ([toolName isEqual:@"AskUserQuestion"]) {
         NSArray *questions = [input[@"questions"] isKindOfClass:NSArray.class] ? input[@"questions"] : @[];
-        NSString *toolUseId = [block[@"id"] isKindOfClass:NSString.class] ? block[@"id"] : @"";
         if (questions.count > 0 && toolUseId.length > 0) {
             event[@"kind"] = @"question";
             event[@"toolUseId"] = toolUseId;
@@ -474,6 +513,7 @@ NSDictionary *PTEventFromToolResultBlock(
         @"messageKey": messageKey ?: @"",
         @"toolUseId": block[@"tool_use_id"] ?: @"",
         @"kind": isError ? @"error" : @"tool",
+        @"isError": @(isError),
         @"toolName": isError ? @"工具执行失败" : @"工具结果",
         @"text": PTInspectableText(block[@"content"]),
         @"timestamp": timestamp ?: @"",

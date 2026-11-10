@@ -24,11 +24,11 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.9.9</string>
+    <string>1.0.0</string>
     <key>CFBundleVersion</key>
     <string>8</string>
     <key>CFBundleGetInfoString</key>
-    <string>PrettyTerm Beta 0.9.9 (8)</string>
+    <string>PrettyTerm Beta 1.0.0 (8)</string>
     <key>PTReleaseChannel</key>
     <string>beta</string>
     <key>LSMinimumSystemVersion</key>

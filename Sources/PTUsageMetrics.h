@@ -2,6 +2,19 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef struct {
+    double input;
+    double output;
+    double cacheRead;
+    double cacheWrite;
+    double total;
+} PTAPIUsageCost;
+
+FOUNDATION_EXPORT PTAPIUsageCost PTAPIEquivalentCostBreakdownForUsage(NSString *model,
+                                                                      NSDictionary *usage,
+                                                                      NSDate *pricingDate,
+                                                                      BOOL * _Nullable supported);
+
 /// 按 Claude Platform 公布的标准 API 单价计算一条 Messages API usage 的等价成本。
 /// 这只是价值估算，不代表 Claude 订阅账户实际扣款。
 FOUNDATION_EXPORT double PTAPIEquivalentCostForUsage(NSString *model,

@@ -6,196 +6,24 @@
 #import <signal.h>
 #import <string.h>
 #import "PTAgentState.h"
+#import "PTAppearance.h"
 #import "PTFilePreview.h"
+#import "PTFrontendBridge.h"
+#import <ImageIO/ImageIO.h>
 #import "PTGitReview.h"
 #import "PTLocalization.h"
 #import "PTUsageMetrics.h"
 
-static NSColor *PTColor(CGFloat red, CGFloat green, CGFloat blue) {
-    return [NSColor colorWithSRGBRed:red green:green blue:blue alpha:1.0];
-}
-
-static NSColor *PTWarmDynamicColor(
-    CGFloat lightRed, CGFloat lightGreen, CGFloat lightBlue,
-    CGFloat darkRed, CGFloat darkGreen, CGFloat darkBlue
-) {
-    return [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
-        NSAppearanceName match = [appearance bestMatchFromAppearancesWithNames:@[
-            NSAppearanceNameAqua, NSAppearanceNameDarkAqua
-        ]];
-        BOOL dark = [match isEqual:NSAppearanceNameDarkAqua];
-        return PTColor(
-            dark ? darkRed : lightRed,
-            dark ? darkGreen : lightGreen,
-            dark ? darkBlue : lightBlue
-        );
-    }];
-}
-
-static NSColor *PTWarmCanvasColor(void) {
-    return PTWarmDynamicColor(0.953, 0.922, 0.867, 0.129, 0.098, 0.071);
-}
-
-static NSColor *PTWarmCardColor(void) {
-    return PTWarmDynamicColor(0.988, 0.969, 0.925, 0.176, 0.129, 0.094);
-}
-
-static NSColor *PTWarmChipColor(void) {
-    return PTWarmDynamicColor(0.973, 0.937, 0.878, 0.220, 0.153, 0.106);
-}
-
-static NSColor *PTWarmBorderColor(void) {
-    return PTWarmDynamicColor(0.835, 0.733, 0.608, 0.376, 0.259, 0.173);
-}
-
-static NSColor *PTWarmAccentColor(void) {
-    return PTWarmDynamicColor(0.639, 0.278, 0.090, 0.910, 0.537, 0.286);
-}
-
 typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
     PTAppearanceSurfaceStyleCanvas,
     PTAppearanceSurfaceStyleCard,
-    PTAppearanceSurfaceStyleChip
+    PTAppearanceSurfaceStyleChip,
+    PTAppearanceSurfaceStyleSurface,
+    PTAppearanceSurfaceStyleHairline
 };
 
 @interface PTAppearanceSurfaceView : NSView
 @property(nonatomic) PTAppearanceSurfaceStyle surfaceStyle;
-@end
-
-@interface PTWorkspaceSplitView : NSSplitView
-@property(nonatomic) BOOL changingDivider;
-@property(nonatomic) NSInteger changingDividerIndex;
-@property(nonatomic) BOOL mouseDraggingDivider;
-@property(nonatomic) CGFloat trackedDividerPosition;
-- (void)setTrackedPosition:(CGFloat)position ofDividerAtIndex:(NSInteger)index;
-@end
-
-@interface PTWorkspaceRootView : NSView
-@end
-
-@implementation PTWorkspaceRootView
-@end
-
-@interface PTInspectorOverlayView : NSView
-@property(nonatomic) BOOL floating;
-@property(nonatomic, copy) void (^floatingFrameChanged)(NSRect frame);
-- (void)constrainFloatingFrame;
-@end
-
-@implementation PTInspectorOverlayView
-
-- (BOOL)acceptsFirstMouse:(NSEvent *)event {
-    (void)event;
-    return YES;
-}
-
-- (NSView *)hitTest:(NSPoint)point {
-    if (!self.floating) return [super hitTest:point];
-    NSPoint local = point;
-    BOOL resizeEdge = local.x <= 9.0 || local.x >= NSWidth(self.bounds) - 9.0;
-    BOOL dragHeader = local.y >= NSHeight(self.bounds) - 58.0 &&
-        local.x < NSWidth(self.bounds) - 96.0;
-    return resizeEdge || dragHeader ? self : [super hitTest:point];
-}
-
-- (void)resetCursorRects {
-    [super resetCursorRects];
-    if (!self.floating) return;
-    [self addCursorRect:NSMakeRect(0, 0, 9, NSHeight(self.bounds))
-                 cursor:NSCursor.resizeLeftRightCursor];
-    [self addCursorRect:NSMakeRect(NSWidth(self.bounds) - 9, 0, 9, NSHeight(self.bounds))
-                 cursor:NSCursor.resizeLeftRightCursor];
-}
-
-- (void)constrainFloatingFrame {
-    if (!self.floating || !self.superview) return;
-    NSRect available = self.superview.bounds;
-    CGFloat margin = 12.0;
-    CGFloat workspaceTop = NSMaxY(available) - 64.0 - margin;
-    CGFloat maximumHeight = MAX(320.0, workspaceTop - NSMinY(available) - margin);
-    NSRect frame = self.frame;
-    frame.size.width = MIN(520.0, MAX(300.0,
-        MIN(frame.size.width, NSWidth(available) - margin * 2.0)));
-    frame.size.height = MIN(frame.size.height, maximumHeight);
-    frame.origin.x = MIN(MAX(NSMinX(available) + margin, frame.origin.x),
-        NSMaxX(available) - margin - frame.size.width);
-    frame.origin.y = MIN(MAX(NSMinY(available) + margin, frame.origin.y),
-        workspaceTop - frame.size.height);
-    self.frame = NSIntegralRect(frame);
-}
-
-- (void)mouseDown:(NSEvent *)event {
-    if (!self.floating || !self.superview) {
-        [super mouseDown:event];
-        return;
-    }
-    NSPoint local = [self convertPoint:event.locationInWindow fromView:nil];
-    BOOL resizeLeft = local.x <= 9.0;
-    BOOL resizeRight = local.x >= NSWidth(self.bounds) - 9.0;
-    BOOL moving = !resizeLeft && !resizeRight;
-    NSRect startingFrame = self.frame;
-    NSPoint startingPoint = [self.superview convertPoint:event.locationInWindow fromView:nil];
-    while (YES) {
-        NSEvent *next = [self.window nextEventMatchingMask:
-            NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp];
-        if (next.type == NSEventTypeLeftMouseUp) break;
-        NSPoint currentPoint = [self.superview convertPoint:next.locationInWindow fromView:nil];
-        CGFloat dx = currentPoint.x - startingPoint.x;
-        CGFloat dy = currentPoint.y - startingPoint.y;
-        NSRect frame = startingFrame;
-        if (moving) {
-            frame.origin.x += dx;
-            frame.origin.y += dy;
-        } else if (resizeLeft) {
-            CGFloat right = NSMaxX(startingFrame);
-            frame.origin.x += dx;
-            frame.size.width = right - frame.origin.x;
-        } else {
-            frame.size.width += dx;
-        }
-        self.frame = frame;
-        [self constrainFloatingFrame];
-        if (self.floatingFrameChanged) self.floatingFrameChanged(self.frame);
-    }
-}
-
-@end
-
-@implementation PTWorkspaceSplitView
-- (void)setTrackedPosition:(CGFloat)position ofDividerAtIndex:(NSInteger)index {
-    BOOL previous = self.changingDivider;
-    NSInteger previousIndex = self.changingDividerIndex;
-    self.changingDivider = YES;
-    self.changingDividerIndex = index;
-    self.trackedDividerPosition = position;
-    if ([self.delegate respondsToSelector:@selector(splitViewWillResizeSubviews:)]) {
-        [self.delegate splitViewWillResizeSubviews:
-            [NSNotification notificationWithName:NSSplitViewWillResizeSubviewsNotification object:self]];
-    }
-    [super setPosition:position ofDividerAtIndex:index];
-    if ([self.delegate respondsToSelector:@selector(splitViewDidResizeSubviews:)]) {
-        [self.delegate splitViewDidResizeSubviews:
-            [NSNotification notificationWithName:NSSplitViewDidResizeSubviewsNotification object:self]];
-    }
-    self.changingDivider = previous;
-    self.changingDividerIndex = previousIndex;
-    self.trackedDividerPosition = 0.0;
-}
-- (void)mouseDown:(NSEvent *)event {
-    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
-    self.changingDividerIndex = 0;
-    if (self.subviews.count > 1 && point.x > NSMaxX(self.subviews[1].frame) - 5)
-        self.changingDividerIndex = 1;
-    self.changingDivider = YES;
-    self.mouseDraggingDivider = YES;
-    [super mouseDown:event];
-    self.mouseDraggingDivider = NO;
-    if ([self.delegate respondsToSelector:@selector(splitViewDidResizeSubviews:)]) {
-        [self.delegate splitViewDidResizeSubviews:
-            [NSNotification notificationWithName:NSSplitViewDidResizeSubviewsNotification object:self]];
-    }
-    self.changingDivider = NO;
-}
 @end
 
 // Finder 被拉到前台后，PrettyTerm 会变成非活动窗口。普通 recessed button 的
@@ -209,16 +37,9 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 @property(nonatomic, strong) NSColor *hoverFillColor;
 @property(nonatomic, strong) NSColor *pressedFillColor;
 @property(nonatomic, strong) NSColor *strokeColor;
+@property(nonatomic, strong, nullable) NSColor *textColor;
 @property(nonatomic) CGFloat cornerRadius;
-@end
-
-@interface PTWarmPopUpButton : NSPopUpButton
-@end
-
-@interface PTWarmToggleButton : PTAnimatedButton
-@end
-
-@interface PTPassthroughTextField : NSTextField
+- (void)applyTone:(PTButtonTone)tone;
 @end
 
 @interface PTQuestionOptionButton : PTAnimatedButton
@@ -230,27 +51,10 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 @interface PTFlippedView : NSView
 @end
 
-@interface PTComposerDropSurfaceView : NSView
-@property(nonatomic, copy) BOOL (^dropHandler)(NSArray<NSURL *> *urls);
-@property(nonatomic) BOOL dropEnabled;
-@end
-
-@interface PTEffortSlider : NSControl <NSGestureRecognizerDelegate>
-@property(nonatomic) NSInteger selectedIndex;
-@property(nonatomic) NSInteger submittedIndex;
-@end
-
 @implementation PTFirstMouseButton
 - (BOOL)acceptsFirstMouse:(NSEvent *)event {
     (void)event;
     return YES;
-}
-@end
-
-@implementation PTPassthroughTextField
-- (NSView *)hitTest:(NSPoint)point {
-    (void)point;
-    return nil;
 }
 @end
 
@@ -270,6 +74,21 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
     }
 }
 
+- (void)syncTitleTextColor {
+    if (!self.textColor || self.title.length == 0) return;
+    NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
+    paragraph.alignment = self.alignment;
+    NSFont *font = self.font ?: [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:self.title
+        attributes:@{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: self.textColor,
+            NSParagraphStyleAttributeName: paragraph
+        }];
+    [super setAttributedTitle:attributed];
+    self.contentTintColor = self.textColor;
+}
+
 - (void)setTitle:(NSString *)title {
     [super setTitle:title];
     if (self.image && title.length == 0) {
@@ -277,7 +96,57 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
         self.imageScaling = NSImageScaleProportionallyDown;
         self.imageHugsTitle = NO;
         self.alignment = NSTextAlignmentCenter;
+    } else {
+        [self syncTitleTextColor];
     }
+}
+
+- (void)setFont:(NSFont *)font {
+    [super setFont:font];
+    [self syncTitleTextColor];
+}
+
+- (void)setTextColor:(NSColor *)textColor {
+    _textColor = textColor;
+    if (textColor) {
+        self.contentTintColor = textColor;
+        [self syncTitleTextColor];
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)applyTone:(PTButtonTone)tone {
+    switch (tone) {
+        case PTButtonTonePrimary:
+            self.fillColor = PTThemeColor(PTThemeRolePrimary);
+            self.hoverFillColor = PTThemeColor(PTThemeRolePrimaryHover);
+            self.pressedFillColor = PTThemeColor(PTThemeRolePrimaryPressed);
+            self.strokeColor = PTThemeColor(PTThemeRolePrimary);
+            self.textColor = PTThemeColor(PTThemeRolePrimaryText);
+            break;
+        case PTButtonToneNeutral:
+            self.fillColor = PTThemeColor(PTThemeRoleSurface);
+            self.hoverFillColor = PTThemeColor(PTThemeRoleFillHover);
+            self.pressedFillColor = PTThemeColor(PTThemeRoleFillPressed);
+            self.strokeColor = PTThemeColor(PTThemeRoleBorder);
+            self.textColor = PTThemeColor(PTThemeRoleText);
+            break;
+        case PTButtonToneQuiet:
+            self.fillColor = NSColor.clearColor;
+            self.hoverFillColor = PTThemeColor(PTThemeRoleFill);
+            self.pressedFillColor = PTThemeColor(PTThemeRoleFillPressed);
+            self.strokeColor = NSColor.clearColor;
+            self.textColor = PTThemeColor(PTThemeRoleMuted);
+            break;
+        case PTButtonToneDanger:
+            self.fillColor = PTThemeColor(PTThemeRoleError);
+            self.hoverFillColor = PTThemeColor(PTThemeRoleError);
+            self.pressedFillColor = PTThemeColor(PTThemeRoleError);
+            self.strokeColor = PTThemeColor(PTThemeRoleError);
+            self.textColor = NSColor.whiteColor;
+            break;
+    }
+    [self setNeedsDisplay:YES];
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -289,10 +158,10 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
         self.imagePosition = NSImageLeading;
         self.imageHugsTitle = YES;
         _fillColor = NSColor.clearColor;
-        _hoverFillColor = PTWarmChipColor();
-        _pressedFillColor = PTWarmBorderColor();
+        _hoverFillColor = PTThemeColor(PTThemeRoleFill);
+        _pressedFillColor = PTThemeColor(PTThemeRoleFillPressed);
         _strokeColor = NSColor.clearColor;
-        _cornerRadius = 12;
+        _cornerRadius = PTRadiusDefault;
     }
     return self;
 }
@@ -311,7 +180,7 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 - (NSSize)intrinsicContentSize {
     NSSize size = [super intrinsicContentSize];
     BOOL imageOnly = self.image != nil && self.title.length == 0;
-    return NSMakeSize(imageOnly ? 28.0 : MAX(32.0, size.width + 20.0), 28.0);
+    return NSMakeSize(imageOnly ? PTControlHeightSM : MAX(32.0, size.width + 20.0), PTControlHeightSM);
 }
 
 - (NSEdgeInsets)alignmentRectInsets {
@@ -324,8 +193,9 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
             : (self->_hovered ? self.hoverFillColor : self.fillColor);
         self.layer.backgroundColor = fill.CGColor;
         self.layer.borderColor = self.strokeColor.CGColor;
-        self.layer.borderWidth = self.strokeColor == NSColor.clearColor ? 0 : 0.7;
+        self.layer.borderWidth = self.strokeColor == NSColor.clearColor ? 0 : 0.75;
         self.layer.cornerRadius = self.cornerRadius;
+        [self syncTitleTextColor];
     }];
 }
 
@@ -372,165 +242,20 @@ typedef NS_ENUM(NSInteger, PTAppearanceSurfaceStyle) {
 
 @end
 
-@implementation PTWarmPopUpButton {
-    NSTrackingArea *_trackingArea;
-    BOOL _hovered;
-    BOOL _pressed;
-}
-
-- (instancetype)initWithFrame:(NSRect)frameRect pullsDown:(BOOL)flag {
-    self = [super initWithFrame:frameRect pullsDown:flag];
-    if (!self) return nil;
-    self.wantsLayer = YES;
-    self.bordered = NO;
-    self.focusRingType = NSFocusRingTypeNone;
-    self.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
-    NSPopUpButtonCell *cell = (NSPopUpButtonCell *)self.cell;
-    cell.arrowPosition = NSPopUpNoArrow;
-    return self;
-}
-
-- (BOOL)acceptsFirstMouse:(NSEvent *)event {
-    (void)event;
-    return YES;
-}
-
-- (void)updateTrackingAreas {
-    [super updateTrackingAreas];
-    if (_trackingArea) [self removeTrackingArea:_trackingArea];
-    _trackingArea = [[NSTrackingArea alloc] initWithRect:self.bounds
-        options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
-        owner:self userInfo:nil];
-    [self addTrackingArea:_trackingArea];
-}
-
-- (void)mouseEntered:(NSEvent *)event {
-    (void)event;
-    _hovered = YES;
-    [self setNeedsDisplay:YES];
-}
-
-- (void)mouseExited:(NSEvent *)event {
-    (void)event;
-    _hovered = NO;
-    [self setNeedsDisplay:YES];
-}
-
-- (void)mouseDown:(NSEvent *)event {
-    _pressed = YES;
-    [self setNeedsDisplay:YES];
-    [CATransaction begin];
-    [CATransaction setAnimationDuration:0.10];
-    self.layer.transform = CATransform3DMakeScale(0.975, 0.975, 1);
-    [CATransaction commit];
-    [super mouseDown:event];
-    _pressed = NO;
-    [self setNeedsDisplay:YES];
-    [CATransaction begin];
-    [CATransaction setAnimationDuration:0.20];
-    self.layer.transform = CATransform3DIdentity;
-    [CATransaction commit];
-}
-
-- (void)setEnabled:(BOOL)enabled {
-    [super setEnabled:enabled];
-    self.alphaValue = enabled ? 1.0 : 0.42;
-    [self setNeedsDisplay:YES];
-}
-
-- (NSSize)intrinsicContentSize {
-    NSString *title = self.titleOfSelectedItem ?: self.title ?: @"";
-    NSFont *font = self.font ?: [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
-    CGFloat width = ceil([title sizeWithAttributes:@{NSFontAttributeName: font}].width) + 42.0;
-    return NSMakeSize(MAX(72.0, width), 28.0);
-}
-
-- (NSEdgeInsets)alignmentRectInsets {
-    return NSEdgeInsetsZero;
-}
-
-- (void)drawRect:(NSRect)dirtyRect {
-    (void)dirtyRect;
-    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        NSRect bounds = NSInsetRect(self.bounds, 0.5, 0.5);
-        CGFloat radius = MIN(9.0, NSHeight(bounds) * 0.42);
-        NSColor *fill = self->_pressed ? PTWarmBorderColor()
-            : (self->_hovered ? PTWarmChipColor() : PTWarmCardColor());
-        NSBezierPath *surface = [NSBezierPath bezierPathWithRoundedRect:bounds
-                                                               xRadius:radius yRadius:radius];
-        [fill setFill];
-        [surface fill];
-        [PTWarmBorderColor() setStroke];
-        surface.lineWidth = 0.75;
-        [surface stroke];
-
-        NSString *title = self.titleOfSelectedItem ?: self.title ?: @"";
-        NSColor *textColor = self.enabled ? NSColor.labelColor : NSColor.tertiaryLabelColor;
-        NSDictionary *attributes = @{
-            NSFontAttributeName: self.font ?: [NSFont systemFontOfSize:11 weight:NSFontWeightMedium],
-            NSForegroundColorAttributeName: textColor
-        };
-        NSRect textRect = NSInsetRect(bounds, 12.0, 0.0);
-        textRect.size.width = MAX(0.0, textRect.size.width - 22.0);
-        NSSize textSize = [title sizeWithAttributes:attributes];
-        textRect.origin.y = NSMidY(bounds) - textSize.height * 0.5;
-        textRect.size.height = textSize.height;
-        [title drawInRect:textRect withAttributes:attributes];
-
-        CGFloat chevronX = NSMaxX(bounds) - 15.0;
-        CGFloat chevronY = NSMidY(bounds);
-        CGFloat outerY = self.isFlipped ? chevronY - 2.0 : chevronY + 2.0;
-        CGFloat centerY = self.isFlipped ? chevronY + 2.0 : chevronY - 2.0;
-        NSBezierPath *chevron = [NSBezierPath bezierPath];
-        [chevron moveToPoint:NSMakePoint(chevronX - 4.0, outerY)];
-        [chevron lineToPoint:NSMakePoint(chevronX, centerY)];
-        [chevron lineToPoint:NSMakePoint(chevronX + 4.0, outerY)];
-        chevron.lineWidth = 1.7;
-        chevron.lineCapStyle = NSLineCapStyleRound;
-        chevron.lineJoinStyle = NSLineJoinStyleRound;
-        [textColor setStroke];
-        [chevron stroke];
-    }];
-}
-@end
-
-@implementation PTWarmToggleButton
-- (instancetype)initWithFrame:(NSRect)frameRect {
-    self = [super initWithFrame:frameRect];
-    if (!self) return nil;
-    self.buttonType = NSButtonTypePushOnPushOff;
-    self.alignment = NSTextAlignmentCenter;
-    self.font = [NSFont systemFontOfSize:11 weight:NSFontWeightBold];
-    self.fillColor = PTWarmCardColor();
-    self.hoverFillColor = PTWarmChipColor();
-    self.pressedFillColor = PTWarmBorderColor();
-    self.strokeColor = PTWarmBorderColor();
-    self.cornerRadius = 8;
-    return self;
-}
-
-- (void)setState:(NSControlStateValue)state {
-    [super setState:state];
-    self.title = state == NSControlStateValueOn ? @"✓" : @"";
-    self.fillColor = state == NSControlStateValueOn ? PTWarmChipColor() : PTWarmCardColor();
-    [self setNeedsDisplay:YES];
-}
-@end
-
-static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
+static PTAnimatedButton *PTButtonWithTone(NSString *title, PTButtonTone tone, id target, SEL action) {
     PTAnimatedButton *button = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.title = title ?: @"";
     button.target = target;
     button.action = action;
-    button.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    button.contentTintColor = NSColor.labelColor;
-    button.fillColor = PTWarmCardColor();
-    button.hoverFillColor = PTWarmChipColor();
-    button.pressedFillColor = PTWarmDynamicColor(0.815, 0.697, 0.550, 0.315, 0.235, 0.180);
-    button.strokeColor = [PTWarmBorderColor() colorWithAlphaComponent:0.82];
-    button.cornerRadius = 9;
+    button.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
+    button.cornerRadius = PTRadiusDefault;
+    [button applyTone:tone];
     return button;
+}
+
+static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
+    return PTButtonWithTone(title, PTButtonToneNeutral, target, action);
 }
 
 @implementation PTQuestionOptionButton {
@@ -549,11 +274,11 @@ static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
     self.buttonType = NSButtonTypePushOnPushOff;
     self.title = @"";
     self.identifier = label;
-    self.fillColor = PTWarmCardColor();
-    self.hoverFillColor = PTWarmChipColor();
-    self.pressedFillColor = PTWarmBorderColor();
-    self.strokeColor = PTWarmBorderColor();
-    self.cornerRadius = 15;
+    self.fillColor = PTThemeColor(PTThemeRoleSurfaceSecondary);
+    self.hoverFillColor = PTThemeColor(PTThemeRoleFill);
+    self.pressedFillColor = PTThemeColor(PTThemeRoleFillPressed);
+    self.strokeColor = PTThemeColor(PTThemeRoleBorder);
+    self.cornerRadius = PTRadiusLG;
     self.focusRingType = NSFocusRingTypeNone;
     [self setAccessibilityLabel:description.length > 0
         ? [NSString stringWithFormat:@"%@，%@", label, description] : label];
@@ -632,242 +357,21 @@ static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
     BOOL selected = self.state == NSControlStateValueOn;
     [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
         if (selected) {
-            self.layer.backgroundColor = PTWarmDynamicColor(
-                0.956, 0.855, 0.710, 0.286, 0.173, 0.102).CGColor;
-            self.layer.borderColor = PTWarmAccentColor().CGColor;
+            self.layer.backgroundColor = PTThemeColor(PTThemeRoleFillHover).CGColor;
+            self.layer.borderColor = PTThemeColor(PTThemeRolePrimary).CGColor;
             self.layer.borderWidth = 1.25;
         }
         self->_numberLabel.layer.backgroundColor =
-            (selected ? PTWarmAccentColor() : PTWarmChipColor()).CGColor;
-        self->_numberLabel.textColor = selected ? NSColor.whiteColor : NSColor.secondaryLabelColor;
-        self->_checkLabel.textColor = selected ? PTWarmAccentColor() : NSColor.clearColor;
+            (selected ? PTThemeColor(PTThemeRolePrimary) : PTThemeColor(PTThemeRoleFill)).CGColor;
+        self->_numberLabel.textColor = selected
+            ? PTThemeColor(PTThemeRolePrimaryText) : PTThemeColor(PTThemeRoleMuted);
+        self->_checkLabel.textColor = selected ? PTThemeColor(PTThemeRolePrimary) : NSColor.clearColor;
     }];
 }
 @end
 
 @implementation PTFlippedView
 - (BOOL)isFlipped { return YES; }
-@end
-
-@implementation PTComposerDropSurfaceView {
-    BOOL _dragActive;
-}
-
-- (instancetype)initWithFrame:(NSRect)frameRect {
-    self = [super initWithFrame:frameRect];
-    if (self) {
-        self.wantsLayer = YES;
-        _dropEnabled = NO;
-        [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
-    }
-    return self;
-}
-
-- (BOOL)wantsUpdateLayer { return YES; }
-
-- (void)updateLayer {
-    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        self.layer.backgroundColor = PTWarmCardColor().CGColor;
-        self.layer.borderColor = (_dragActive ? PTWarmAccentColor() : PTWarmBorderColor()).CGColor;
-        self.layer.borderWidth = _dragActive ? 1.8 : 0.8;
-        self.layer.cornerRadius = 26;
-        self.layer.shadowColor = NSColor.blackColor.CGColor;
-        self.layer.shadowOpacity = _dragActive ? 0.18 : 0.09;
-        self.layer.shadowRadius = _dragActive ? 18 : 13;
-        self.layer.shadowOffset = CGSizeMake(0, -3);
-    }];
-}
-
-- (NSArray<NSURL *> *)draggedFileURLs:(id<NSDraggingInfo>)sender {
-    NSDictionary *options = @{NSPasteboardURLReadingFileURLsOnlyKey: @YES};
-    return [sender.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:options] ?: @[];
-}
-
-- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
-    if (!self.dropEnabled || [self draggedFileURLs:sender].count == 0) return NSDragOperationNone;
-    _dragActive = YES;
-    [self setNeedsDisplay:YES];
-    return NSDragOperationCopy;
-}
-
-- (void)draggingExited:(id<NSDraggingInfo>)sender {
-    (void)sender;
-    _dragActive = NO;
-    [self setNeedsDisplay:YES];
-}
-
-- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
-    NSArray<NSURL *> *urls = [self draggedFileURLs:sender];
-    _dragActive = NO;
-    [self setNeedsDisplay:YES];
-    return self.dropEnabled && urls.count > 0 && self.dropHandler && self.dropHandler(urls);
-}
-@end
-
-@implementation PTEffortSlider {
-    CALayer *_trackLayer;
-    CALayer *_fillLayer;
-    CALayer *_thumbLayer;
-    NSArray<CALayer *> *_dotLayers;
-    NSInteger _trackingStartIndex;
-}
-
-- (instancetype)initWithFrame:(NSRect)frameRect {
-    self = [super initWithFrame:frameRect];
-    if (self) {
-        self.wantsLayer = YES;
-        _selectedIndex = 1;
-        _trackLayer = [CALayer layer];
-        _fillLayer = [CALayer layer];
-        _thumbLayer = [CALayer layer];
-        NSMutableArray *dots = [NSMutableArray array];
-        [self.layer addSublayer:_trackLayer];
-        [self.layer addSublayer:_fillLayer];
-        for (NSInteger index = 0; index < 5; index++) {
-            CALayer *dot = [CALayer layer];
-            [dots addObject:dot];
-            [self.layer addSublayer:dot];
-        }
-        _dotLayers = dots;
-        [self.layer addSublayer:_thumbLayer];
-
-        NSPanGestureRecognizer *pan = [[NSPanGestureRecognizer alloc]
-            initWithTarget:self action:@selector(handleEffortPan:)];
-        NSClickGestureRecognizer *click = [[NSClickGestureRecognizer alloc]
-            initWithTarget:self action:@selector(handleEffortClick:)];
-        pan.delegate = self;
-        click.delegate = self;
-        [self addGestureRecognizer:pan];
-        [self addGestureRecognizer:click];
-    }
-    return self;
-}
-
-- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
-
-- (BOOL)gestureRecognizer:(NSGestureRecognizer *)gestureRecognizer
-        shouldRequireFailureOfGestureRecognizer:(NSGestureRecognizer *)otherGestureRecognizer {
-    return [gestureRecognizer isKindOfClass:NSClickGestureRecognizer.class]
-        && [otherGestureRecognizer isKindOfClass:NSPanGestureRecognizer.class];
-}
-
-- (CGFloat)xForIndex:(NSInteger)index {
-    CGFloat left = 19;
-    CGFloat right = MAX(left, self.bounds.size.width - 19);
-    return left + (right - left) * MIN(4, MAX(0, index)) / 4.0;
-}
-
-- (void)setSelectedIndex:(NSInteger)selectedIndex {
-    NSInteger next = MIN(4, MAX(-1, selectedIndex));
-    if (_selectedIndex == next) return;
-    BOOL animate = _selectedIndex >= 0 && next >= 0;
-    CGFloat oldX = [self xForIndex:_selectedIndex];
-    _selectedIndex = next;
-    [self setNeedsLayout:YES];
-    if (animate && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        CGFloat nextX = [self xForIndex:next];
-        CABasicAnimation *thumb = [CABasicAnimation animationWithKeyPath:@"position.x"];
-        thumb.fromValue = @(oldX);
-        thumb.toValue = @(nextX);
-        thumb.duration = 0.24;
-        thumb.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-        [_thumbLayer addAnimation:thumb forKey:@"effort-thumb"];
-    }
-}
-
-- (void)layout {
-    [super layout];
-    CGFloat left = 19;
-    CGFloat right = MAX(left, self.bounds.size.width - 19);
-    CGFloat centerY = NSMidY(self.bounds);
-    CGFloat selectedX = [self xForIndex:self.selectedIndex];
-    _thumbLayer.hidden = self.selectedIndex < 0;
-    _fillLayer.hidden = self.selectedIndex < 0;
-    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        _trackLayer.backgroundColor = PTWarmChipColor().CGColor;
-        _fillLayer.backgroundColor = PTWarmAccentColor().CGColor;
-        _thumbLayer.backgroundColor = PTWarmCardColor().CGColor;
-        _thumbLayer.borderColor = PTWarmBorderColor().CGColor;
-        for (CALayer *dot in _dotLayers) dot.backgroundColor = PTWarmBorderColor().CGColor;
-    }];
-    _trackLayer.frame = CGRectMake(left, centerY - 4, right - left, 8);
-    _trackLayer.cornerRadius = 4;
-    _fillLayer.frame = CGRectMake(left, centerY - 4, MAX(0, selectedX - left), 8);
-    _fillLayer.cornerRadius = 4;
-    for (NSInteger index = 0; index < 5; index++) {
-        CALayer *dot = _dotLayers[index];
-        dot.frame = CGRectMake([self xForIndex:index] - 3, centerY - 3, 6, 6);
-        dot.cornerRadius = 3;
-    }
-    _thumbLayer.bounds = CGRectMake(0, 0, 34, 34);
-    _thumbLayer.position = CGPointMake(selectedX, centerY);
-    _thumbLayer.cornerRadius = 17;
-    _thumbLayer.borderWidth = 0.7;
-    _thumbLayer.shadowColor = NSColor.blackColor.CGColor;
-    _thumbLayer.shadowOpacity = 0.12;
-    _thumbLayer.shadowRadius = 5;
-    _thumbLayer.shadowOffset = CGSizeMake(0, -1);
-}
-
-- (void)updateSelectionForPoint:(NSPoint)point {
-    CGFloat x = point.x;
-    CGFloat left = 19;
-    CGFloat width = MAX(1, self.bounds.size.width - 38);
-    NSInteger index = lround((x - left) / width * 4.0);
-    index = MIN(4, MAX(0, index));
-    self.selectedIndex = index;
-}
-
-- (void)sendDeferredActionFromIndex:(NSInteger)startIndex {
-    (void)startIndex;
-    NSInteger requestedIndex = self.selectedIndex;
-    if (self.action && self.target) {
-        // Capture the gesture value before asynchronous configuration refreshes can move the thumb.
-        __weak typeof(self) weakSelf = self;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            PTEffortSlider *self = weakSelf;
-            if (self && self.action && self.target) {
-                self.submittedIndex = requestedIndex;
-                [self sendAction:self.action to:self.target];
-            }
-        });
-    }
-}
-
-- (void)handleEffortClick:(NSClickGestureRecognizer *)recognizer {
-    if (recognizer.state != NSGestureRecognizerStateEnded) return;
-    NSInteger startIndex = self.selectedIndex;
-    [self updateSelectionForPoint:[recognizer locationInView:self]];
-    [self sendDeferredActionFromIndex:startIndex];
-}
-
-- (void)handleEffortPan:(NSPanGestureRecognizer *)recognizer {
-    NSPoint point = [recognizer locationInView:self];
-    switch (recognizer.state) {
-        case NSGestureRecognizerStateBegan:
-            _trackingStartIndex = self.selectedIndex;
-            [self updateSelectionForPoint:point];
-            break;
-        case NSGestureRecognizerStateChanged:
-            [self updateSelectionForPoint:point];
-            break;
-        case NSGestureRecognizerStateEnded:
-            [self updateSelectionForPoint:point];
-            [self sendDeferredActionFromIndex:_trackingStartIndex];
-            break;
-        case NSGestureRecognizerStateCancelled:
-        case NSGestureRecognizerStateFailed:
-            self.selectedIndex = _trackingStartIndex;
-            break;
-        default:
-            break;
-    }
-}
-
-- (void)viewDidChangeEffectiveAppearance {
-    [super viewDidChangeEffectiveAppearance];
-    [self setNeedsLayout:YES];
-}
 @end
 
 @implementation PTAppearanceSurfaceView
@@ -882,14 +386,20 @@ static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
 
 - (void)updateLayer {
     [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        NSColor *background = PTWarmCanvasColor();
+        NSColor *background = PTThemeColor(PTThemeRoleCanvas);
         NSColor *border = NSColor.clearColor;
         if (self.surfaceStyle == PTAppearanceSurfaceStyleCard) {
-            background = PTWarmCardColor();
-            border = PTWarmBorderColor();
+            background = PTThemeColor(PTThemeRoleSurface);
+            border = PTThemeColor(PTThemeRoleBorder);
         } else if (self.surfaceStyle == PTAppearanceSurfaceStyleChip) {
-            background = PTWarmChipColor();
-            border = PTWarmBorderColor();
+            background = PTThemeColor(PTThemeRoleSurfaceSecondary);
+            border = PTThemeColor(PTThemeRoleBorderSecondary);
+        } else if (self.surfaceStyle == PTAppearanceSurfaceStyleSurface) {
+            background = PTThemeColor(PTThemeRoleSurface);
+            border = NSColor.clearColor;
+        } else if (self.surfaceStyle == PTAppearanceSurfaceStyleHairline) {
+            background = PTThemeColor(PTThemeRoleBorder);
+            border = NSColor.clearColor;
         }
         self.layer.backgroundColor = background.CGColor;
         self.layer.borderColor = border.CGColor;
@@ -906,61 +416,6 @@ static PTAnimatedButton *PTWarmButton(NSString *title, id target, SEL action) {
 // 细长的圆角进度条：套餐额度、成本占比这类"一眼看出占比"的场合用它，
 // 不用每次都从一堆文字里心算百分比。fillLayer 宽度按 bounds 手算，
 // 不依赖 Auto Layout multiplier（multiplier 建好之后不能改，进度变化时得整条重建，麻烦）。
-@interface PTMeterView : NSView
-@property(nonatomic) CGFloat progress; // 0.0 – 1.0
-@property(nonatomic, strong) NSColor *fillColor;
-@end
-
-@implementation PTMeterView {
-    CALayer *_trackLayer;
-    CALayer *_fillLayer;
-}
-
-- (instancetype)initWithFrame:(NSRect)frameRect {
-    self = [super initWithFrame:frameRect];
-    if (self) {
-        self.wantsLayer = YES;
-        _trackLayer = [CALayer layer];
-        _fillLayer = [CALayer layer];
-        [self.layer addSublayer:_trackLayer];
-        [self.layer addSublayer:_fillLayer];
-        _fillColor = NSColor.controlAccentColor;
-    }
-    return self;
-}
-
-- (void)setProgress:(CGFloat)progress {
-    _progress = MIN(1.0, MAX(0.0, progress));
-    [self setNeedsLayout:YES];
-}
-
-- (void)setFillColor:(NSColor *)fillColor {
-    _fillColor = fillColor;
-    [self setNeedsLayout:YES];
-}
-
-- (void)layout {
-    [super layout];
-    CGFloat height = self.bounds.size.height;
-    CGFloat radius = height / 2.0;
-    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        _trackLayer.backgroundColor = PTWarmChipColor().CGColor;
-        _fillLayer.backgroundColor = self.fillColor.CGColor;
-    }];
-    _trackLayer.frame = self.bounds;
-    _trackLayer.cornerRadius = radius;
-    CGFloat fillWidth = MAX(height, self.bounds.size.width * self.progress);
-    _fillLayer.frame = CGRectMake(0, 0, self.progress > 0 ? fillWidth : 0, height);
-    _fillLayer.cornerRadius = radius;
-}
-
-- (void)viewDidChangeEffectiveAppearance {
-    [super viewDidChangeEffectiveAppearance];
-    [self setNeedsLayout:YES];
-}
-
-@end
-
 static NSString *PTShortText(NSString *value, NSUInteger limit) {
     if (![value isKindOfClass:NSString.class]) return @"";
     // firstPrompt 有时是几十 KB 的粘贴内容；标题预览只处理前 400 个字符，
@@ -980,12 +435,6 @@ static NSString *PTShortText(NSString *value, NSUInteger limit) {
     // 用 rangeOfComposedCharacterSequenceAtIndex 对齐到完整字符边界。
     NSRange lastCharRange = [trimmed rangeOfComposedCharacterSequenceAtIndex:limit - 1];
     return [[trimmed substringToIndex:NSMaxRange(lastCharRange)] stringByAppendingString:@"…"];
-}
-
-static NSString *PTCompactTokenCount(NSUInteger tokens) {
-    if (tokens >= 999500) return [NSString stringWithFormat:@"%.1fM", tokens / 1000000.0];
-    if (tokens >= 1000) return [NSString stringWithFormat:@"%.0fK", tokens / 1000.0];
-    return [NSString stringWithFormat:@"%lu", (unsigned long)tokens];
 }
 
 static NSUInteger PTTokenCountFromCompactString(NSString *value) {
@@ -1077,23 +526,6 @@ static NSDictionary *PTContextSnapshotFromText(NSString *text) {
         }];
     }
     return @{ @"used": @(used), @"window": @(window), @"categories": categories };
-}
-
-static NSString *PTMarkdownQuote(NSString *text) {
-    if (![text isKindOfClass:NSString.class] || text.length == 0) return nil;
-    NSString *normalized = [[text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
-        stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
-    if ([[normalized stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] length] == 0) {
-        return nil;
-    }
-    normalized = [normalized stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
-    NSMutableArray<NSString *> *quoted = [NSMutableArray array];
-    for (NSString *line in [normalized componentsSeparatedByString:@"\n"]) {
-        [quoted addObject:[@"> " stringByAppendingString:line]];
-    }
-    // 末尾不加空的 >，直接用换行符结束
-    return [[NSString stringWithFormat:@"> Attached context:\n%@\n\n",
-        [quoted componentsJoinedByString:@"\n"]] copy];
 }
 
 static NSString *PTTextFromMessageContent(id content) {
@@ -1295,8 +727,6 @@ static void PTCollectTranscriptDirectories(id value,
 @implementation PTSessionInfo
 @end
 
-static NSString *const PTSessionProjectCollapsedDefaultsKey =
-    @"PTCollapsedSessionProjectPaths";
 static NSString *const PTUnknownSessionProjectKey =
     @"prettyterm://unknown-session-project";
 
@@ -1586,32 +1016,45 @@ static PTSessionInfo *PTParseSessionData(
         } else if ([type isEqual:@"assistant"]) {
             NSDictionary *message = object[@"message"];
             if (![message isKindOfClass:NSDictionary.class] || ![message[@"role"] isEqual:@"assistant"]) continue;
-            NSString *model = message[@"model"];
+            NSString *model = [message[@"model"] isKindOfClass:NSString.class] ? message[@"model"] : @"";
             if ([model isEqual:@"<synthetic>"]) continue;
             NSDictionary *usage = message[@"usage"];
             NSString *usageKey = object[@"requestId"] ?: message[@"id"];
-            if ([usage isKindOfClass:NSDictionary.class] && usageKey.length > 0 &&
-                ![usageMessageKeys containsObject:usageKey]) {
-                [usageMessageKeys addObject:usageKey];
-                BOOL supported = NO;
+            NSDictionary *rowUsage = nil;
+            if ([usage isKindOfClass:NSDictionary.class]) {
+                BOOL costSupported = NO;
                 NSDate *pricingDate = PTDateFromClaudeAPIString(object[@"timestamp"]) ?: NSDate.date;
-                double cost = PTAPIEquivalentCostForUsage(model ?: @"", usage, pricingDate, &supported);
-                if (supported) {
-                    session.apiEquivalentCostUSD += cost;
-                    session.apiCostAvailable = YES;
+                PTAPIUsageCost rowCost = PTAPIEquivalentCostBreakdownForUsage(model, usage, pricingDate, &costSupported);
+                unsigned long long inTok = [usage[@"input_tokens"] unsignedLongLongValue];
+                unsigned long long outTok = [usage[@"output_tokens"] unsignedLongLongValue];
+                unsigned long long cacheReadTok = [usage[@"cache_read_input_tokens"] unsignedLongLongValue];
+                unsigned long long cacheWriteTok = [usage[@"cache_creation_input_tokens"] unsignedLongLongValue];
+                NSMutableDictionary *meta = [@{
+                    @"usageId": usageKey.length ? usageKey : (object[@"uuid"] ?: @""),
+                    @"outputTokens": @(outTok),
+                    @"totalTokens": @(inTok + outTok + cacheReadTok + cacheWriteTok)
+                } mutableCopy];
+                if (costSupported) meta[@"costUSD"] = @(rowCost.total);
+                rowUsage = meta;
+
+                if (usageKey.length > 0 && ![usageMessageKeys containsObject:usageKey]) {
+                    [usageMessageKeys addObject:usageKey];
                     NSString *modelKey = model.length ? model : @"unknown";
                     NSMutableDictionary *entry = modelBreakdown[modelKey];
-                    if (!entry) {
-                        entry = [NSMutableDictionary dictionaryWithDictionary:@{
-                            @"input": @0, @"output": @0, @"cacheRead": @0, @"cacheWrite": @0, @"cost": @0.0
-                        }];
-                        modelBreakdown[modelKey] = entry;
+                    if (!entry) modelBreakdown[modelKey] = entry = [NSMutableDictionary dictionary];
+                    entry[@"input"] = @([entry[@"input"] unsignedLongLongValue] + inTok);
+                    entry[@"output"] = @([entry[@"output"] unsignedLongLongValue] + outTok);
+                    entry[@"cacheRead"] = @([entry[@"cacheRead"] unsignedLongLongValue] + cacheReadTok);
+                    entry[@"cacheWrite"] = @([entry[@"cacheWrite"] unsignedLongLongValue] + cacheWriteTok);
+                    if (costSupported) {
+                        session.apiEquivalentCostUSD += rowCost.total;
+                        session.apiCostAvailable = YES;
+                        entry[@"cost"] = @([entry[@"cost"] doubleValue] + rowCost.total);
+                        entry[@"inputCost"] = @([entry[@"inputCost"] doubleValue] + rowCost.input);
+                        entry[@"outputCost"] = @([entry[@"outputCost"] doubleValue] + rowCost.output);
+                        entry[@"cacheReadCost"] = @([entry[@"cacheReadCost"] doubleValue] + rowCost.cacheRead);
+                        entry[@"cacheWriteCost"] = @([entry[@"cacheWriteCost"] doubleValue] + rowCost.cacheWrite);
                     }
-                    entry[@"input"] = @([entry[@"input"] unsignedLongLongValue] + [usage[@"input_tokens"] unsignedLongLongValue]);
-                    entry[@"output"] = @([entry[@"output"] unsignedLongLongValue] + [usage[@"output_tokens"] unsignedLongLongValue]);
-                    entry[@"cacheRead"] = @([entry[@"cacheRead"] unsignedLongLongValue] + [usage[@"cache_read_input_tokens"] unsignedLongLongValue]);
-                    entry[@"cacheWrite"] = @([entry[@"cacheWrite"] unsignedLongLongValue] + [usage[@"cache_creation_input_tokens"] unsignedLongLongValue]);
-                    entry[@"cost"] = @([entry[@"cost"] doubleValue] + cost);
                 }
             }
             if ([object[@"isSidechain"] boolValue] || [object[@"isApiErrorMessage"] boolValue]) continue;
@@ -1659,13 +1102,15 @@ static PTSessionInfo *PTParseSessionData(
                         continue;
                     }
                     [messageKeys addObject:key];
-                    [messages addObject:@{
+                    NSMutableDictionary *textEvent = [@{
                         @"messageKey": key,
                         @"text": text,
                         @"timestamp": object[@"timestamp"] ?: @"",
                         @"model": model ?: @"Claude",
                         @"role": @"assistant"
-                    }];
+                    } mutableCopy];
+                    if (rowUsage) [textEvent addEntriesFromDictionary:rowUsage];
+                    [messages addObject:textEvent];
                     blockIndex++;
                     continue;
                 }
@@ -1673,6 +1118,9 @@ static PTSessionInfo *PTParseSessionData(
                 NSDictionary *event = PTEventFromAssistantBlock(
                     block, key, object[@"timestamp"] ?: @"", model ?: @"Claude");
                 if (event) {
+                    if (rowUsage && [event isKindOfClass:NSMutableDictionary.class]) {
+                        [(NSMutableDictionary *)event addEntriesFromDictionary:rowUsage];
+                    }
                     [messageKeys addObject:key];
                     [messages addObject:event];
                     NSString *toolUseId = [event[@"toolUseId"] isKindOfClass:NSString.class]
@@ -2046,6 +1494,7 @@ static __attribute__((unused)) PTSessionInfo *PTParseSessionAppending(
 @property(nonatomic, copy) void (^outputObserved)(NSString *chunk);
 @property(nonatomic, copy) dispatch_block_t turnCompleted;
 @property(nonatomic, copy) dispatch_block_t streamChanged;
+@property(nonatomic, copy) dispatch_block_t tasksChanged;
 @property(nonatomic, copy) void (^usageChanged)(NSDictionary *payload, NSString *error);
 @property(nonatomic, copy) dispatch_block_t modelChanged;
 @property(nonatomic, readonly) NSString *currentModel;
@@ -2059,6 +1508,7 @@ static __attribute__((unused)) PTSessionInfo *PTParseSessionAppending(
 @property(nonatomic, copy) void (^toolRequestCancelled)(NSString *requestID);
 - (void)answerToolRequest:(NSString *)requestID response:(NSDictionary *)response;
 @property(nonatomic, readonly) NSDictionary *streamPayload;
+@property(nonatomic, readonly) NSDictionary *tasksPayload;
 @property(nonatomic, readonly) BOOL responding;
 @property(nonatomic, readonly) NSString *sessionID;
 @property(nonatomic, readonly) BOOL running;
@@ -2066,7 +1516,6 @@ static __attribute__((unused)) PTSessionInfo *PTParseSessionAppending(
 - (void)connectToSession:(PTSessionInfo *)session;
 - (void)connectToSession:(PTSessionInfo *)session completion:(void (^)(BOOL))completion;
 - (void)refreshUsage;
-- (void)refreshSettingsWithCompletion:(void (^)(BOOL))completion;
 - (void)startNewSession:(PTSessionInfo *)session prompt:(NSString *)prompt;
 - (void)startNewSessionInDirectory:(NSString *)directory;
 - (BOOL)sendMessage:(NSString *)message;
@@ -2074,6 +1523,10 @@ static __attribute__((unused)) PTSessionInfo *PTParseSessionAppending(
 - (void)submitMessage:(NSString *)message withImagePNGs:(NSArray<NSData *> *)imagePNGs
           completion:(void (^)(BOOL))completion;
 - (BOOL)sendEscape;
+- (void)backgroundTaskForToolUseID:(NSString *)toolUseID
+                       completion:(void (^)(NSDictionary *, NSString *))completion;
+- (void)readTaskOutput:(NSString *)taskID
+             completion:(void (^)(NSDictionary *, NSString *))completion;
 - (void)stop;
 - (void)reconcileStreamWithMessages:(NSArray<NSDictionary *> *)messages;
 @end
@@ -2156,6 +1609,23 @@ static NSDictionary<NSString *, NSString *> *PTGitReviewSnapshotForDirectory(NSS
 }
 
 
+static NSString *PTAttachmentThumbnail(NSData *png) {
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)png, NULL);
+    if (!source) return @"";
+    NSDictionary *options = @{
+        (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+        (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @160
+    };
+    CGImageRef thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+    CFRelease(source);
+    if (!thumbnail) return @"";
+    NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithCGImage:thumbnail];
+    CGImageRelease(thumbnail);
+    NSData *bytes = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    return bytes.length ? [@"data:image/png;base64," stringByAppendingString:[bytes base64EncodedStringWithOptions:0]] : @"";
+}
+
 static NSData *PTPNGDataForImage(NSImage *image) {
     if (!image.isValid) return nil;
     NSData *tiff = image.TIFFRepresentation;
@@ -2177,6 +1647,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     return [representation representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
 }
 
+static NSString *const PTSessionModelOverridesKey = @"PTSessionModelOverrides";
+
 @implementation PTClaudeBridge {
     NSString *_sessionID;
     NSString *_connectingSessionID;
@@ -2196,6 +1668,10 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSDictionary *_usagePayload;
     NSString *_currentModel;
     NSString *_currentEffort;
+    NSUInteger _settingsReadRevision;
+    NSUInteger _appliedSettingsRevision;
+    NSUInteger _modelChangeRevision;
+    NSUInteger _confirmedModelChangeRevision;
     NSString *_permissionMode;
     NSArray<NSDictionary *> *_commands;
     NSMutableDictionary *_pendingQueries;
@@ -2215,6 +1691,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSMutableDictionary<NSNumber *, NSMutableDictionary *> *_streamBlocks;
     NSMutableDictionary<NSString *, NSDictionary *> *_streamQuestions;
     NSSet<NSString *> *_persistedStreamKeys;
+    NSDictionary<NSString *, NSDictionary *> *_persistedStreamQuestions;
     NSString *_streamMessageID;
     NSString *_streamModel;
     NSNumber *_streamBlockIndex;
@@ -2223,6 +1700,9 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSString *_activeWorkID;
     BOOL _streamNotificationScheduled;
     NSUInteger _streamRevision;
+    NSString *_streamGeneration;
+    NSMutableDictionary<NSString *, NSDictionary *> *_foregroundTasks;
+    NSArray<NSDictionary *> *_backgroundTasks;
 }
 
 - (instancetype)init {
@@ -2239,7 +1719,10 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         _streamRecords = [NSMutableDictionary dictionary];
         _streamBlocks = [NSMutableDictionary dictionary];
         _streamQuestions = [NSMutableDictionary dictionary];
+        _streamGeneration = NSUUID.UUID.UUIDString;
         _workingMessageIDs = [NSMutableSet set];
+        _foregroundTasks = [NSMutableDictionary dictionary];
+        _backgroundTasks = @[];
     }
     return self;
 }
@@ -2255,11 +1738,89 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 - (BOOL)compacting { return _compacting; }
 - (NSNumber *)contextTokens { return _contextTokens; }
 
+- (NSDictionary *)tasksPayload {
+    return @{
+        @"sessionId": _sessionID ?: @"",
+        @"generation": _streamGeneration,
+        @"foreground": _foregroundTasks.allValues,
+        @"background": _backgroundTasks
+    };
+}
+
+- (void)clearLiveTasks {
+    BOOL changed = _foregroundTasks.count || _backgroundTasks.count;
+    [_foregroundTasks removeAllObjects];
+    _backgroundTasks = @[];
+    if (changed && self.tasksChanged) self.tasksChanged();
+}
+
+static NSDictionary *PTClaudeTaskSummary(NSDictionary *task) {
+    if (![task isKindOfClass:NSDictionary.class] || ![task[@"task_id"] isKindOfClass:NSString.class]) return nil;
+    NSMutableDictionary *summary = [NSMutableDictionary dictionaryWithObject:task[@"task_id"] forKey:@"task_id"];
+    for (NSString *key in @[@"run_id", @"tool_use_id", @"task_type", @"description"]) {
+        if ([task[key] isKindOfClass:NSString.class]) summary[key] = task[key];
+    }
+    return summary;
+}
+
+- (void)consumeTaskEvent:(NSDictionary *)frame {
+    NSString *subtype = frame[@"subtype"];
+    if ([subtype isEqual:@"background_tasks_changed"]) {
+        NSArray *tasks = frame[@"tasks"];
+        if (![tasks isKindOfClass:NSArray.class]) return;
+        NSMutableArray *snapshot = [NSMutableArray arrayWithCapacity:tasks.count];
+        BOOL changed = NO;
+        for (NSDictionary *task in tasks) {
+            NSDictionary *summary = PTClaudeTaskSummary(task);
+            if (!summary) continue;
+            [snapshot addObject:summary];
+            NSString *taskID = summary[@"task_id"];
+            NSDictionary *foreground = _foregroundTasks[taskID];
+            NSString *runID = summary[@"run_id"];
+            NSString *foregroundRunID = foreground[@"run_id"];
+            if (foreground && (!runID || !foregroundRunID || [runID compare:foregroundRunID] != NSOrderedAscending)) {
+                [_foregroundTasks removeObjectForKey:taskID];
+                changed = YES;
+            }
+        }
+        changed |= ![_backgroundTasks isEqualToArray:snapshot];
+        _backgroundTasks = [snapshot copy];
+        if (changed && self.tasksChanged) self.tasksChanged();
+        return;
+    }
+    if (![@[@"task_started", @"task_updated", @"task_notification"] containsObject:subtype ?: @""]) return;
+    NSString *taskID = [frame[@"task_id"] isKindOfClass:NSString.class] ? frame[@"task_id"] : nil;
+    if (!taskID.length) return;
+    NSDictionary *previous = _foregroundTasks[taskID];
+    NSString *runID = frame[@"run_id"];
+    NSString *previousRunID = previous[@"run_id"];
+    if (runID.length && previousRunID.length && [runID compare:previousRunID] == NSOrderedAscending) return;
+    if ([subtype isEqual:@"task_started"]) {
+        NSString *type = frame[@"task_type"];
+        if ([frame[@"is_backgrounded"] boolValue] || ![frame[@"tool_use_id"] length] ||
+            ![@[@"local_bash", @"local_agent"] containsObject:type ?: @""]) return;
+        for (NSDictionary *task in _backgroundTasks) {
+            if ([task[@"task_id"] isEqual:taskID] && (!runID || !task[@"run_id"] || [task[@"run_id"] isEqual:runID])) return;
+        }
+        NSDictionary *summary = PTClaudeTaskSummary(frame);
+        if ([previous isEqualToDictionary:summary]) return;
+        _foregroundTasks[taskID] = summary;
+    } else {
+        if (!previous || (runID.length && previousRunID.length && ![runID isEqual:previousRunID])) return;
+        NSDictionary *patch = frame[@"patch"];
+        NSString *status = patch[@"status"];
+        if (![subtype isEqual:@"task_notification"] && ![patch[@"is_backgrounded"] boolValue] &&
+            ![@[@"completed", @"failed", @"killed", @"stopped"] containsObject:status ?: @""]) return;
+        [_foregroundTasks removeObjectForKey:taskID];
+    }
+    if (self.tasksChanged) self.tasksChanged();
+}
+
 - (NSDictionary *)streamPayload {
     NSMutableArray *messages = [NSMutableArray array];
     for (NSString *key in _streamOrder) if (_streamRecords[key]) [messages addObject:_streamRecords[key]];
     return @{@"sessionId": _sessionID ?: @"", @"messages": messages,
-        @"questionUpdates": _streamQuestions.allValues,
+        @"questionUpdates": _streamQuestions.allValues, @"generation": _streamGeneration,
         @"active": @(_responding), @"compacting": @(_compacting), @"revision": @(_streamRevision)};
 }
 
@@ -2278,22 +1839,27 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 - (void)reconcileStreamWithMessages:(NSArray<NSDictionary *> *)messages {
     NSMutableSet *keys = [NSMutableSet set];
+    NSMutableDictionary *questions = [NSMutableDictionary dictionary];
     BOOL changed = NO;
     for (NSDictionary *message in messages) {
         if (message[@"messageKey"]) [keys addObject:message[@"messageKey"]];
         if ([message[@"kind"] isEqual:@"question"] && [message[@"toolUseId"] length]) {
             NSString *toolID = message[@"toolUseId"];
-            if (([message[@"answered"] boolValue] || !_streamQuestions[toolID]) && ![message isEqual:_streamQuestions[toolID]]) {
-                _streamQuestions[toolID] = [message copy];
+            questions[toolID] = [message copy];
+            NSDictionary *live = _streamQuestions[toolID];
+            if (live && (![live[@"answered"] boolValue] || [message[@"answered"] boolValue])) {
+                [_streamQuestions removeObjectForKey:toolID];
                 changed = YES;
             }
         }
     }
     _persistedStreamKeys = keys;
+    _persistedStreamQuestions = questions;
     for (NSString *identity in [_streamOrder.array copy]) {
         NSDictionary *record = _streamRecords[identity];
+        NSString *toolID = record[@"toolUseId"];
         BOOL mergedQuestionResult = ![record[@"kind"] isEqual:@"question"] &&
-            [record[@"toolUseId"] length] && _streamQuestions[record[@"toolUseId"]];
+            toolID.length && (_streamQuestions[toolID] || _persistedStreamQuestions[toolID]);
         if (![keys containsObject:record[@"messageKey"]] && !mergedQuestionResult) continue;
         [_streamRecords removeObjectForKey:identity];
         [_streamOrder removeObject:identity];
@@ -2327,6 +1893,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
             @"messageKey": key, @"model": model ?: @"Claude"} mutableCopy];
     } else if (partial && [type isEqual:@"tool_use"]) {
         record = [@{@"role": @"tool", @"kind": @"tool", @"toolName": block[@"name"] ?: @"",
+            @"toolUseId": block[@"id"] ?: @"",
             @"text": block[@"partial_json"] ?: @"", @"messageKey": key} mutableCopy];
     } else {
         record = [PTEventFromAssistantBlock(block, key, @"", model ?: @"Claude") mutableCopy];
@@ -2421,7 +1988,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
                 (void)stop;
                 if (![block[@"type"] isEqual:@"tool_result"]) return;
                 NSString *toolID = block[@"tool_use_id"];
-                NSMutableDictionary *question = [self->_streamQuestions[toolID ?: @""] mutableCopy];
+                NSMutableDictionary *question = [(self->_streamQuestions[toolID ?: @""] ?:
+                    self->_persistedStreamQuestions[toolID ?: @""]) mutableCopy];
                 if (question) {
                     question[@"answered"] = @YES;
                     id result = frame[@"tool_use_result"] ?: frame[@"toolUseResult"];
@@ -2608,24 +2176,49 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         }];
 }
 
+- (void)backgroundTaskForToolUseID:(NSString *)toolUseID
+                       completion:(void (^)(NSDictionary *, NSString *))completion {
+    [self queryControl:@{@"subtype": @"background_tasks", @"tool_use_id": toolUseID}
+            completion:^(NSDictionary *body, NSString *error) {
+        if (error) { completion(nil, error); return; }
+        if (![body[@"backgrounded"] boolValue]) {
+            completion(nil, PTL(@"该命令已结束或已在后台", @"The command has finished or is already in the background"));
+            return;
+        }
+        completion(body, nil);
+    }];
+}
+
+- (void)readTaskOutput:(NSString *)taskID
+             completion:(void (^)(NSDictionary *, NSString *))completion {
+    [self queryControl:@{@"subtype": @"get_task_output", @"task_id": taskID} completion:completion];
+}
+
 - (void)refreshSettings {
     [self refreshSettingsWithCompletion:nil];
 }
 
-- (void)refreshSettingsWithCompletion:(void (^)(BOOL))completion {
+- (void)refreshSettingsWithCompletion:(void (^)(NSString *, BOOL))completion {
+    NSUInteger revision = ++_settingsReadRevision;
     __weak typeof(self) weakSelf = self;
     [self queryControl:@{@"subtype": @"get_settings"} completion:^(NSDictionary *body, NSString *error) {
         PTClaudeBridge *self = weakSelf;
         if (!self) return;
         NSDictionary *applied = [body[@"applied"] isKindOfClass:NSDictionary.class] ? body[@"applied"] : nil;
-        BOOL received = !error && [applied[@"model"] isKindOfClass:NSString.class] &&
+        NSString *model = !error && [applied[@"model"] isKindOfClass:NSString.class] ? applied[@"model"] : nil;
+        BOOL receivedEffort = !error &&
             ([applied[@"effort"] isKindOfClass:NSString.class] || applied[@"effort"] == NSNull.null);
-        self->_currentModel = received ? applied[@"model"] : nil;
-        // An explicit null means Claude has no named effective effort, not the previously selected level.
-        self->_currentEffort = received ? ([applied[@"effort"] isKindOfClass:NSString.class] ? applied[@"effort"] : @"") : nil;
-        if (!received) [self reportError:error ?: PTL(@"未读取到 Claude 当前配置", @"Could not read Claude's current settings")];
-        if (self.modelChanged) self.modelChanged();
-        if (completion) completion(received);
+        if (revision >= self->_appliedSettingsRevision && (model.length || receivedEffort)) {
+            self->_appliedSettingsRevision = revision;
+            if (model.length) self->_currentModel = [model copy];
+            // An explicit null means Claude has no named effective effort.
+            if (receivedEffort) self->_currentEffort = applied[@"effort"] == NSNull.null ? @"" : [applied[@"effort"] copy];
+            if (self.modelChanged) self.modelChanged();
+        }
+        if (!model.length && !receivedEffort) {
+            [self reportError:error ?: PTL(@"未读取到 Claude 当前配置", @"Could not read Claude's current settings")];
+        }
+        if (completion) completion(model, receivedEffort);
     }];
 }
 
@@ -2644,6 +2237,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 - (void)consumeFrame:(NSDictionary *)frame {
     [self consumeStreamFrame:frame];
     NSString *type = frame[@"type"];
+    if ([type isEqual:@"system"]) [self consumeTaskEvent:frame];
     if ([type isEqual:@"assistant"] && [frame[@"message"][@"model"] isEqual:@"<synthetic>"]) {
         [self showCommandOutput:PTTextFromMessageContent(frame[@"message"][@"content"])];
         return;
@@ -2736,7 +2330,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     } else if ([type isEqual:@"system"] && [frame[@"subtype"] isEqual:@"init"]) {
         NSString *model = frame[@"model"];
         if ([frame[@"permissionMode"] isKindOfClass:NSString.class]) _permissionMode = frame[@"permissionMode"];
-        if ([model isKindOfClass:NSString.class] && model.length) {
+        if (!_currentModel.length && [model isKindOfClass:NSString.class] && model.length) {
             _currentModel = [model copy];
             if (self.modelChanged) self.modelChanged();
         }
@@ -2781,6 +2375,10 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         }
     } else if ([type isEqual:@"result"]) {
         _compacting = NO;
+        if (!_responding && _foregroundTasks.count) {
+            [_foregroundTasks removeAllObjects];
+            if (self.tasksChanged) self.tasksChanged();
+        }
         [self notifyStreamChanged];
         if (_activeCommand.length && [frame[@"result"] isKindOfClass:NSString.class]) [self showCommandOutput:frame[@"result"]];
         _activeCommand = nil;
@@ -2821,6 +2419,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     [self consumeStreamFrame:@{@"type": @"result"}];
     _running = NO;
     _connectingSessionID = nil;
+    [self clearLiveTasks];
     NSString *message = _stderrText.length ? _stderrText :
         [NSString stringWithFormat:PTL(@"Claude 后台会话已结束（%d）", @"Claude background session ended (%d)"), _exitStatus];
     [self reportError:message];
@@ -2895,12 +2494,17 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     // 未保存模式时延续原有 Bypass；保存后按老师选择的模式启动，仍可随时切回 Bypass。
     NSString *launchMode = [configuredMode isKindOfClass:NSString.class] && configuredMode.length ? configuredMode : @"bypassPermissions";
     _permissionMode = launchMode;
-    _task.arguments = @[@"-lic", @"export TZ=UTC\nexec \"$(whence -p claude)\" \"$@\"",
+    NSMutableArray<NSString *> *arguments = [@[@"-lic", @"export TZ=UTC\nexec \"$(whence -p claude)\" \"$@\"",
         @"PrettyTerm", @"--allow-dangerously-skip-permissions", @"--permission-mode", launchMode,
         @"--permission-prompt-tool", @"stdio", @"--print",
         @"--input-format", @"stream-json", @"--output-format", @"stream-json",
         @"--verbose", @"--replay-user-messages", @"--include-partial-messages",
-        resume ? @"--resume" : @"--session-id", _sessionID];
+        resume ? @"--resume" : @"--session-id", _sessionID] mutableCopy];
+    if (resume) {
+        NSString *model = [NSUserDefaults.standardUserDefaults dictionaryForKey:PTSessionModelOverridesKey][_sessionID];
+        if (model.length) [arguments addObjectsFromArray:@[@"--model", model]];
+    }
+    _task.arguments = arguments;
     _task.standardInput = _inputPipe;
     _task.standardOutput = _outputPipe;
     _task.standardError = _errorPipe;
@@ -2998,6 +2602,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         if (mode) control = @{@"subtype": @"set_permission_mode", @"mode": mode};
     }
     if (control) {
+        NSString *requestedModel = control[@"model"];
+        NSUInteger modelRevision = requestedModel ? ++_modelChangeRevision : 0;
         __weak typeof(self) weakSelf = self;
         [self queryControl:control completion:^(NSDictionary *body, NSString *error) {
             PTClaudeBridge *self = weakSelf;
@@ -3015,8 +2621,32 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
                 if (self.modelChanged) self.modelChanged();
                 BOOL saved = mode.length > 0 && [self persistConfigurationForControl:control];
                 if (completion) completion(saved);
-            } else if (control[@"model"] || control[@"settings"][@"effortLevel"]) {
-                [self refreshSettingsWithCompletion:^(BOOL received) {
+            } else if (requestedModel || control[@"settings"][@"effortLevel"]) {
+                [self refreshSettingsWithCompletion:^(NSString *model, BOOL receivedEffort) {
+                    if (requestedModel && modelRevision < self->_confirmedModelChangeRevision) {
+                        if (completion) completion(NO);
+                        return;
+                    }
+                    BOOL received = requestedModel ? (model.length && [model isEqual:self->_currentModel]) : receivedEffort;
+                    if (requestedModel && received) {
+                        if ([requestedModel hasPrefix:@"claude-"] && ![requestedModel isEqual:model]) {
+                            [self reportError:[NSString stringWithFormat:PTL(
+                                @"请求切换至 %@，Claude 确认的模型是 %@",
+                                @"Requested %@; Claude confirmed %@"), requestedModel, model]];
+                            if (completion) completion(NO);
+                            return;
+                        }
+                        self->_confirmedModelChangeRevision = modelRevision;
+                        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+                        NSMutableDictionary *overrides = [[defaults dictionaryForKey:PTSessionModelOverridesKey] mutableCopy]
+                            ?: [NSMutableDictionary dictionary];
+                        if ([requestedModel isEqual:@"default"]) [overrides removeObjectForKey:self->_sessionID];
+                        else overrides[self->_sessionID] = model;
+                        [defaults setObject:overrides forKey:PTSessionModelOverridesKey];
+                    }
+                    if (!received && !self.lastSendError) {
+                        [self reportError:PTL(@"Claude 未确认所请求的配置", @"Claude did not confirm the requested setting")];
+                    }
                     BOOL saved = received && [self persistConfigurationForControl:control];
                     if (completion) completion(saved);
                 }];
@@ -3079,7 +2709,10 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     [_streamRecords removeAllObjects];
     [_streamBlocks removeAllObjects];
     [_streamQuestions removeAllObjects];
+    _streamGeneration = NSUUID.UUID.UUIDString;
+    [self clearLiveTasks];
     _persistedStreamKeys = nil;
+    _persistedStreamQuestions = nil;
     [self notifyStreamChanged];
     _connectingSessionID = nil;
     _usageRequestID = nil;
@@ -3113,496 +2746,40 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 @end
 
-@interface PTSessionCellView : NSTableCellView
-@property(nonatomic, strong) NSView *activityDot;
-@property(nonatomic, strong) NSTextField *titleLabel;
-@property(nonatomic, strong) NSTextField *detailLabel;
-@property(nonatomic, strong) NSTextField *timeLabel;
-- (void)configure:(PTSessionInfo *)session;
-@end
-
-@interface PTSessionProjectCellView : NSTableCellView
-@property(nonatomic, strong) PTAnimatedButton *clickTarget;
-@property(nonatomic, strong) NSImageView *folderImageView;
-@property(nonatomic, strong) NSTextField *titleLabel;
-@property(nonatomic, strong) NSTextField *countLabel;
-@property(nonatomic, strong) NSImageView *disclosureImageView;
-- (void)configureWithProjectKey:(NSString *)projectKey
-                          title:(NSString *)title
-                   sessionCount:(NSUInteger)sessionCount
-                      collapsed:(BOOL)collapsed
-                         target:(id)target
-                         action:(SEL)action;
-@end
-
-@interface PTSessionRowView : NSTableRowView
-@end
-
-@implementation PTSessionRowView
-- (void)drawSelectionInRect:(NSRect)dirtyRect {
-    if (!self.selected) return;
-    NSRect selectionRect = NSInsetRect(self.bounds, 5, 2);
-    NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:selectionRect xRadius:11 yRadius:11];
-    [[NSColor colorWithSRGBRed:0.16 green:0.62 blue:0.66 alpha:0.14] setFill];
-    [path fill];
-    [[NSColor colorWithSRGBRed:0.16 green:0.62 blue:0.66 alpha:0.24] setStroke];
-    path.lineWidth = 1;
-    [path stroke];
-}
-@end
-
-@implementation PTSessionProjectCellView
-
-- (instancetype)initWithFrame:(NSRect)frameRect {
-    self = [super initWithFrame:frameRect];
-    if (!self) return nil;
-
-    self.clickTarget = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    self.clickTarget.translatesAutoresizingMaskIntoConstraints = NO;
-    self.clickTarget.title = @"";
-    self.clickTarget.cornerRadius = 10;
-    self.clickTarget.fillColor = NSColor.clearColor;
-    self.clickTarget.hoverFillColor = PTWarmChipColor();
-    self.clickTarget.pressedFillColor = PTWarmBorderColor();
-    [self addSubview:self.clickTarget];
-
-    self.folderImageView = [[NSImageView alloc] initWithFrame:NSZeroRect];
-    self.folderImageView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.folderImageView.imageScaling = NSImageScaleProportionallyDown;
-    self.folderImageView.contentTintColor = NSColor.secondaryLabelColor;
-    [self addSubview:self.folderImageView];
-
-    self.titleLabel = [NSTextField labelWithString:@""];
-    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.titleLabel.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
-    self.titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    [self addSubview:self.titleLabel];
-
-    self.countLabel = [NSTextField labelWithString:@""];
-    self.countLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.countLabel.font = [NSFont monospacedDigitSystemFontOfSize:9.5
-                                                           weight:NSFontWeightMedium];
-    self.countLabel.textColor = NSColor.tertiaryLabelColor;
-    self.countLabel.alignment = NSTextAlignmentRight;
-    [self addSubview:self.countLabel];
-
-    self.disclosureImageView = [[NSImageView alloc] initWithFrame:NSZeroRect];
-    self.disclosureImageView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.disclosureImageView.imageScaling = NSImageScaleProportionallyDown;
-    self.disclosureImageView.contentTintColor = PTWarmAccentColor();
-    [self addSubview:self.disclosureImageView];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.clickTarget.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:3],
-        [self.clickTarget.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-3],
-        [self.clickTarget.topAnchor constraintEqualToAnchor:self.topAnchor constant:2],
-        [self.clickTarget.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-2],
-        [self.folderImageView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:14],
-        [self.folderImageView.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.folderImageView.widthAnchor constraintEqualToConstant:17],
-        [self.folderImageView.heightAnchor constraintEqualToConstant:17],
-        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.folderImageView.trailingAnchor constant:8],
-        [self.titleLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.countLabel.leadingAnchor constant:-6],
-        [self.disclosureImageView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-13],
-        [self.disclosureImageView.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.disclosureImageView.widthAnchor constraintEqualToConstant:11],
-        [self.disclosureImageView.heightAnchor constraintEqualToConstant:11],
-        [self.countLabel.trailingAnchor constraintEqualToAnchor:self.disclosureImageView.leadingAnchor constant:-6],
-        [self.countLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-        [self.countLabel.widthAnchor constraintGreaterThanOrEqualToConstant:18]
-    ]];
-    return self;
-}
-
-- (NSView *)hitTest:(NSPoint)point {
-    return NSPointInRect(point, self.bounds) ? self.clickTarget : nil;
-}
-
-- (void)configureWithProjectKey:(NSString *)projectKey
-                          title:(NSString *)title
-                   sessionCount:(NSUInteger)sessionCount
-                      collapsed:(BOOL)collapsed
-                         target:(id)target
-                         action:(SEL)action {
-    self.titleLabel.stringValue = title ?: @"";
-    self.countLabel.stringValue = [NSString stringWithFormat:@"%lu", (unsigned long)sessionCount];
-    self.clickTarget.target = target;
-    self.clickTarget.action = action;
-    self.clickTarget.identifier = projectKey;
-    self.clickTarget.toolTip = collapsed
-        ? PTL(@"展开项目会话", @"Expand project conversations")
-        : PTL(@"折叠项目会话", @"Collapse project conversations");
-    self.folderImageView.image = [NSImage imageWithSystemSymbolName:@"folder"
-                                          accessibilityDescription:nil];
-    self.disclosureImageView.image = [NSImage
-        imageWithSystemSymbolName:(collapsed ? @"chevron.right" : @"chevron.down")
-        accessibilityDescription:nil];
-}
-@end
-
-@implementation PTSessionCellView
-
-- (instancetype)initWithFrame:(NSRect)frameRect {
-    self = [super initWithFrame:frameRect];
-    if (self) {
-        self.activityDot = [[NSView alloc] initWithFrame:NSZeroRect];
-        self.activityDot.translatesAutoresizingMaskIntoConstraints = NO;
-        self.activityDot.wantsLayer = YES;
-        self.activityDot.layer.cornerRadius = 4.5;
-        [self addSubview:self.activityDot];
-
-        self.titleLabel = [NSTextField labelWithString:@""];
-        self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        self.titleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
-        self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-        [self addSubview:self.titleLabel];
-
-        self.detailLabel = [NSTextField labelWithString:@""];
-        self.detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        self.detailLabel.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-        self.detailLabel.textColor = NSColor.secondaryLabelColor;
-        self.detailLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        [self addSubview:self.detailLabel];
-
-        self.timeLabel = [NSTextField labelWithString:@""];
-        self.timeLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        self.timeLabel.font = [NSFont monospacedDigitSystemFontOfSize:9.5 weight:NSFontWeightRegular];
-        self.timeLabel.textColor = NSColor.tertiaryLabelColor;
-        self.timeLabel.alignment = NSTextAlignmentRight;
-        [self addSubview:self.timeLabel];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [self.activityDot.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:20],
-            [self.activityDot.topAnchor constraintEqualToAnchor:self.topAnchor constant:17],
-            [self.activityDot.widthAnchor constraintEqualToConstant:9],
-            [self.activityDot.heightAnchor constraintEqualToConstant:9],
-            [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.activityDot.trailingAnchor constant:9],
-            [self.titleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:10],
-            [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.timeLabel.leadingAnchor constant:-6],
-            [self.timeLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10],
-            [self.timeLabel.centerYAnchor constraintEqualToAnchor:self.titleLabel.centerYAnchor],
-            [self.timeLabel.widthAnchor constraintLessThanOrEqualToConstant:58],
-            [self.detailLabel.leadingAnchor constraintEqualToAnchor:self.titleLabel.leadingAnchor],
-            [self.detailLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10],
-            [self.detailLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:5]
-        ]];
-    }
-    return self;
-}
-
-- (void)configure:(PTSessionInfo *)session {
-    self.titleLabel.stringValue = session.title ?: PTL(@"未命名会话", @"Untitled conversation");
-    NSString *folder = session.cwd.lastPathComponent.length ? session.cwd.lastPathComponent : session.cwd;
-    // folder 为 @"" 时不是 nil，?: 不会生效，得显式判断 length 才能落到"未知目录"
-    self.detailLabel.stringValue = [NSString stringWithFormat:PTL(@"%@ · %lu 轮对话", @"%@ · %lu turns"),
-        folder.length ? folder : PTL(@"未知目录", @"Unknown directory"),
-        (unsigned long)PTSessionTurnCount(session)];
-    NSTimeInterval age = -session.modifiedAt.timeIntervalSinceNow;
-    BOOL active = age < 600;
-    self.activityDot.layer.backgroundColor =
-        (active ? PTColor(0.16, 0.76, 0.48) : PTColor(0.58, 0.61, 0.66)).CGColor;
-    self.activityDot.layer.shadowColor = active ? PTColor(0.16, 0.76, 0.48).CGColor : nil;
-    self.activityDot.layer.shadowOpacity = active ? 0.28 : 0;
-    self.activityDot.layer.shadowRadius = active ? 4 : 0;
-    self.activityDot.layer.shadowOffset = CGSizeZero;
-    if (age < 60) self.timeLabel.stringValue = PTL(@"刚刚", @"now");
-    else if (age < 3600) self.timeLabel.stringValue = [NSString stringWithFormat:PTL(@"%ld分", @"%ldm"), (long)(age / 60)];
-    else if (age < 86400) self.timeLabel.stringValue = [NSString stringWithFormat:PTL(@"%ld时", @"%ldh"), (long)(age / 3600)];
-    else self.timeLabel.stringValue = [NSString stringWithFormat:PTL(@"%ld天", @"%ldd"), (long)(age / 86400)];
-}
-@end
-
-// An in-window completion list keeps the editor focused while the query changes.
-@interface PTCommandRowView : NSView
-@property(nonatomic, copy) NSDictionary *command;
-@property(nonatomic) BOOL highlighted;
-@end
-
-@implementation PTCommandRowView
-- (BOOL)isFlipped { return YES; }
-- (void)drawRect:(NSRect)dirtyRect {
-    (void)dirtyRect;
-    if (_highlighted) {
-        [NSColor.quaternaryLabelColor setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 3, 2) xRadius:11 yRadius:11] fill];
-    }
-    NSImage *icon = [NSImage imageWithSystemSymbolName:_command[@"icon"] accessibilityDescription:nil];
-    icon = [icon imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPaletteColors:@[NSColor.secondaryLabelColor]]];
-    [icon drawInRect:NSMakeRect(14, 12, 18, 18) fromRect:NSZeroRect
-        operation:NSCompositingOperationSourceOver fraction:0.65 respectFlipped:YES hints:nil];
-    NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
-    style.lineBreakMode = NSLineBreakByTruncatingTail;
-    NSDictionary *titleStyle = @{NSFontAttributeName: [NSFont systemFontOfSize:14 weight:NSFontWeightMedium],
-        NSForegroundColorAttributeName: NSColor.labelColor, NSParagraphStyleAttributeName: style};
-    NSString *title = _command[@"title"];
-    CGFloat titleWidth = MIN([title sizeWithAttributes:titleStyle].width + 2, MAX(80, self.bounds.size.width * 0.40));
-    [title drawInRect:NSMakeRect(43, 11, titleWidth, 22) withAttributes:titleStyle];
-    CGFloat descriptionX = 43 + titleWidth + 12;
-    [_command[@"detail"] drawInRect:NSMakeRect(descriptionX, 12, MAX(0, self.bounds.size.width - descriptionX - 14), 21)
-        withAttributes:@{NSFontAttributeName: [NSFont systemFontOfSize:13],
-            NSForegroundColorAttributeName: NSColor.secondaryLabelColor, NSParagraphStyleAttributeName: style}];
-}
-@end
-
-@interface PTCommandPaletteView : NSView <NSTableViewDataSource, NSTableViewDelegate>
-@property(nonatomic, copy) NSArray<NSDictionary *> *commands;
-@property(nonatomic, copy) void (^chooseCommand)(NSDictionary *command);
-- (void)moveSelection:(NSInteger)offset;
-- (BOOL)chooseSelection;
-@end
-
-@implementation PTCommandPaletteView {
-    NSScrollView *_scroll;
-    NSTableView *_table;
-    NSTextField *_emptyLabel;
-}
-- (instancetype)initWithFrame:(NSRect)frame {
-    if ((self = [super initWithFrame:frame])) {
-        self.wantsLayer = YES;
-        self.layer.cornerRadius = 18;
-        self.layer.borderWidth = 1;
-        self.layer.masksToBounds = YES;
-        _scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-        _scroll.drawsBackground = NO;
-        _scroll.hasVerticalScroller = YES;
-        _scroll.autohidesScrollers = YES;
-        _table = [[NSTableView alloc] initWithFrame:NSZeroRect];
-        _table.autoresizingMask = NSViewWidthSizable;
-        _table.headerView = nil;
-        _table.backgroundColor = NSColor.clearColor;
-        _table.rowHeight = 42;
-        _table.intercellSpacing = NSZeroSize;
-        _table.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
-        _table.columnAutoresizingStyle = NSTableViewLastColumnOnlyAutoresizingStyle;
-        NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"command"];
-        column.minWidth = 0;
-        [_table addTableColumn:column];
-        _table.dataSource = self;
-        _table.delegate = self;
-        _table.target = self;
-        _table.action = @selector(chooseSelection);
-        _scroll.documentView = _table;
-        [self addSubview:_scroll];
-        _emptyLabel = [NSTextField labelWithString:PTL(@"没有匹配的指令", @"No matching commands")];
-        _emptyLabel.textColor = NSColor.secondaryLabelColor;
-        _emptyLabel.alignment = NSTextAlignmentCenter;
-        [self addSubview:_emptyLabel];
-        [self updateLayer];
-    }
-    return self;
-}
-- (void)updateLayer {
-    self.layer.backgroundColor = PTWarmCardColor().CGColor;
-    self.layer.borderColor = PTWarmBorderColor().CGColor;
-}
-- (void)viewDidChangeEffectiveAppearance { [super viewDidChangeEffectiveAppearance]; [self updateLayer]; [_table reloadData]; }
-- (void)layout {
-    [super layout];
-    _scroll.frame = NSInsetRect(self.bounds, 6, 6);
-    _table.frame = NSMakeRect(0, 0, _scroll.contentSize.width, MAX(_scroll.contentSize.height, _commands.count * 42));
-    _table.tableColumns.firstObject.width = _scroll.contentSize.width;
-    _emptyLabel.frame = NSMakeRect(12, MAX(0, (self.bounds.size.height - 20) / 2), MAX(0, self.bounds.size.width - 24), 20);
-}
-- (void)setCommands:(NSArray<NSDictionary *> *)commands {
-    _commands = [commands copy];
-    [_table reloadData];
-    _emptyLabel.hidden = commands.count != 0;
-    if (commands.count) {
-        [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
-        [_table scrollRowToVisible:0];
-    }
-}
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return _commands.count; }
-- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
-    PTCommandRowView *view = [tableView makeViewWithIdentifier:@"commandRow" owner:self];
-    if (!view) { view = [PTCommandRowView new]; view.identifier = @"commandRow"; }
-    view.command = _commands[row];
-    view.highlighted = tableView.selectedRow == row;
-    view.toolTip = [NSString stringWithFormat:@"/%@\n%@", view.command[@"name"], view.command[@"detail"]];
-    [view setNeedsDisplay:YES];
-    return view;
-}
-- (void)tableViewSelectionDidChange:(NSNotification *)notification {
-    NSRange rows = [_table rowsInRect:_table.visibleRect];
-    if (rows.location == NSNotFound) return;
-    for (NSUInteger row = rows.location; row < NSMaxRange(rows); row++) {
-        PTCommandRowView *view = [_table viewAtColumn:0 row:row makeIfNecessary:NO];
-        view.highlighted = _table.selectedRow == (NSInteger)row;
-        [view setNeedsDisplay:YES];
-    }
-}
-- (void)moveSelection:(NSInteger)offset {
-    if (!_commands.count) return;
-    NSInteger row = (_table.selectedRow + offset + (NSInteger)_commands.count) % (NSInteger)_commands.count;
-    [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
-    [_table scrollRowToVisible:row];
-}
-- (BOOL)chooseSelection {
-    NSInteger row = _table.selectedRow;
-    if (row < 0 || row >= (NSInteger)_commands.count) return NO;
-    if (_chooseCommand) _chooseCommand(_commands[row]);
-    return YES;
-}
-@end
-
-@interface PTComposerTextView : NSTextView
-@property(nonatomic, copy) dispatch_block_t submitHandler;
-@property(nonatomic, copy) dispatch_block_t commandMenuHandler;
-@property(nonatomic, copy) BOOL (^commandKeyHandler)(NSEvent *event);
-@property(nonatomic, copy) BOOL (^imagePasteHandler)(NSPasteboard *pasteboard);
-@property(nonatomic, copy) BOOL (^fileDropHandler)(NSArray<NSURL *> *urls);
-@property(nonatomic, copy) NSString *placeholderText;
-- (void)clearAfterSuccessfulSubmissionMatchingText:(NSString *)submittedText;
-@end
-
-@implementation PTComposerTextView
-- (instancetype)initWithFrame:(NSRect)frameRect {
-    self = [super initWithFrame:frameRect];
-    if (self) [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
-    return self;
-}
-
-- (void)setPlaceholderText:(NSString *)placeholderText {
-    _placeholderText = [placeholderText copy];
-    [self setNeedsDisplay:YES];
-}
-
-- (void)setString:(NSString *)string {
-    [super setString:string];
-    [self setNeedsDisplay:YES];
-}
-
-- (void)didChangeText {
-    [super didChangeText];
-    [self setNeedsDisplay:YES];
-    if (!self.hasMarkedText && self.commandMenuHandler) {
-        __weak typeof(self) weakSelf = self;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            PTComposerTextView *self = weakSelf;
-            if (self && !self.hasMarkedText && self.commandMenuHandler) self.commandMenuHandler();
-        });
-    }
-}
-
-- (void)drawRect:(NSRect)dirtyRect {
-    [super drawRect:dirtyRect];
-    if (self.string.length > 0 || self.placeholderText.length == 0) return;
-    NSDictionary *attributes = @{
-        NSFontAttributeName: self.font ?: [NSFont systemFontOfSize:14],
-        NSForegroundColorAttributeName: NSColor.placeholderTextColor
-    };
-    NSPoint point = NSMakePoint(self.textContainerInset.width + 1,
-        self.textContainerInset.height + 1);
-    [self.placeholderText drawAtPoint:point withAttributes:attributes];
-}
-
-- (BOOL)performKeyEquivalent:(NSEvent *)event {
-    BOOL commandPaste =
-        (event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask) ==
-            NSEventModifierFlagCommand &&
-        (event.keyCode == 9 ||
-         [event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"v"]);
-    if (commandPaste) {
-        // performKeyEquivalent: 会沿整个视图树探测；若不核对 firstResponder，
-        // 即使老师正在检查器路径框里粘贴，消息编辑器也会抢先吞掉 ⌘V。
-        if (self.window.firstResponder != self) return NO;
-        [self paste:self];
-        return YES;
-    }
-    return [super performKeyEquivalent:event];
-}
-
-- (void)keyDown:(NSEvent *)event {
-    if (!self.hasMarkedText && self.commandKeyHandler && self.commandKeyHandler(event)) return;
-    BOOL commandPaste =
-        (event.modifierFlags & NSEventModifierFlagCommand) != 0 &&
-        (event.keyCode == 9 ||
-         [event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"v"]);
-    if (commandPaste) {
-        [self paste:self];
-        return;
-    }
-    PTComposerKeyAction action = PTComposerActionForKey(
-        event.keyCode,
-        (event.modifierFlags & NSEventModifierFlagCommand) != 0,
-        (event.modifierFlags & NSEventModifierFlagShift) != 0,
-        self.hasMarkedText
-    );
-    if (action == PTComposerKeyActionSubmit && self.submitHandler) {
-        self.submitHandler();
-        return;
-    }
-    if (action == PTComposerKeyActionInsertNewline) {
-        [self insertNewline:nil];
-        return;
-    }
-    [super keyDown:event];
-}
-
-- (void)paste:(id)sender {
-    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-    if (self.imagePasteHandler && self.imagePasteHandler(pasteboard)) return;
-    [super paste:sender];
-}
-
-- (NSArray<NSURL *> *)draggedFileURLs:(id<NSDraggingInfo>)sender {
-    NSDictionary *options = @{NSPasteboardURLReadingFileURLsOnlyKey: @YES};
-    return [sender.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:options] ?: @[];
-}
-
-- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
-    return self.editable && self.fileDropHandler && [self draggedFileURLs:sender].count > 0
-        ? NSDragOperationCopy : NSDragOperationNone;
-}
-
-- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
-    NSArray<NSURL *> *urls = [self draggedFileURLs:sender];
-    return self.editable && urls.count > 0 && self.fileDropHandler && self.fileDropHandler(urls);
-}
-
-- (void)clearAfterSuccessfulSubmissionMatchingText:(NSString *)submittedText {
-    // NSTextView 的 string setter 在 keyDown: 尚未退出时偶尔会被输入系统的同一轮
-    // 编辑事务覆盖回来。走 shouldChange/textStorage/didChangeText 的正式编辑链，
-    // 并只清除仍与已发送快照一致的内容，保留老师紧接着输入的新文字。
-    if (![self.string isEqualToString:submittedText ?: @""]) return;
-    NSRange wholeRange = NSMakeRange(0, self.string.length);
-    if (![self shouldChangeTextInRange:wholeRange replacementString:@""]) return;
-    [self.textStorage beginEditing];
-    [self.textStorage replaceCharactersInRange:wholeRange withString:@""];
-    [self.textStorage endEditing];
-    [self setSelectedRange:NSMakeRange(0, 0)];
-    [self didChangeText];
-    [self setNeedsDisplay:YES];
-}
-@end
-
 @interface PTWorkspaceTab : NSObject
+@property(nonatomic) NSUInteger draftRevision;
+@property(nonatomic) BOOL reportedResponding;
 @property(nonatomic, copy) NSString *commandOutput;
 @property(nonatomic, copy) NSString *identifier;
 @property(nonatomic, copy) NSString *sessionID;
 @property(nonatomic, copy) NSString *draft;
 @property(nonatomic, copy) NSString *status;
+@property(nonatomic, copy) NSString *activeToolPageKind;
+@property(nonatomic, copy) NSString *fileTreeRootPath;
 @property(nonatomic, strong) PTClaudeBridge *bridge;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *pendingImages;
 @property(nonatomic, strong) NSMutableArray<NSString *> *pendingFiles;
 @property(nonatomic) BOOL connecting;
+@property(nonatomic) BOOL reviewToolPageOpen;
+@property(nonatomic) BOOL fileToolPageOpen;
+@property(nonatomic) BOOL panelExpanded;
+@property(nonatomic) BOOL overviewExpanded;
 @end
 
 @implementation PTWorkspaceTab
 @end
 
-@interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSTableViewDataSource, NSTableViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate, NSMenuDelegate, NSTextFieldDelegate>
+@interface PTAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, PTFrontendBridgeDelegate>
 - (void)updateWorkspaceTabBar;
 - (void)syncFullSessionIDs;
 - (PTSessionInfo *)sessionWithID:(NSString *)sessionID;
-- (CGFloat)adaptiveInspectorWidth;
-- (void)applyAdaptiveInspectorWidth;
 - (void)updateWindowMaximumSize;
-- (BOOL)shouldFloatInspector;
-- (void)updateInspectorPresentation;
-- (void)dockInspector;
-- (void)floatInspector;
+- (void)pushFrontendWindowState;
+- (void)pushFrontendWorkspace;
+- (void)pushFrontendSessions;
+- (void)pushFrontendGitState;
+- (void)buildLobeFloatingPanelIfNeeded;
+- (void)positionLobeFloatingPanelNearMainWindow;
 @end
 
 @implementation PTAppDelegate {
@@ -3611,64 +2788,22 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     PTClaudeBridge *_bridge;
     NSMutableArray<PTWorkspaceTab *> *_workspaceTabs;
     PTWorkspaceTab *_activeWorkspaceTab;
-    NSView *_homeView;
-    NSTextField *_homeTitleLabel;
-    NSTextField *_homeStatusLabel;
-    PTWarmPopUpButton *_homeProjectPicker;
-    PTComposerTextView *_homePromptTextView;
     NSString *_homeProjectPath;
-    BOOL _homeVisible;
-    BOOL _applyingSessions;
     PTClaudeBridge *_homeStartingBridge;
     NSString *_homeBlankSessionDirectory;
     NSMutableDictionary<NSString *, PTSessionInfo *> *_newSessionsAwaitingTranscript;
     NSMutableDictionary<NSString *, PTClaudeBridge *> *_renameConnections;
     NSMutableDictionary<NSString *, NSString *> *_pendingRenameTitles;
     NSString *_homeStartingSessionID;
-    NSString *_homeSubmittedPrompt;
-    NSScrollView *_workspaceTabScroll;
-    NSStackView *_workspaceTabStack;
     NSArray<PTSessionInfo *> *_sessions;
-    NSArray<NSDictionary *> *_sessionSidebarRows;
-    NSMutableSet<NSString *> *_collapsedSessionProjectPaths;
     PTSessionInfo *_selectedSession;
-    NSTableView *_sessionTable;
-    WKWebView *_conversationView;
-    NSTextField *_conversationTitle;
-    NSTextField *_conversationDetail;
-    NSTextField *_statusLabel;
-    NSTextField *_contextLabel;
-    NSTextField *_quotaLabel;
-    NSPopUpButton *_languagePicker;
-    NSProgressIndicator *_contextBar;
-    NSPopUpButton *_modelPicker;
-    PTComposerDropSurfaceView *_composerSurface;
-    PTAnimatedButton *_composerModelButton;
-    PTAnimatedButton *_composerEffortButton;
-    NSPopover *_composerOptionsPopover;
-    NSStackView *_composerOptionsStack;
-    PTEffortSlider *_composerEffortSlider;
-    NSTextField *_composerEffortPopoverTitle;
+    NSString *_statusText;
     NSString *_selectedComposerModelID;
     NSString *_selectedComposerEffort;
-    NSString *_composerConfigurationPage;
-    PTComposerTextView *_composerTextView;
-    NSTextField *_composerTargetLabel;
-    NSButton *_imageButton;
-    NSScrollView *_imagePreviewScroll;
-    NSStackView *_imagePreviewStack;
-    NSLayoutConstraint *_composerHeightConstraint;
-    NSLayoutConstraint *_imagePreviewHeightConstraint;
     NSMutableArray<NSDictionary *> *_pendingImages;
     NSMutableArray<NSString *> *_pendingFiles;
     NSMutableSet<NSString *> *_temporaryImagePaths;
-    NSButton *_connectButton;
-    NSButton *_floatingButton;
     NSMenuItem *_floatingMenuItem;
-    NSButton *_remoteButton;
-    NSButton *_compactButton;
-    NSButton *_sendButton;
-    NSButton *_refreshButton;
     NSTimer *_refreshTimer;
     NSTimer *_usageRefreshTimer;
     NSString *_planUsageSessionID;
@@ -3678,23 +2813,12 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSDate *_fiveHourResetAt;
     NSDate *_sevenDayResetAt;
     NSString *_planUsageError;
-    BOOL _webReady;
-    NSPanel *_floatingPanel;
-    WKWebView *_floatingConversationView;
-    PTComposerDropSurfaceView *_floatingComposerSurface;
-    PTComposerTextView *_floatingComposerTextView;
-    NSTextField *_floatingComposerLabel;
-    NSButton *_floatingImageButton;
-    NSScrollView *_floatingImagePreviewScroll;
-    NSStackView *_floatingImagePreviewStack;
-    NSLayoutConstraint *_floatingComposerHeightConstraint;
-    NSLayoutConstraint *_floatingImagePreviewHeightConstraint;
+    NSString *_floatingStatusText;
     NSMutableArray<NSDictionary *> *_floatingPendingImages;
     NSMutableArray<NSString *> *_floatingPendingFiles;
-    PTAnimatedButton *_floatingEffortButton;
-    NSButton *_floatingSendButton;
     NSString *_floatingSessionID;
-    BOOL _floatingWebReady;
+    NSString *_floatingDraft;
+    NSUInteger _floatingDraftRevision;
     BOOL _floatingRenderInFlight;
     PTSessionInfo *_pendingFloatingSession;
     NSString *_floatingRenderedSessionID;
@@ -3710,108 +2834,14 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSDate *_renderedModifiedAt;
     BOOL _renderInFlight;
     PTSessionInfo *_pendingRenderSession;
-    NSSplitView *_splitView;
-    NSSplitView *_workspaceSplitView;
-    NSView *_conversationPane;
-    NSView *_toolWorkspaceView;
-    NSView *_toolContentView;
-    NSSplitView *_toolContentSplitView;
-    NSView *_toolPageContainerView;
-    NSStackView *_toolTabStack;
-    NSButton *_toolReviewRefreshButton;
-    NSButton *_fileTreeToggleButton;
-    NSLayoutConstraint *_toolWorkspaceWidthConstraint;
-    CGFloat _toolWorkspaceWidthBeforeCollapse;
-    NSUInteger _toolWorkspaceAnimationGeneration;
-    NSView *_fileTreeView;
-    NSOutlineView *_fileOutlineView;
-    NSSearchField *_fileTreeSearchField;
-    NSButton *_fileTreeRootButton;
-    NSLayoutConstraint *_fileTreeWidthConstraint;
-    CGFloat _fileTreeWidthBeforeCollapse;
-    NSUInteger _fileTreeAnimationGeneration;
-    BOOL _fileTreeExpanded;
-    NSURL *_fileTreeRootURL;
-    BOOL _fileTreeRootManuallySelected;
-    NSString *_fileTreeRootSessionID;
-    NSMutableDictionary<NSString *, NSArray<NSDictionary *> *> *_fileTreeChildrenByPath;
-    WKWebView *_filePreviewWebView;
-    BOOL _filePreviewWebReady;
-    NSDictionary<NSString *, NSString *> *_activeFilePreviewPayload;
-    NSString *_activeToolPageKind;
-    BOOL _reviewToolPageOpen;
-    BOOL _fileToolPageOpen;
-    NSButton *_fileWorkspaceButton;
-    NSView *_inspectorView;
-    NSView *_inspectorCard;
-    NSButton *_sidePanelToggleButton;
-    BOOL _restoreInspectorAfterTools;
-    BOOL _inspectorExpanded;
-    BOOL _inspectorFloating;
-    BOOL _updatingInspectorPresentation;
-    NSView *_workspaceRootView;
-    NSRect _inspectorFloatingFrame;
-    BOOL _hasInspectorFloatingFrame;
-    NSLayoutConstraint *_sidebarWidthConstraint;
-    NSLayoutConstraint *_inspectorWidthConstraint;
-    CGFloat _inspectorWidthBeforeCollapse;
-    NSUInteger _inspectorAnimationGeneration;
-    BOOL _committingSplitWidths;
-    NSStackView *_changedFilesStack;
-    NSArray<NSDictionary *> *_renderedChangedFiles;
-    NSDictionary<NSString *, PTAnimatedButton *> *_changedFileButtonsByPath;
-    NSTextField *_inspectorConnectionLabel;
-    NSTextField *_inspectorContextLabel;
-    NSTextField *_inspectorContextPercentLabel;
-    PTMeterView *_inspectorContextMeter;
-    NSStackView *_inspectorContextDetailStack;
-    NSButton *_contextDisclosureButton;
-    BOOL _contextDetailExpanded;
-    NSTextField *_inspectorFiveHourPercentLabel;
-    PTMeterView *_inspectorFiveHourMeter;
-    NSTextField *_inspectorFiveHourCaption;
-    NSTextField *_inspectorSevenDayPercentLabel;
-    PTMeterView *_inspectorSevenDayMeter;
-    NSTextField *_inspectorSevenDayCaption;
-    NSTextField *_inspectorCostHeadline;
-    NSTextField *_inspectorCostChangesPill;
-    NSStackView *_inspectorCostDetailStack;
-    NSButton *_costDisclosureButton;
-    BOOL _costDetailExpanded;
-    NSPopUpButton *_gitDirectoryPicker;
-    NSButton *_removeGitDirectoryButton;
-    NSTextField *_gitDirectoryInput;
-    NSTextField *_gitDirectoryHintLabel;
-    NSButton *_gitDiffToggleButton;
-    NSButton *_gitDiffRefreshButton;
-    NSButton *_gitPublishButton;
-    NSProgressIndicator *_gitDiffProgress;
-    NSScrollView *_gitDiffScroll;
-    NSTextView *_gitDiffTextView;
     NSMutableArray<NSString *> *_gitDirectoryPaths;
     NSMutableSet<NSString *> *_suppressedGitDirectoryPaths;
     NSString *_gitObservedDirectory;
-    BOOL _gitDiffExpanded;
     BOOL _gitReviewShowsTranscriptEdits;
-    NSArray<NSDictionary *> *_transcriptEditReviewEvents;
+    NSString *_gitVisibleTabID;
     BOOL _gitDirectoryManuallySelected;
     NSUInteger _gitDiffGeneration;
-    NSPopover *_gitActionPopover;
-    NSTextField *_gitActionBranchLabel;
-    NSTextField *_gitCommitMessageField;
-    NSButton *_gitIncludeUnstagedButton;
-    NSButton *_gitCommitButton;
-    NSButton *_gitCommitAndPushButton;
-    NSButton *_gitPushButton;
-    NSTextField *_gitActionStatusLabel;
-    NSProgressIndicator *_gitActionProgress;
     BOOL _gitActionInFlight;
-    NSTextField *_bottomStatusLabel;
-    NSButton *_inspectorToggleButton;
-    NSStackView *_tasksStack;
-    NSArray<NSDictionary *> *_renderedTasks;
-    NSArray<NSDictionary *> *_renderedContextBreakdown;
-    NSDictionary<NSString *, NSDictionary *> *_renderedCostBreakdown;
     PTAgentState *_agentState;
     PTTranscriptWatcher *_transcriptWatcher;
     NSString *_watchedTranscriptPath;
@@ -3830,12 +2860,27 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSString *_questionPanelRequestID;
     NSMutableDictionary *_protocolQuestions;
     NSMutableDictionary<NSString *, NSAlert *> *_protocolAlerts;
-    NSPopover *_commandResultPopover;
-    PTComposerTextView *_commandMenuComposer;
-    PTCommandPaletteView *_commandPalette;
-    id _commandDismissMonitor;
-    id _commandLayoutObserver;
-    NSString *_configurationSessionID;
+    PTFrontendBridge *_lobeMainBridge;
+    PTBridgeDropWebView *_lobeMainWebView;
+    PTFrontendBridge *_lobeFloatingBridge;
+    PTBridgeDropWebView *_lobeFloatingWebView;
+    NSPanel *_lobeFloatingPanel;
+    BOOL _lobeAppearanceObserved;
+    NSDictionary *_lobeGitStateSnapshot;
+    NSDictionary *_turnReviewSnapshot;
+    NSString *_gitReviewInFlightDirectory;
+    NSString *_gitReviewQueuedDirectory;
+    NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *_directoryReadTargets;
+    NSTask *_lobeTerminalTask;
+    NSMutableString *_lobeTerminalOutput;
+    NSString *_lobeTerminalCommand;
+    NSString *_lobeTerminalCwd;
+    NSString *_lobeTerminalTabID;
+    BOOL _lobeTerminalRunning;
+    NSNumber *_lobeTerminalExitCode;
+    NSString *_terminalRunID;
+    NSUInteger _terminalSequence;
+    BOOL _terminalDrawerVisible;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -3868,9 +2913,15 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     [self buildMainMenu];
     [self buildWindow];
     [self connectStoreAndBridge];
+    if (!_lobeAppearanceObserved) {
+        [NSApp addObserver:self
+                forKeyPath:@"effectiveAppearance"
+                   options:NSKeyValueObservingOptionNew
+                   context:(__bridge void *)self];
+        _lobeAppearanceObserved = YES;
+    }
     [_window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
-    [(PTWorkspaceSplitView *)_splitView setTrackedPosition:270 ofDividerAtIndex:0];
     [_store refresh];
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(refreshSessions:) userInfo:nil repeats:YES];
     _usageRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:60 target:self selector:@selector(refreshClaudeUsage:) userInfo:nil repeats:YES];
@@ -3879,134 +2930,6 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
 
-- (void)changeInterfaceLanguage:(NSPopUpButton *)sender {
-    NSString *language = [sender.selectedItem.representedObject isKindOfClass:NSString.class]
-        ? sender.selectedItem.representedObject : @"zh-Hans";
-    NSString *stored = PTInterfaceLanguageCode();
-    if ([language isEqualToString:stored]) return;
-    [self dismissCommandPalette];
-
-    [NSUserDefaults.standardUserDefaults setObject:language
-        forKey:PTInterfaceLanguageDefaultsKey];
-    [NSUserDefaults.standardUserDefaults synchronize];
-
-    // Rebuild only PrettyTerm's presentation tree. The session store, Terminal bridge,
-    // selected Claude session, pending attachments, and unsent draft remain untouched.
-    NSString *draft = _composerTextView.string ?: @"";
-    NSRect previousFrame = _window.frame;
-    CGFloat sidebarWidth = _splitView.subviews.count >= 2
-        ? NSWidth(_splitView.subviews[0].frame) : 270.0;
-    CGFloat inspectorWidth = NSWidth(_inspectorView.frame);
-    if (inspectorWidth <= 0.0) inspectorWidth = 340.0;
-    BOOL inspectorWasHidden = !_inspectorExpanded;
-    BOOL toolWasExpanded = !_toolWorkspaceView.hidden;
-    CGFloat toolWidth = NSWidth(_toolWorkspaceView.frame) > 0.0
-        ? NSWidth(_toolWorkspaceView.frame) : _toolWorkspaceWidthBeforeCollapse;
-    BOOL reviewToolPageWasOpen = _reviewToolPageOpen;
-    BOOL fileToolPageWasOpen = _fileToolPageOpen;
-    NSString *activeToolPageKind = [_activeToolPageKind copy];
-    NSAttributedString *reviewDocument = [_gitDiffTextView.attributedString copy];
-    BOOL reviewShowedTranscriptEdits = _gitReviewShowsTranscriptEdits;
-    NSArray<NSDictionary *> *transcriptReviewEvents = [_transcriptEditReviewEvents copy];
-    NSDictionary<NSString *, NSString *> *filePreviewPayload = [_activeFilePreviewPayload copy];
-    NSURL *fileTreeRootURL = _fileTreeRootURL;
-    BOOL fileTreeRootManuallySelected = _fileTreeRootManuallySelected;
-    NSString *fileTreeRootSessionID = [_fileTreeRootSessionID copy];
-    BOOL fileTreeWasExpanded = _fileTreeExpanded && !_fileTreeView.hidden;
-    CGFloat fileTreeWidth = NSWidth(_fileTreeView.frame) > 0.0
-        ? NSWidth(_fileTreeView.frame) : _fileTreeWidthBeforeCollapse;
-    NSWindow *previousWindow = _window;
-    [_conversationView.configuration.userContentController
-        removeScriptMessageHandlerForName:@"quoteSelection"];
-    [_conversationView.configuration.userContentController
-        removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
-    [_conversationView.configuration.userContentController
-        removeScriptMessageHandlerForName:@"answerQuestion"];
-    [_conversationView.configuration.userContentController
-        removeScriptMessageHandlerForName:@"copyAssistantOutput"];
-    if (_floatingConversationView) {
-        [_floatingConversationView.configuration.userContentController
-            removeScriptMessageHandlerForName:@"quoteSelection"];
-        [_floatingConversationView.configuration.userContentController
-            removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
-        [_floatingConversationView.configuration.userContentController
-            removeScriptMessageHandlerForName:@"answerQuestion"];
-        [_floatingConversationView.configuration.userContentController
-            removeScriptMessageHandlerForName:@"copyAssistantOutput"];
-    }
-    [_floatingPanel orderOut:nil];
-    [_composerOptionsPopover close];
-    _composerOptionsPopover = nil;
-    _composerOptionsStack = nil;
-    _composerEffortSlider = nil;
-    _floatingPanel = nil;
-    _floatingConversationView = nil;
-    _floatingWebReady = NO;
-    _workspaceRootView = nil;
-    _inspectorFloating = NO;
-    [previousWindow orderOut:nil];
-
-    _webReady = NO;
-    _renderInFlight = NO;
-    _renderedSessionID = nil;
-    _renderedModifiedAt = nil;
-    _renderedMessageCount = 0;
-    _renderedMessages = nil;
-    _gitDiffExpanded = NO;
-    _gitReviewShowsTranscriptEdits = NO;
-    _transcriptEditReviewEvents = nil;
-    [self buildMainMenu];
-    [self buildWindow];
-    [_window setFrame:previousFrame display:NO];
-    [(PTWorkspaceSplitView *)_splitView setTrackedPosition:sidebarWidth ofDividerAtIndex:0];
-    _inspectorWidthBeforeCollapse = MAX(210.0, inspectorWidth);
-    [self setInspectorExpanded:!inspectorWasHidden animated:NO];
-    _reviewToolPageOpen = reviewToolPageWasOpen;
-    _fileToolPageOpen = fileToolPageWasOpen;
-    _gitDiffExpanded = reviewToolPageWasOpen;
-    _gitReviewShowsTranscriptEdits = reviewShowedTranscriptEdits;
-    _transcriptEditReviewEvents = transcriptReviewEvents;
-    _activeFilePreviewPayload = filePreviewPayload;
-    _fileTreeRootManuallySelected = fileTreeRootManuallySelected;
-    _fileTreeRootSessionID = fileTreeRootSessionID;
-    if (fileTreeRootURL) [self setFileTreeRootURL:fileTreeRootURL];
-    if (reviewDocument) [_gitDiffTextView.textStorage setAttributedString:reviewDocument];
-    _toolWorkspaceWidthBeforeCollapse = MAX(360.0, toolWidth);
-    _fileTreeWidthBeforeCollapse = fileTreeWidth;
-    if (reviewToolPageWasOpen) {
-        _gitDiffToggleButton.title = reviewShowedTranscriptEdits
-            ? PTL(@"关闭本轮审查  ‹", @"Close Turn Review  ‹")
-            : PTL(@"关闭 Git 审查  ‹", @"Close Git Review  ‹");
-        _gitDiffRefreshButton.hidden = reviewShowedTranscriptEdits;
-    }
-    if (toolWasExpanded && activeToolPageKind.length > 0) {
-        [self showToolPageKind:activeToolPageKind animated:NO];
-        [self setToolWorkspaceExpanded:YES animated:NO];
-        [self setFileTreeExpanded:fileTreeWasExpanded animated:NO];
-    } else {
-        [self rebuildToolTabBar];
-    }
-    _composerTextView.string = draft;
-    [self updateImagePreviews];
-    [self rebuildSessionSidebarRows];
-    [_sessionTable reloadData];
-    NSInteger selectedSidebarRow = [self sidebarRowForSessionID:_selectedSession.sessionID];
-    if (selectedSidebarRow != NSNotFound) {
-        [_sessionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:selectedSidebarRow]
-                     byExtendingSelection:NO];
-    }
-    if (_selectedSession) {
-        [self updateInspectorForSession:_selectedSession];
-        [self updateContextAndModelForSession:_selectedSession];
-    }
-    [self refreshAgentStateAndControls];
-    [self updateConnectButtonTitle];
-    [_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-}
-
-// 之前没建 mainMenu，输入框粘不了字（Cmd+V）、Cmd+Q 也退不出去。
-// 补一个最小够用的 App 菜单 + Edit 菜单，标准 selector 会自动接到 NSTextField 的响应链上。
 - (void)buildMainMenu {
     NSMenu *mainMenu = [[NSMenu alloc] init];
 
@@ -4050,18 +2973,15 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    (void)notification;
+    if (_lobeAppearanceObserved) {
+        @try { [NSApp removeObserver:self forKeyPath:@"effectiveAppearance" context:(__bridge void *)self]; } @catch (NSException *ignored) { (void)ignored; }
+        _lobeAppearanceObserved = NO;
+    }
+    [_lobeMainBridge detach];
+    [_lobeFloatingBridge detach];
     [_refreshTimer invalidate];
     [_questionPollTimer invalidate];
-    [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"quoteSelection"];
-    [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
-    [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptFile"];
-    [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"answerQuestion"];
-    [_conversationView.configuration.userContentController removeScriptMessageHandlerForName:@"copyAssistantOutput"];
-    [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"quoteSelection"];
-    [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptEditReview"];
-    [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"openTranscriptFile"];
-    [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"answerQuestion"];
-    [_floatingConversationView.configuration.userContentController removeScriptMessageHandlerForName:@"copyAssistantOutput"];
     for (PTWorkspaceTab *tab in _workspaceTabs.copy) {
         [tab.bridge stop];
     }
@@ -4082,292 +3002,29 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         displayName, shortVersion, buildVersion];
     NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
         NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView;
-    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1260, 780)
                                          styleMask:style
                                            backing:NSBackingStoreBuffered
                                              defer:NO];
     _window.title = visibleAppVersion;
     _window.titleVisibility = NSWindowTitleHidden;
     _window.titlebarAppearsTransparent = YES;
-    _window.backgroundColor = PTWarmCanvasColor();
+    _window.backgroundColor = PTThemeColor(PTThemeRoleCanvas);
+    _window.minSize = NSMakeSize(680, 480);
     _window.delegate = self;
     [_window center];
     [self updateWindowMaximumSize];
 
-    NSView *windowContent = _window.contentView;
-    PTWorkspaceRootView *root = [[PTWorkspaceRootView alloc] initWithFrame:NSZeroRect];
-    root.translatesAutoresizingMaskIntoConstraints = NO;
-    [windowContent addSubview:root];
-    _workspaceRootView = root;
-    [NSLayoutConstraint activateConstraints:@[
-        [root.topAnchor constraintEqualToAnchor:windowContent.topAnchor],
-        [root.leadingAnchor constraintEqualToAnchor:windowContent.leadingAnchor],
-        [root.trailingAnchor constraintEqualToAnchor:windowContent.trailingAnchor],
-        [root.bottomAnchor constraintEqualToAnchor:windowContent.bottomAnchor]
-    ]];
-    root.wantsLayer = YES;
-    root.layer.backgroundColor = NSColor.clearColor.CGColor;
-
-    PTAppearanceSurfaceView *topBar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    topBar.translatesAutoresizingMaskIntoConstraints = NO;
-    topBar.surfaceStyle = PTAppearanceSurfaceStyleChip;
-    [root addSubview:topBar];
-
-    NSImageView *logo = [[NSImageView alloc] initWithFrame:NSZeroRect];
-    logo.translatesAutoresizingMaskIntoConstraints = NO;
-    logo.image = [NSImage imageNamed:@"PrettyTermLogo"];
-    logo.imageScaling = NSImageScaleProportionallyUpOrDown;
-    [topBar addSubview:logo];
-
-    NSTextField *title = [self label:visibleAppVersion size:17 weight:NSFontWeightBold color:NSColor.labelColor];
-    title.toolTip = [NSString stringWithFormat:PTL(@"当前运行版本：v%@，构建 %@", @"Running version: v%@, build %@"),
-        shortVersion, buildVersion];
-    [topBar addSubview:title];
-    NSTextField *subtitle = [self label:PTL(@"Claude Code 终端伴生 Agent", @"Claude Code terminal companion") size:10.5 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    [topBar addSubview:subtitle];
-
-    _statusLabel = [self label:PTL(@"正在读取本地会话…", @"Reading local conversations…") size:11 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
-    _statusLabel.alignment = NSTextAlignmentRight;
-    [topBar addSubview:_statusLabel];
-
-    _contextLabel = [self label:@"ctx —" size:10 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
-    _contextLabel.alignment = NSTextAlignmentRight;
-    [topBar addSubview:_contextLabel];
-
-    _quotaLabel = [self label:@"5h — · 7d —" size:10 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-    _quotaLabel.alignment = NSTextAlignmentRight;
-    _quotaLabel.toolTip = PTL(@"正在读取 Claude 套餐额度", @"Reading Claude plan limits");
-    [topBar addSubview:_quotaLabel];
-
-    _languagePicker = [[PTWarmPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    _languagePicker.translatesAutoresizingMaskIntoConstraints = NO;
-    [_languagePicker addItemWithTitle:@"中文"];
-    _languagePicker.lastItem.representedObject = @"zh-Hans";
-    [_languagePicker addItemWithTitle:@"English"];
-    _languagePicker.lastItem.representedObject = @"en";
-    [_languagePicker selectItemAtIndex:PTInterfaceLanguageIsEnglish() ? 1 : 0];
-    _languagePicker.target = self;
-    _languagePicker.action = @selector(changeInterfaceLanguage:);
-    _languagePicker.toolTip = PTL(@"界面语言", @"Interface language");
-    [topBar addSubview:_languagePicker];
-
-    _contextBar = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
-    _contextBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _contextBar.indeterminate = NO;
-    _contextBar.minValue = 0;
-    _contextBar.maxValue = 1;
-    _contextBar.doubleValue = 0;
-    _contextBar.style = NSProgressIndicatorStyleBar;
-    _contextBar.controlSize = NSControlSizeSmall;
-    [topBar addSubview:_contextBar];
-
-    PTWorkspaceSplitView *split = [[PTWorkspaceSplitView alloc] initWithFrame:NSZeroRect];
-    split.translatesAutoresizingMaskIntoConstraints = NO;
-    split.vertical = YES;
-    split.dividerStyle = NSSplitViewDividerStyleThin;
-    split.delegate = self;
-    [root addSubview:split];
-    _splitView = split;
-
-    NSView *sidebar = [self buildSidebar];
-    NSView *conversation = [self buildConversation];
-    NSView *inspector = [self buildInspector];
-    [split addArrangedSubview:sidebar];
-    [split addArrangedSubview:conversation];
-    [split addArrangedSubview:inspector];
-    _inspectorExpanded = YES;
-    _inspectorFloating = NO;
-    if (_inspectorWidthBeforeCollapse <= 0.0) _inspectorWidthBeforeCollapse = 340.0;
-    CGFloat inspectorWidth = [self adaptiveInspectorWidth];
-    _inspectorWidthConstraint = [inspector.widthAnchor constraintEqualToConstant:inspectorWidth];
-    _inspectorWidthConstraint.priority = 999;
-    _inspectorWidthConstraint.active = YES;
-    _sidebarWidthConstraint = [sidebar.widthAnchor constraintEqualToConstant:270.0];
-    _sidebarWidthConstraint.priority = 999;
-    _sidebarWidthConstraint.active = YES;
-    [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:0];
-    [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
-    [split setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:2];
-
-    [_inspectorToggleButton removeFromSuperview];
-    [topBar addSubview:_inspectorToggleButton];
-    _sidePanelToggleButton = PTWarmButton(@"", self, @selector(toggleSidePanel:));
-    _sidePanelToggleButton.image = [NSImage imageWithSystemSymbolName:@"sidebar.right" accessibilityDescription:PTL(@"侧边页面", @"Side pages")];
-    _sidePanelToggleButton.toolTip = PTL(@"显示或隐藏文件与审查页面", @"Show or hide file and review pages");
-    [topBar addSubview:_sidePanelToggleButton];
-
-    for (NSView *view in @[title, subtitle, _statusLabel, _contextLabel,
-                           _contextBar, _quotaLabel, _languagePicker]) {
-        [view setContentHuggingPriority:100
-                         forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [view setContentCompressionResistancePriority:100
-                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
-    }
-    for (NSView *view in @[_contextLabel, _contextBar, _quotaLabel, _languagePicker]) {
-        [view setContentCompressionResistancePriority:NSLayoutPriorityFittingSizeCompression - 2.0
-                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
-    }
-    NSArray<NSLayoutConstraint *> *idealTopBarWidths = @[
-        [_contextLabel.widthAnchor constraintEqualToConstant:96],
-        [_contextBar.widthAnchor constraintEqualToConstant:92],
-        [_quotaLabel.widthAnchor constraintEqualToConstant:114],
-        [_languagePicker.widthAnchor constraintEqualToConstant:84]
-    ];
-    for (NSLayoutConstraint *constraint in idealTopBarWidths) {
-        constraint.priority = NSLayoutPriorityFittingSizeCompression - 1.0;
-        constraint.active = YES;
-    }
-
-    [NSLayoutConstraint activateConstraints:@[
-        [topBar.topAnchor constraintEqualToAnchor:root.topAnchor],
-        [topBar.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
-        [topBar.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [topBar.heightAnchor constraintEqualToConstant:64],
-        [split.topAnchor constraintEqualToAnchor:topBar.bottomAnchor],
-        [split.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
-        [split.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [split.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
-
-        [logo.leadingAnchor constraintEqualToAnchor:topBar.leadingAnchor constant:76],
-        [logo.centerYAnchor constraintEqualToAnchor:topBar.centerYAnchor constant:9],
-        [logo.widthAnchor constraintEqualToConstant:40],
-        [logo.heightAnchor constraintEqualToConstant:40],
-        [title.leadingAnchor constraintEqualToAnchor:logo.trailingAnchor constant:11],
-        [title.topAnchor constraintEqualToAnchor:logo.topAnchor constant:1],
-        [subtitle.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
-        [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:1],
-        [_sidePanelToggleButton.trailingAnchor constraintEqualToAnchor:topBar.trailingAnchor constant:-12],
-        [_sidePanelToggleButton.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
-        [_sidePanelToggleButton.widthAnchor constraintEqualToConstant:30],
-        [_inspectorToggleButton.trailingAnchor constraintEqualToAnchor:_sidePanelToggleButton.leadingAnchor constant:-6],
-        [_inspectorToggleButton.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
-        [_inspectorToggleButton.widthAnchor constraintEqualToConstant:30],
-        [_statusLabel.trailingAnchor constraintEqualToAnchor:_inspectorToggleButton.leadingAnchor constant:-12],
-        [_statusLabel.bottomAnchor constraintEqualToAnchor:topBar.bottomAnchor constant:-3],
-        [_statusLabel.widthAnchor constraintLessThanOrEqualToConstant:260],
-        [_contextLabel.trailingAnchor constraintEqualToAnchor:_inspectorToggleButton.leadingAnchor constant:-12],
-        [_contextLabel.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
-        [_contextBar.trailingAnchor constraintEqualToAnchor:_contextLabel.leadingAnchor constant:-8],
-        [_contextBar.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
-        [_contextBar.heightAnchor constraintEqualToConstant:7],
-        [_quotaLabel.trailingAnchor constraintEqualToAnchor:_contextBar.leadingAnchor constant:-10],
-        [_quotaLabel.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
-        [_languagePicker.trailingAnchor constraintEqualToAnchor:_quotaLabel.leadingAnchor constant:-8],
-        [_languagePicker.centerYAnchor constraintEqualToAnchor:logo.centerYAnchor],
-        [_languagePicker.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:20]
-    ]];
-}
-
-- (CGFloat)adaptiveInspectorWidth {
-    CGFloat preferred = MIN(520.0, MAX(260.0,
-        _inspectorWidthBeforeCollapse > 0.0 ? _inspectorWidthBeforeCollapse : 340.0));
-    CGFloat available = NSWidth(_window.contentView.bounds);
-    if (available <= 0.0) return preferred;
-    CGFloat sidebarWidth = _splitView.subviews.count > 0
-        ? NSWidth(_splitView.subviews[0].frame) : _sidebarWidthConstraint.constant;
-    CGFloat maximum = available - MAX(0.0, sidebarWidth) - 520.0 -
-        (2.0 * _splitView.dividerThickness);
-    return MIN(preferred, MAX(260.0, maximum));
-}
-
-- (void)applyAdaptiveInspectorWidth {
-    if (_inspectorFloating) {
-        [(PTInspectorOverlayView *)_inspectorView constrainFloatingFrame];
-        _inspectorFloatingFrame = _inspectorView.frame;
-        return;
-    }
-    if (_inspectorWidthConstraint) _inspectorWidthConstraint.constant = [self adaptiveInspectorWidth];
-}
-
-- (BOOL)shouldFloatInspector {
-    CGFloat available = NSWidth(_window.contentView.bounds);
-    CGFloat sidebarWidth = _splitView.subviews.count > 0
-        ? NSWidth(_splitView.subviews[0].frame) : _sidebarWidthConstraint.constant;
-    return available < MAX(0.0, sidebarWidth) + 520.0 + 260.0 +
-        (2.0 * _splitView.dividerThickness);
-}
-
-- (void)floatInspector {
-    if (_inspectorFloating || !_inspectorView) return;
-    CGFloat dockedWidth = NSWidth(_inspectorView.frame);
-    if (dockedWidth > 0.0) _inspectorWidthBeforeCollapse = dockedWidth;
-    _inspectorWidthConstraint.active = NO;
-    _inspectorWidthConstraint = nil;
-    [_splitView removeArrangedSubview:_inspectorView];
-    [_inspectorView removeFromSuperview];
-    _inspectorView.translatesAutoresizingMaskIntoConstraints = YES;
-    [_workspaceRootView addSubview:_inspectorView positioned:NSWindowAbove relativeTo:_splitView];
-    NSRect available = _workspaceRootView.bounds;
-    CGFloat workspaceHeight = MAX(320.0, NSHeight(available) - 88.0);
-    CGFloat width = MIN(420.0, MAX(320.0, _inspectorWidthBeforeCollapse));
-    CGFloat height = MIN(640.0, MAX(360.0, workspaceHeight * 0.78));
-    NSRect frame = _hasInspectorFloatingFrame ? _inspectorFloatingFrame : NSMakeRect(
-        NSMaxX(available) - width - 12.0,
-        NSMaxY(available) - 64.0 - 12.0 - height,
-        width,
-        height
-    );
-    _inspectorView.frame = frame;
-    _inspectorFloating = YES;
-    PTInspectorOverlayView *overlay = (PTInspectorOverlayView *)_inspectorView;
-    overlay.floating = YES;
-    __weak typeof(self) weakSelf = self;
-    overlay.floatingFrameChanged = ^(NSRect changedFrame) {
-        PTAppDelegate *self = weakSelf;
-        if (!self) return;
-        self->_inspectorFloatingFrame = changedFrame;
-        self->_hasInspectorFloatingFrame = YES;
-        self->_inspectorWidthBeforeCollapse = NSWidth(changedFrame);
-    };
-    [overlay constrainFloatingFrame];
-    _inspectorFloatingFrame = overlay.frame;
-    _hasInspectorFloatingFrame = YES;
-    _inspectorView.hidden = !_inspectorExpanded;
-    [_window.contentView layoutSubtreeIfNeeded];
-}
-
-- (void)dockInspector {
-    if (!_inspectorFloating || !_inspectorView) return;
-    CGFloat floatingWidth = NSWidth(_inspectorView.frame);
-    if (floatingWidth > 0.0) _inspectorWidthBeforeCollapse = floatingWidth;
-    _inspectorFloatingFrame = _inspectorView.frame;
-    _hasInspectorFloatingFrame = YES;
-    PTInspectorOverlayView *overlay = (PTInspectorOverlayView *)_inspectorView;
-    overlay.floating = NO;
-    overlay.floatingFrameChanged = nil;
-    [_inspectorView removeFromSuperview];
-    _inspectorView.translatesAutoresizingMaskIntoConstraints = NO;
-    [_splitView addArrangedSubview:_inspectorView];
-    _inspectorWidthConstraint = [_inspectorView.widthAnchor
-        constraintEqualToConstant:[self adaptiveInspectorWidth]];
-    _inspectorWidthConstraint.priority = 999;
-    _inspectorWidthConstraint.active = YES;
-    [_splitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:2];
-    _inspectorView.hidden = !_inspectorExpanded;
-    _inspectorFloating = NO;
-    [_window.contentView layoutSubtreeIfNeeded];
-}
-
-- (void)updateInspectorPresentation {
-    if (_updatingInspectorPresentation || !_inspectorView) return;
-    _updatingInspectorPresentation = YES;
-    if ([self shouldFloatInspector]) [self floatInspector];
-    else [self dockInspector];
-    [self applyAdaptiveInspectorWidth];
-    _updatingInspectorPresentation = NO;
+    [self attachMainFrontend];
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
-    [self layoutCommandPalette];
-    if (notification.object == _window) {
-        [self updateInspectorPresentation];
-    }
+    if (notification.object == _window) [self updateWindowMaximumSize];
 }
 
 - (void)windowDidChangeScreen:(NSNotification *)notification {
     if (notification.object != _window) return;
     [self updateWindowMaximumSize];
-    [self updateInspectorPresentation];
 }
 
 - (NSSize)windowWillResize:(NSWindow *)sender toSize:(NSSize)frameSize {
@@ -4382,712 +3039,6 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 - (void)updateWindowMaximumSize {
     NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
     if (screen) _window.maxSize = screen.visibleFrame.size;
-}
-
-- (CGFloat)splitView:(NSSplitView *)splitView
-    constrainSplitPosition:(CGFloat)proposedPosition
-           ofSubviewAt:(NSInteger)dividerIndex {
-    if (splitView == _splitView && dividerIndex == 1 && !_inspectorFloating &&
-        splitView.subviews.count >= 3) {
-        CGFloat total = NSWidth(splitView.bounds);
-        CGFloat sidebarWidth = NSWidth(splitView.subviews[0].frame);
-        CGFloat maximum = MAX(260.0, total - sidebarWidth - 420.0 -
-            (2.0 * splitView.dividerThickness));
-        CGFloat inspectorWidth = total - proposedPosition - splitView.dividerThickness;
-        inspectorWidth = MIN(MIN(520.0, maximum), MAX(260.0, inspectorWidth));
-        return total - inspectorWidth - splitView.dividerThickness;
-    }
-    return proposedPosition;
-}
-
-- (NSRect)splitView:(NSSplitView *)splitView
-       effectiveRect:(NSRect)proposedEffectiveRect
-        forDrawnRect:(NSRect)drawnRect
-    ofDividerAtIndex:(NSInteger)dividerIndex {
-    (void)splitView;
-    (void)drawnRect;
-    (void)dividerIndex;
-    // 细分隔条视觉上仍保持 1px，但左右各扩充命中范围，移动窗口后也容易抓住。
-    return NSInsetRect(proposedEffectiveRect, -5.0, 0.0);
-}
-
-- (void)splitViewDidResizeSubviews:(NSNotification *)notification {
-    NSSplitView *splitView = notification.object;
-    if (splitView == _workspaceSplitView && splitView.subviews.count >= 2 &&
-        !_committingSplitWidths &&
-        [(PTWorkspaceSplitView *)splitView mouseDraggingDivider]) {
-        _committingSplitWidths = YES;
-        CGFloat toolWidth = NSWidth(splitView.subviews[1].frame);
-        if (toolWidth > 0.0 && !_toolWorkspaceView.hidden) {
-            _toolWorkspaceWidthBeforeCollapse = toolWidth;
-            _toolWorkspaceWidthConstraint.constant = toolWidth;
-            _toolWorkspaceWidthConstraint.active = YES;
-        }
-        _committingSplitWidths = NO;
-        return;
-    }
-    if (splitView == _toolContentSplitView && splitView.subviews.count >= 2 &&
-        !_committingSplitWidths &&
-        [(PTWorkspaceSplitView *)splitView mouseDraggingDivider]) {
-        _committingSplitWidths = YES;
-        CGFloat treeWidth = NSWidth(splitView.subviews[1].frame);
-        if (treeWidth > 0.0 && !_fileTreeView.hidden) {
-            _fileTreeWidthBeforeCollapse = treeWidth;
-            _fileTreeWidthConstraint.constant = _fileTreeWidthBeforeCollapse;
-            _fileTreeWidthConstraint.active = YES;
-        }
-        _committingSplitWidths = NO;
-        return;
-    }
-    if (splitView != _splitView || splitView.subviews.count < 2 || _committingSplitWidths ||
-        ![(PTWorkspaceSplitView *)splitView changingDivider]) return;
-    _committingSplitWidths = YES;
-    CGFloat sidebarWidth = NSWidth(splitView.subviews[0].frame);
-    NSInteger divider = [(PTWorkspaceSplitView *)splitView changingDividerIndex];
-    if (divider == 0 && ![(PTWorkspaceSplitView *)splitView mouseDraggingDivider] &&
-        [(PTWorkspaceSplitView *)splitView trackedDividerPosition] > 0.0) {
-        sidebarWidth = [(PTWorkspaceSplitView *)splitView trackedDividerPosition];
-    }
-    if (divider == 0 && sidebarWidth > 0.0) {
-        _sidebarWidthConstraint.constant = sidebarWidth;
-    } else if (divider == 1 && !_inspectorFloating && splitView.subviews.count >= 3) {
-        CGFloat inspectorWidth = NSWidth(splitView.subviews[2].frame);
-        if (inspectorWidth > 0.0) {
-            _inspectorWidthBeforeCollapse = MIN(520.0, MAX(260.0, inspectorWidth));
-            _inspectorWidthConstraint.constant = _inspectorWidthBeforeCollapse;
-        }
-    }
-    BOOL dragging = [(PTWorkspaceSplitView *)splitView mouseDraggingDivider];
-    if (!dragging) {
-        _sidebarWidthConstraint.active = YES;
-        if (!_inspectorFloating) _inspectorWidthConstraint.active = YES;
-        [self updateInspectorPresentation];
-    }
-    _committingSplitWidths = NO;
-}
-
-- (void)splitViewWillResizeSubviews:(NSNotification *)notification {
-    if (notification.object == _workspaceSplitView && !_committingSplitWidths &&
-        [(PTWorkspaceSplitView *)_workspaceSplitView mouseDraggingDivider]) {
-        _toolWorkspaceWidthConstraint.active = NO;
-        return;
-    }
-    if (notification.object == _toolContentSplitView && !_committingSplitWidths &&
-        [(PTWorkspaceSplitView *)_toolContentSplitView mouseDraggingDivider]) {
-        _fileTreeWidthConstraint.active = NO;
-        return;
-    }
-    if (notification.object != _splitView || _committingSplitWidths ||
-        ![(PTWorkspaceSplitView *)_splitView changingDivider]) return;
-    NSInteger divider = [(PTWorkspaceSplitView *)_splitView changingDividerIndex];
-    if (divider == 0) {
-        _sidebarWidthConstraint.active = NO;
-    } else if (divider == 1 && !_inspectorFloating) {
-        _inspectorWidthConstraint.active = NO;
-    }
-}
-
-- (NSView *)buildSidebar {
-    PTAppearanceSurfaceView *sidebar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    sidebar.translatesAutoresizingMaskIntoConstraints = NO;
-    sidebar.surfaceStyle = PTAppearanceSurfaceStyleChip;
-
-    NSView *header = [[NSView alloc] initWithFrame:NSZeroRect];
-    header.translatesAutoresizingMaskIntoConstraints = NO;
-    [sidebar addSubview:header];
-    NSTextField *heading = [self label:PTL(@"会话", @"Conversations") size:14 weight:NSFontWeightBold color:NSColor.labelColor];
-    [header addSubview:heading];
-    _refreshButton = PTWarmButton(@"↻", self, @selector(refreshSessions:));
-    _refreshButton.font = [NSFont systemFontOfSize:17 weight:NSFontWeightMedium];
-    _refreshButton.contentTintColor = PTWarmAccentColor();
-    _refreshButton.toolTip = PTL(@"刷新本地会话", @"Refresh local conversations");
-    [header addSubview:_refreshButton];
-
-    PTAnimatedButton *homeButton = PTWarmButton(PTL(@"主页", @"Home"), self, @selector(showHome:));
-    homeButton.image = [NSImage imageWithSystemSymbolName:@"house" accessibilityDescription:nil];
-    homeButton.imagePosition = NSImageLeft;
-    [header addSubview:homeButton];
-    _fileWorkspaceButton = PTWarmButton(@"", self, @selector(openFileWorkspace:));
-    _fileWorkspaceButton.image = [NSImage imageWithSystemSymbolName:@"folder"
-        accessibilityDescription:PTL(@"文件", @"Files")];
-    _fileWorkspaceButton.toolTip = PTL(@"打开文件工作区", @"Open file workspace");
-    [header addSubview:_fileWorkspaceButton];
-
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    scroll.hasVerticalScroller = YES;
-    scroll.drawsBackground = NO;
-    _sessionTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
-    _sessionTable.headerView = nil;
-    _sessionTable.backgroundColor = NSColor.clearColor;
-    _sessionTable.rowHeight = 66;
-    _sessionTable.intercellSpacing = NSMakeSize(0, 2);
-    _sessionTable.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
-    _sessionTable.dataSource = self;
-    _sessionTable.delegate = self;
-    // 右键菜单的条目在 menuNeedsUpdate: 里按 clickedRow 现场重建，所以这里只挂一个空壳。
-    // autoenablesItems 关掉，否则 AppKit 会忽略我们自己算出来的 enabled（文件已被删时要变灰）。
-    NSMenu *sessionMenu = [[NSMenu alloc] init];
-    sessionMenu.delegate = self;
-    sessionMenu.autoenablesItems = NO;
-    _sessionTable.menu = sessionMenu;
-    NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"session"];
-    column.resizingMask = NSTableColumnAutoresizingMask;
-    [_sessionTable addTableColumn:column];
-    scroll.documentView = _sessionTable;
-    [sidebar addSubview:scroll];
-
-    NSTextField *privacy = [self label:PTL(@"仅在本机读取 ~/.claude/projects", @"Reads ~/.claude/projects locally only") size:9.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
-    privacy.alignment = NSTextAlignmentCenter;
-    [sidebar addSubview:privacy];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [header.topAnchor constraintEqualToAnchor:sidebar.topAnchor],
-        [header.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor],
-        [header.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor],
-        [header.heightAnchor constraintEqualToConstant:48],
-        [heading.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:14],
-        [heading.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_refreshButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-10],
-        [_refreshButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_fileWorkspaceButton.trailingAnchor constraintEqualToAnchor:_refreshButton.leadingAnchor constant:-7],
-        [_fileWorkspaceButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_fileWorkspaceButton.widthAnchor constraintEqualToConstant:32],
-        [_fileWorkspaceButton.heightAnchor constraintEqualToConstant:28],
-        [homeButton.trailingAnchor constraintEqualToAnchor:_fileWorkspaceButton.leadingAnchor constant:-7],
-        [homeButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [homeButton.widthAnchor constraintEqualToConstant:70],
-        [privacy.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:8],
-        [privacy.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor constant:-8],
-        [privacy.bottomAnchor constraintEqualToAnchor:sidebar.bottomAnchor constant:-9],
-        [scroll.topAnchor constraintEqualToAnchor:header.bottomAnchor],
-        [scroll.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:5],
-        [scroll.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor constant:-5],
-        [scroll.bottomAnchor constraintEqualToAnchor:privacy.topAnchor constant:-8]
-    ]];
-    return sidebar;
-}
-
-- (NSView *)buildInspector {
-    PTInspectorOverlayView *shell = [[PTInspectorOverlayView alloc] initWithFrame:NSZeroRect];
-    shell.translatesAutoresizingMaskIntoConstraints = NO;
-    shell.wantsLayer = YES;
-    shell.layer.backgroundColor = NSColor.clearColor.CGColor;
-    shell.layer.masksToBounds = NO;
-    PTAppearanceSurfaceView *inspector = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    inspector.translatesAutoresizingMaskIntoConstraints = NO;
-    inspector.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    inspector.layer.cornerRadius = 20;
-    inspector.layer.borderWidth = 0.5;
-    inspector.shadow = [NSShadow new];
-    inspector.layer.shadowOpacity = 0.09;
-    inspector.layer.shadowRadius = 9;
-    inspector.layer.shadowOffset = CGSizeMake(0, -2);
-    [shell addSubview:inspector];
-    _inspectorCard = inspector;
-    [NSLayoutConstraint activateConstraints:@[
-        [inspector.topAnchor constraintEqualToAnchor:shell.topAnchor constant:14],
-        [inspector.leadingAnchor constraintEqualToAnchor:shell.leadingAnchor constant:10],
-        [inspector.heightAnchor constraintLessThanOrEqualToAnchor:shell.heightAnchor constant:-32]
-    ]];
-    [inspector.trailingAnchor constraintEqualToAnchor:shell.trailingAnchor constant:-16].active = YES;
-    [inspector.bottomAnchor constraintEqualToAnchor:shell.bottomAnchor constant:-18].active = YES;
-    [inspector setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
-    _inspectorView = shell;
-
-    NSTextField *title = [self label:PTL(@"检查器", @"Inspector") size:13 weight:NSFontWeightBold color:NSColor.labelColor];
-    [inspector addSubview:title];
-    PTAnimatedButton *collapse = PTWarmButton(PTL(@"收起 ›", @"Collapse ›"), self, @selector(toggleInspector:));
-    collapse.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    [inspector addSubview:collapse];
-
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    scroll.hasVerticalScroller = YES;
-    scroll.drawsBackground = NO;
-    [inspector addSubview:scroll];
-
-    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 12;
-    stack.edgeInsets = NSEdgeInsetsMake(2, 10, 18, 10);
-    scroll.documentView = stack;
-
-    NSView* (^makeCard)(NSString *, NSTextField **) = ^NSView *(NSString *heading, NSTextField **valueOut) {
-        PTAppearanceSurfaceView *card = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-        card.translatesAutoresizingMaskIntoConstraints = NO;
-        card.surfaceStyle = PTAppearanceSurfaceStyleCard;
-        card.layer.cornerRadius = 14;
-        card.layer.borderWidth = 0.6;
-        NSTextField *headingLabel = [self label:heading size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-        NSTextField *value = [self label:@"—" size:12 weight:NSFontWeightMedium color:NSColor.labelColor];
-        value.lineBreakMode = NSLineBreakByWordWrapping;
-        value.maximumNumberOfLines = 3;
-        [card addSubview:headingLabel];
-        [card addSubview:value];
-        [NSLayoutConstraint activateConstraints:@[
-            [headingLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:11],
-            [headingLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:12],
-            [headingLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
-            [value.topAnchor constraintEqualToAnchor:headingLabel.bottomAnchor constant:6],
-            [value.leadingAnchor constraintEqualToAnchor:headingLabel.leadingAnchor],
-            [value.trailingAnchor constraintEqualToAnchor:headingLabel.trailingAnchor],
-            [value.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-12]
-        ]];
-        if (valueOut) *valueOut = value;
-        return card;
-    };
-
-    NSTextField *connectionValue = nil;
-    NSView *connectionCard = makeCard(PTL(@"CLAUDE CODE 连接", @"CLAUDE CODE CONNECTION"), &connectionValue);
-    _inspectorConnectionLabel = connectionValue;
-
-    // 上下文卡片与成本卡片保持同一层级：总占用和状态条永远可见，只有
-    // /context 提供的真实分类明细参与展开折叠。
-    PTAppearanceSurfaceView *contextCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    contextCard.translatesAutoresizingMaskIntoConstraints = NO;
-    contextCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    contextCard.layer.cornerRadius = 14;
-    contextCard.layer.borderWidth = 0.6;
-
-    NSTextField *contextHeading = [self label:PTL(@"上下文使用", @"CONTEXT USAGE")
-                                           size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-    [contextCard addSubview:contextHeading];
-    PTAnimatedButton *contextDisclosure = PTWarmButton(PTL(@"详情 ›", @"Details ›"),
-        self, @selector(toggleContextDetail:));
-    contextDisclosure.font = [NSFont systemFontOfSize:10 weight:NSFontWeightMedium];
-    contextDisclosure.toolTip = PTL(@"展开已记录的上下文分类明细，不向 Claude Code 发送命令",
-                                    @"Expand recorded context categories without sending a Claude Code command");
-    [contextCard addSubview:contextDisclosure];
-    _contextDisclosureButton = contextDisclosure;
-
-    NSStackView *contextBodyStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    contextBodyStack.translatesAutoresizingMaskIntoConstraints = NO;
-    contextBodyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    contextBodyStack.alignment = NSLayoutAttributeLeading;
-    contextBodyStack.spacing = 7;
-    [contextCard addSubview:contextBodyStack];
-
-    NSView *contextHeadlineRow = [[NSView alloc] initWithFrame:NSZeroRect];
-    contextHeadlineRow.translatesAutoresizingMaskIntoConstraints = NO;
-    NSTextField *contextValue = [self label:@"—" size:13 weight:NSFontWeightBold color:NSColor.labelColor];
-    NSTextField *contextPercent = [self label:@"—" size:12 weight:NSFontWeightBold color:PTWarmAccentColor()];
-    [contextHeadlineRow addSubview:contextValue];
-    [contextHeadlineRow addSubview:contextPercent];
-    [NSLayoutConstraint activateConstraints:@[
-        [contextValue.leadingAnchor constraintEqualToAnchor:contextHeadlineRow.leadingAnchor],
-        [contextValue.topAnchor constraintEqualToAnchor:contextHeadlineRow.topAnchor],
-        [contextValue.bottomAnchor constraintEqualToAnchor:contextHeadlineRow.bottomAnchor],
-        [contextPercent.firstBaselineAnchor constraintEqualToAnchor:contextValue.firstBaselineAnchor],
-        [contextPercent.trailingAnchor constraintEqualToAnchor:contextHeadlineRow.trailingAnchor],
-        [contextPercent.leadingAnchor constraintGreaterThanOrEqualToAnchor:contextValue.trailingAnchor constant:6]
-    ]];
-    [contextBodyStack addArrangedSubview:contextHeadlineRow];
-    [contextHeadlineRow.widthAnchor constraintEqualToAnchor:contextBodyStack.widthAnchor].active = YES;
-
-    PTMeterView *contextMeter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
-    contextMeter.translatesAutoresizingMaskIntoConstraints = NO;
-    contextMeter.fillColor = PTWarmAccentColor();
-    [contextBodyStack addArrangedSubview:contextMeter];
-    [contextMeter.widthAnchor constraintEqualToAnchor:contextBodyStack.widthAnchor].active = YES;
-    [contextMeter.heightAnchor constraintEqualToConstant:7].active = YES;
-
-    NSStackView *contextDetailStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    contextDetailStack.translatesAutoresizingMaskIntoConstraints = NO;
-    contextDetailStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    contextDetailStack.alignment = NSLayoutAttributeLeading;
-    contextDetailStack.spacing = 7;
-    contextDetailStack.hidden = YES;
-    [contextBodyStack addArrangedSubview:contextDetailStack];
-    [contextDetailStack.widthAnchor constraintEqualToAnchor:contextBodyStack.widthAnchor].active = YES;
-
-    _inspectorContextLabel = contextValue;
-    _inspectorContextPercentLabel = contextPercent;
-    _inspectorContextMeter = contextMeter;
-    _inspectorContextDetailStack = contextDetailStack;
-
-    [NSLayoutConstraint activateConstraints:@[
-        [contextHeading.topAnchor constraintEqualToAnchor:contextCard.topAnchor constant:11],
-        [contextHeading.leadingAnchor constraintEqualToAnchor:contextCard.leadingAnchor constant:12],
-        [contextDisclosure.centerYAnchor constraintEqualToAnchor:contextHeading.centerYAnchor],
-        [contextDisclosure.trailingAnchor constraintEqualToAnchor:contextCard.trailingAnchor constant:-8],
-        [contextDisclosure.leadingAnchor constraintGreaterThanOrEqualToAnchor:contextHeading.trailingAnchor constant:6],
-        [contextBodyStack.topAnchor constraintEqualToAnchor:contextHeading.bottomAnchor constant:8],
-        [contextBodyStack.leadingAnchor constraintEqualToAnchor:contextCard.leadingAnchor constant:12],
-        [contextBodyStack.trailingAnchor constraintEqualToAnchor:contextCard.trailingAnchor constant:-12],
-        [contextBodyStack.bottomAnchor constraintEqualToAnchor:contextCard.bottomAnchor constant:-12]
-    ]];
-
-    // 套餐额度卡片：每个窗口一行「名称＋百分比」+ 一条圆角进度条 + 重置倒计时，
-    // 用条形长度直接看占比，不用每次心算文字里的数字。
-    PTAppearanceSurfaceView *quotaCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    quotaCard.translatesAutoresizingMaskIntoConstraints = NO;
-    quotaCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    quotaCard.layer.cornerRadius = 14;
-    quotaCard.layer.borderWidth = 0.6;
-
-    NSTextField *quotaHeading = [self label:PTL(@"CLAUDE 套餐额度", @"CLAUDE PLAN LIMITS")
-                                         size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-    [quotaCard addSubview:quotaHeading];
-
-    NSStackView *quotaBodyStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    quotaBodyStack.translatesAutoresizingMaskIntoConstraints = NO;
-    quotaBodyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    quotaBodyStack.alignment = NSLayoutAttributeLeading;
-    quotaBodyStack.spacing = 10;
-    [quotaCard addSubview:quotaBodyStack];
-
-    NSView* (^makeMeterRow)(NSString *, NSTextField **, PTMeterView **, NSTextField **) =
-        ^NSView *(NSString *rowLabel, NSTextField **percentOut, PTMeterView **meterOut, NSTextField **captionOut) {
-        NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
-        row.translatesAutoresizingMaskIntoConstraints = NO;
-
-        NSTextField *nameLabel = [self label:rowLabel size:11 weight:NSFontWeightMedium color:NSColor.labelColor];
-        NSTextField *percentLabel = [self label:@"—" size:12 weight:NSFontWeightBold color:NSColor.labelColor];
-
-        PTMeterView *meter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
-        meter.translatesAutoresizingMaskIntoConstraints = NO;
-
-        NSTextField *caption = [self label:@"" size:10 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
-
-        [row addSubview:nameLabel];
-        [row addSubview:percentLabel];
-        [row addSubview:meter];
-        [row addSubview:caption];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [nameLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
-            [nameLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [percentLabel.firstBaselineAnchor constraintEqualToAnchor:nameLabel.firstBaselineAnchor],
-            [percentLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [percentLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:nameLabel.trailingAnchor constant:6],
-            [meter.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:5],
-            [meter.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [meter.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [meter.heightAnchor constraintEqualToConstant:6],
-            [caption.topAnchor constraintEqualToAnchor:meter.bottomAnchor constant:4],
-            [caption.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [caption.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [caption.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
-        ]];
-
-        if (percentOut) *percentOut = percentLabel;
-        if (meterOut) *meterOut = meter;
-        if (captionOut) *captionOut = caption;
-        return row;
-    };
-
-    NSTextField *fiveHourPercentLabel = nil;
-    PTMeterView *fiveHourMeter = nil;
-    NSTextField *fiveHourCaption = nil;
-    NSView *fiveHourRow = makeMeterRow(PTL(@"5 小时", @"5 hours"),
-        &fiveHourPercentLabel, &fiveHourMeter, &fiveHourCaption);
-    _inspectorFiveHourPercentLabel = fiveHourPercentLabel;
-    _inspectorFiveHourMeter = fiveHourMeter;
-    _inspectorFiveHourCaption = fiveHourCaption;
-
-    NSTextField *sevenDayPercentLabel = nil;
-    PTMeterView *sevenDayMeter = nil;
-    NSTextField *sevenDayCaption = nil;
-    NSView *sevenDayRow = makeMeterRow(PTL(@"7 天", @"7 days"),
-        &sevenDayPercentLabel, &sevenDayMeter, &sevenDayCaption);
-    _inspectorSevenDayPercentLabel = sevenDayPercentLabel;
-    _inspectorSevenDayMeter = sevenDayMeter;
-    _inspectorSevenDayCaption = sevenDayCaption;
-    [quotaBodyStack addArrangedSubview:fiveHourRow];
-    [quotaBodyStack addArrangedSubview:sevenDayRow];
-    [fiveHourRow.widthAnchor constraintEqualToAnchor:quotaBodyStack.widthAnchor].active = YES;
-    [sevenDayRow.widthAnchor constraintEqualToAnchor:quotaBodyStack.widthAnchor].active = YES;
-
-    [NSLayoutConstraint activateConstraints:@[
-        [quotaHeading.topAnchor constraintEqualToAnchor:quotaCard.topAnchor constant:11],
-        [quotaHeading.leadingAnchor constraintEqualToAnchor:quotaCard.leadingAnchor constant:12],
-        [quotaHeading.trailingAnchor constraintEqualToAnchor:quotaCard.trailingAnchor constant:-12],
-        [quotaBodyStack.topAnchor constraintEqualToAnchor:quotaHeading.bottomAnchor constant:9],
-        [quotaBodyStack.leadingAnchor constraintEqualToAnchor:quotaCard.leadingAnchor constant:12],
-        [quotaBodyStack.trailingAnchor constraintEqualToAnchor:quotaCard.trailingAnchor constant:-12],
-        [quotaBodyStack.bottomAnchor constraintEqualToAnchor:quotaCard.bottomAnchor constant:-12]
-    ]];
-
-    // 成本卡片：大号金额当标题，代码改动用一个红绿双色胶囊，「详情」展开后
-    // 在下面动态铺开按模型拆分的行——每行也带一条按成本占比换算长度的进度条。
-    PTAppearanceSurfaceView *costCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    costCard.translatesAutoresizingMaskIntoConstraints = NO;
-    costCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    costCard.layer.cornerRadius = 14;
-    costCard.layer.borderWidth = 0.6;
-
-    NSTextField *costHeading = [self label:PTL(@"本会话 API 等价成本", @"API-EQUIVALENT SESSION COST")
-                                        size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-    [costCard addSubview:costHeading];
-
-    PTAnimatedButton *costDisclosure = PTWarmButton(PTL(@"详情 ›", @"Details ›"),
-        self, @selector(toggleCostDetail:));
-    costDisclosure.font = [NSFont systemFontOfSize:10 weight:NSFontWeightMedium];
-    [costCard addSubview:costDisclosure];
-    _costDisclosureButton = costDisclosure;
-
-    NSStackView *costBodyStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    costBodyStack.translatesAutoresizingMaskIntoConstraints = NO;
-    costBodyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    costBodyStack.alignment = NSLayoutAttributeLeading;
-    costBodyStack.spacing = 8;
-    [costCard addSubview:costBodyStack];
-
-    NSView *costHeadlineRow = [[NSView alloc] initWithFrame:NSZeroRect];
-    costHeadlineRow.translatesAutoresizingMaskIntoConstraints = NO;
-    NSTextField *costHeadline = [self label:@"—" size:20 weight:NSFontWeightBold color:NSColor.labelColor];
-    NSTextField *costChangesPill = [self label:@"" size:10.5 weight:NSFontWeightSemibold color:NSColor.labelColor];
-    costChangesPill.alignment = NSTextAlignmentCenter;
-    costChangesPill.wantsLayer = YES;
-    costChangesPill.layer.cornerRadius = 8;
-    costChangesPill.layer.backgroundColor = PTWarmChipColor().CGColor;
-    [costHeadlineRow addSubview:costHeadline];
-    [costHeadlineRow addSubview:costChangesPill];
-    [NSLayoutConstraint activateConstraints:@[
-        [costHeadline.leadingAnchor constraintEqualToAnchor:costHeadlineRow.leadingAnchor],
-        [costHeadline.topAnchor constraintEqualToAnchor:costHeadlineRow.topAnchor],
-        [costHeadline.bottomAnchor constraintEqualToAnchor:costHeadlineRow.bottomAnchor],
-        [costChangesPill.centerYAnchor constraintEqualToAnchor:costHeadline.centerYAnchor],
-        [costChangesPill.leadingAnchor constraintGreaterThanOrEqualToAnchor:costHeadline.trailingAnchor constant:8],
-        [costChangesPill.trailingAnchor constraintLessThanOrEqualToAnchor:costHeadlineRow.trailingAnchor],
-        [costChangesPill.heightAnchor constraintEqualToConstant:18]
-    ]];
-    _inspectorCostHeadline = costHeadline;
-    _inspectorCostChangesPill = costChangesPill;
-    [costBodyStack addArrangedSubview:costHeadlineRow];
-    [costHeadlineRow.widthAnchor constraintEqualToAnchor:costBodyStack.widthAnchor].active = YES;
-
-    NSTextField *costCaption = [self label:PTL(@"按官方 API 单价估算 · 非订阅实际扣款", @"Estimated at official API rates · not the actual subscription charge")
-                                        size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
-    [costBodyStack addArrangedSubview:costCaption];
-
-    NSStackView *costDetailStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    costDetailStack.translatesAutoresizingMaskIntoConstraints = NO;
-    costDetailStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    costDetailStack.alignment = NSLayoutAttributeLeading;
-    costDetailStack.spacing = 10;
-    costDetailStack.hidden = YES;
-    [costBodyStack addArrangedSubview:costDetailStack];
-    [costDetailStack.widthAnchor constraintEqualToAnchor:costBodyStack.widthAnchor].active = YES;
-    _inspectorCostDetailStack = costDetailStack;
-
-    [NSLayoutConstraint activateConstraints:@[
-        [costHeading.topAnchor constraintEqualToAnchor:costCard.topAnchor constant:11],
-        [costHeading.leadingAnchor constraintEqualToAnchor:costCard.leadingAnchor constant:12],
-        [costDisclosure.centerYAnchor constraintEqualToAnchor:costHeading.centerYAnchor],
-        [costDisclosure.trailingAnchor constraintEqualToAnchor:costCard.trailingAnchor constant:-8],
-        [costDisclosure.leadingAnchor constraintGreaterThanOrEqualToAnchor:costHeading.trailingAnchor constant:6],
-        [costBodyStack.topAnchor constraintEqualToAnchor:costHeading.bottomAnchor constant:8],
-        [costBodyStack.leadingAnchor constraintEqualToAnchor:costCard.leadingAnchor constant:12],
-        [costBodyStack.trailingAnchor constraintEqualToAnchor:costCard.trailingAnchor constant:-12],
-        [costBodyStack.bottomAnchor constraintEqualToAnchor:costCard.bottomAnchor constant:-12]
-    ]];
-    [stack addArrangedSubview:connectionCard];
-    [stack addArrangedSubview:contextCard];
-    [stack addArrangedSubview:quotaCard];
-    [stack addArrangedSubview:costCard];
-    [connectionCard.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-20].active = YES;
-    [contextCard.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-20].active = YES;
-    [quotaCard.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-20].active = YES;
-    [costCard.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-20].active = YES;
-
-    PTAppearanceSurfaceView *gitCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    gitCard.translatesAutoresizingMaskIntoConstraints = NO;
-    gitCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    gitCard.layer.cornerRadius = 14;
-    gitCard.layer.borderWidth = 0.6;
-    NSStackView *gitStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    gitStack.translatesAutoresizingMaskIntoConstraints = NO;
-    gitStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    gitStack.alignment = NSLayoutAttributeLeading;
-    gitStack.spacing = 7;
-    [gitStack setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [gitCard addSubview:gitStack];
-
-    NSTextField *gitTitle = [self label:PTL(@"GIT 观察目录", @"GIT OBSERVED DIRECTORY") size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-    [gitStack addArrangedSubview:gitTitle];
-    _gitDirectoryPicker = [[PTWarmPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    _gitDirectoryPicker.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitDirectoryPicker.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    _gitDirectoryPicker.target = self;
-    _gitDirectoryPicker.action = @selector(gitDirectorySelectionChanged:);
-    [_gitDirectoryPicker addItemWithTitle:PTL(@"等待会话目录…", @"Waiting for conversation directory…")];
-    _gitDirectoryPicker.enabled = NO;
-    NSStackView *directoryRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    directoryRow.translatesAutoresizingMaskIntoConstraints = NO;
-    directoryRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    directoryRow.alignment = NSLayoutAttributeCenterY;
-    directoryRow.spacing = 6;
-    _removeGitDirectoryButton = PTWarmButton(PTL(@"删除", @"Remove"),
-        self, @selector(removeSelectedGitDirectory:));
-    _removeGitDirectoryButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    _removeGitDirectoryButton.toolTip = PTL(@"从 PrettyTerm 记忆中删除当前目录", @"Remove the current directory from PrettyTerm memory");
-    _removeGitDirectoryButton.enabled = NO;
-    [directoryRow addArrangedSubview:_gitDirectoryPicker];
-    [directoryRow addArrangedSubview:_removeGitDirectoryButton];
-    [_removeGitDirectoryButton.widthAnchor constraintEqualToConstant:48].active = YES;
-    [gitStack addArrangedSubview:directoryRow];
-
-    NSStackView *manualRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    manualRow.translatesAutoresizingMaskIntoConstraints = NO;
-    manualRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    manualRow.alignment = NSLayoutAttributeCenterY;
-    manualRow.spacing = 6;
-    _gitDirectoryInput = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    _gitDirectoryInput.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitDirectoryInput.placeholderString = PTL(@"手动输入文件夹路径", @"Enter a folder path manually");
-    _gitDirectoryInput.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
-    PTAnimatedButton *addDirectoryButton = PTWarmButton(PTL(@"添加", @"Add"),
-        self, @selector(addManualGitDirectory:));
-    addDirectoryButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    [manualRow addArrangedSubview:_gitDirectoryInput];
-    [manualRow addArrangedSubview:addDirectoryButton];
-    [_gitDirectoryInput.widthAnchor constraintGreaterThanOrEqualToConstant:110].active = YES;
-    [_gitDirectoryInput.heightAnchor constraintEqualToConstant:28].active = YES;
-    [addDirectoryButton.widthAnchor constraintEqualToConstant:48].active = YES;
-    [gitStack addArrangedSubview:manualRow];
-
-    _gitDirectoryHintLabel = [self label:PTL(@"这里只切换 PrettyTerm 的 Git diff 探测目录，不会改变 Claude Code。要让 Claude 访问新目录，请在 Claude Code 执行 /add-dir <路径>。", @"This only changes PrettyTerm's Git diff probe; it does not change Claude Code. Run /add-dir <path> in Claude Code to grant Claude access.") size:9.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
-    _gitDirectoryHintLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    _gitDirectoryHintLabel.maximumNumberOfLines = 0;
-    [_gitDirectoryHintLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [gitStack addArrangedSubview:_gitDirectoryHintLabel];
-
-    NSStackView *gitActionRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    gitActionRow.translatesAutoresizingMaskIntoConstraints = NO;
-    gitActionRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    gitActionRow.alignment = NSLayoutAttributeCenterY;
-    gitActionRow.spacing = 6;
-    _gitDiffToggleButton = PTWarmButton(PTL(@"展开 Git 审阅  ›", @"Expand Git Review  ›"),
-        self, @selector(toggleGitDiff:));
-    _gitDiffToggleButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
-    _gitDiffRefreshButton = PTWarmButton(PTL(@"刷新", @"Refresh"), self, @selector(refreshGitDiff:));
-    _gitDiffRefreshButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    _gitDiffRefreshButton.hidden = YES;
-    _gitPublishButton = PTWarmButton(PTL(@"提交或推送…", @"Commit or Push…"),
-        self, @selector(showGitActions:));
-    _gitPublishButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
-    _gitPublishButton.contentTintColor = PTWarmAccentColor();
-    _gitPublishButton.toolTip = PTL(@"提交当前改动，或推送已有提交", @"Commit current changes or push existing commits");
-    _gitPublishButton.enabled = NO;
-    _gitDiffProgress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
-    _gitDiffProgress.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitDiffProgress.style = NSProgressIndicatorStyleSpinning;
-    _gitDiffProgress.controlSize = NSControlSizeSmall;
-    _gitDiffProgress.displayedWhenStopped = NO;
-    _gitDiffProgress.hidden = YES;
-    [gitActionRow addArrangedSubview:_gitDiffToggleButton];
-    [gitActionRow addArrangedSubview:_gitDiffRefreshButton];
-    [gitActionRow addArrangedSubview:_gitPublishButton];
-    [gitActionRow addArrangedSubview:_gitDiffProgress];
-    [_gitDiffProgress.widthAnchor constraintEqualToConstant:14].active = YES;
-    [_gitDiffProgress.heightAnchor constraintEqualToConstant:14].active = YES;
-    [gitStack addArrangedSubview:gitActionRow];
-
-    [stack addArrangedSubview:gitCard];
-    [gitCard.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-20].active = YES;
-    [NSLayoutConstraint activateConstraints:@[
-        [gitStack.topAnchor constraintEqualToAnchor:gitCard.topAnchor constant:11],
-        [gitStack.leadingAnchor constraintEqualToAnchor:gitCard.leadingAnchor constant:12],
-        [gitStack.trailingAnchor constraintEqualToAnchor:gitCard.trailingAnchor constant:-12],
-        [gitStack.bottomAnchor constraintEqualToAnchor:gitCard.bottomAnchor constant:-12],
-        [directoryRow.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
-        [manualRow.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
-        [_gitDirectoryHintLabel.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor],
-        [gitActionRow.widthAnchor constraintEqualToAnchor:gitStack.widthAnchor]
-    ]];
-
-    PTAppearanceSurfaceView *changesCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    changesCard.translatesAutoresizingMaskIntoConstraints = NO;
-    changesCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    changesCard.layer.cornerRadius = 14;
-    changesCard.layer.borderWidth = 0.6;
-    NSTextField *changesTitle = [self label:PTL(@"本轮改动", @"CURRENT CHANGES") size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-    [changesCard addSubview:changesTitle];
-    _changedFilesStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    _changedFilesStack.translatesAutoresizingMaskIntoConstraints = NO;
-    _changedFilesStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    _changedFilesStack.alignment = NSLayoutAttributeLeading;
-    _changedFilesStack.spacing = 4;
-    [changesCard addSubview:_changedFilesStack];
-    [stack addArrangedSubview:changesCard];
-
-    PTAppearanceSurfaceView *tasksCard = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    tasksCard.translatesAutoresizingMaskIntoConstraints = NO;
-    tasksCard.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    tasksCard.layer.cornerRadius = 14;
-    tasksCard.layer.borderWidth = 0.6;
-    NSTextField *tasksTitle = [self label:PTL(@"任务列表", @"TASKS") size:11 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-    [tasksCard addSubview:tasksTitle];
-    _tasksStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    _tasksStack.translatesAutoresizingMaskIntoConstraints = NO;
-    _tasksStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    _tasksStack.alignment = NSLayoutAttributeLeading;
-    _tasksStack.spacing = 4;
-    [tasksCard addSubview:_tasksStack];
-    [stack addArrangedSubview:tasksCard];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [title.topAnchor constraintEqualToAnchor:inspector.topAnchor constant:17],
-        [title.leadingAnchor constraintEqualToAnchor:inspector.leadingAnchor constant:14],
-        [collapse.trailingAnchor constraintEqualToAnchor:inspector.trailingAnchor constant:-10],
-        [collapse.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
-        [scroll.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:14],
-        [scroll.leadingAnchor constraintEqualToAnchor:inspector.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:inspector.trailingAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:inspector.bottomAnchor constant:-12],
-        [stack.topAnchor constraintEqualToAnchor:scroll.contentView.topAnchor],
-        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentView.leadingAnchor],
-        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentView.trailingAnchor],
-        [stack.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor],
-        [changesCard.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-20],
-        [changesTitle.topAnchor constraintEqualToAnchor:changesCard.topAnchor constant:11],
-        [changesTitle.leadingAnchor constraintEqualToAnchor:changesCard.leadingAnchor constant:12],
-        [changesTitle.trailingAnchor constraintEqualToAnchor:changesCard.trailingAnchor constant:-12],
-        [_changedFilesStack.topAnchor constraintEqualToAnchor:changesTitle.bottomAnchor constant:8],
-        [_changedFilesStack.leadingAnchor constraintEqualToAnchor:changesCard.leadingAnchor constant:8],
-        [_changedFilesStack.trailingAnchor constraintEqualToAnchor:changesCard.trailingAnchor constant:-8],
-        [_changedFilesStack.bottomAnchor constraintEqualToAnchor:changesCard.bottomAnchor constant:-8],
-        [tasksCard.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-20],
-        [tasksTitle.topAnchor constraintEqualToAnchor:tasksCard.topAnchor constant:11],
-        [tasksTitle.leadingAnchor constraintEqualToAnchor:tasksCard.leadingAnchor constant:12],
-        [tasksTitle.trailingAnchor constraintEqualToAnchor:tasksCard.trailingAnchor constant:-12],
-        [_tasksStack.topAnchor constraintEqualToAnchor:tasksTitle.bottomAnchor constant:8],
-        [_tasksStack.leadingAnchor constraintEqualToAnchor:tasksCard.leadingAnchor constant:8],
-        [_tasksStack.trailingAnchor constraintEqualToAnchor:tasksCard.trailingAnchor constant:-8],
-        [_tasksStack.bottomAnchor constraintEqualToAnchor:tasksCard.bottomAnchor constant:-8]
-    ]];
-    // One inset summary surface; sections share its background and use hairlines.
-    for (NSView *section in stack.arrangedSubviews) {
-        section.layer.cornerRadius = 0;
-        section.layer.borderWidth = 0;
-        NSBox *separator = [[NSBox alloc] initWithFrame:NSZeroRect];
-        separator.boxType = NSBoxSeparator;
-        separator.translatesAutoresizingMaskIntoConstraints = NO;
-        [section addSubview:separator];
-        [NSLayoutConstraint activateConstraints:@[
-            [separator.leadingAnchor constraintEqualToAnchor:section.leadingAnchor constant:12],
-            [separator.trailingAnchor constraintEqualToAnchor:section.trailingAnchor constant:-12],
-            [separator.bottomAnchor constraintEqualToAnchor:section.bottomAnchor]
-        ]];
-    }
-    // Inspector contents wrap to the width chosen by the user. Their intrinsic
-    // text/control widths must never become a hidden minimum-window constraint.
-    NSMutableArray<NSView *> *flexibleViews = [NSMutableArray arrayWithObject:inspector];
-    while (flexibleViews.count > 0) {
-        NSView *view = flexibleViews.lastObject;
-        [flexibleViews removeLastObject];
-        [view setContentHuggingPriority:100 forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [view setContentCompressionResistancePriority:100 forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [flexibleViews addObjectsFromArray:view.subviews];
-    }
-    return shell;
 }
 
 - (void)configureBridgeCallbacksForWorkspaceTab:(PTWorkspaceTab *)tab {
@@ -5106,10 +3057,9 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         }
         if (self->_activeWorkspaceTab == strongTab) {
             self->_connecting = NO;
-            self->_statusLabel.stringValue = strongTab.status;
+            self->_statusText = strongTab.status;
             self->_agentState.sendInFlight = NO;
             [self refreshAgentStateAndControls];
-            [self updateConnectButtonTitle];
         }
         [self updateWorkspaceTabBar];
     };
@@ -5118,7 +3068,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         PTWorkspaceTab *strongTab = weakTab;
         if (!self || !strongTab || self->_activeWorkspaceTab != strongTab) return;
         if ([chunk containsString:@"Remote Control"] && [chunk containsString:@"http"]) {
-            self->_statusLabel.stringValue = PTL(@"官方 Remote Control 已启用", @"Official Remote Control is enabled");
+            self->_statusText = PTL(@"官方 Remote Control 已启用", @"Official Remote Control is enabled");
         }
     };
     tab.bridge.turnCompleted = ^{
@@ -5127,13 +3077,34 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         if (!self || !strongTab) return;
         [self finishAwaitingClaudeReplyForSessionID:strongTab.bridge.sessionID];
         [self->_store refresh];
+        if ([self->_gitVisibleTabID isEqual:strongTab.identifier] && self->_activeWorkspaceTab == strongTab &&
+            !self->_gitReviewShowsTranscriptEdits) {
+            [self pushFrontendGitDiffForDirectory:self->_gitObservedDirectory];
+        }
     };
     tab.bridge.streamChanged = ^{
         PTAppDelegate *self = weakSelf;
         PTWorkspaceTab *strongTab = weakTab;
         if (self && strongTab) {
             [self presentClaudeStreamForBridge:strongTab.bridge];
-            [self refreshAgentStateAndControls];
+            BOOL responding = strongTab.bridge.responding;
+            if (strongTab.reportedResponding != responding) {
+                strongTab.reportedResponding = responding;
+                [self pushFrontendWorkspaceState];
+                [self pushFrontendSessions];
+            }
+        }
+    };
+    tab.bridge.tasksChanged = ^{
+        PTAppDelegate *self = weakSelf;
+        PTWorkspaceTab *strongTab = weakTab;
+        NSString *sessionID = strongTab.bridge.sessionID;
+        if (!self || !sessionID.length) return;
+        if ([self->_selectedSession.sessionID isEqual:sessionID]) {
+            [self pushFrontendClaudeTasksTo:self->_lobeMainBridge sessionID:sessionID];
+        }
+        if ([self->_floatingSessionID isEqual:sessionID]) {
+            [self pushFrontendClaudeTasksTo:self->_lobeFloatingBridge sessionID:sessionID];
         }
     };
     tab.bridge.usageChanged = ^(NSDictionary *payload, NSString *error) {
@@ -5147,11 +3118,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         PTWorkspaceTab *strongTab = weakTab;
         if (!self || !strongTab) return;
         PTSessionInfo *session = [self sessionWithID:strongTab.bridge.sessionID];
-        session.model = strongTab.bridge.currentModel;
         session.effort = strongTab.bridge.currentEffort;
         [self updateComposerConfigurationButtons];
-        [self refreshComposerConfigurationPopoverForSessionID:strongTab.bridge.sessionID];
-        if ([session.sessionID isEqual:self->_selectedSession.sessionID]) [self showSelectedSession];
     };
     tab.bridge.commandOutputChanged = ^(NSString *text) {
         PTAppDelegate *self = weakSelf;
@@ -5159,10 +3127,9 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         if (!self || !strongTab) return;
         strongTab.commandOutput = text;
         strongTab.status = [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet].firstObject;
-        if (self->_activeWorkspaceTab == strongTab) {
-            self->_statusLabel.stringValue = strongTab.status;
-            self->_statusLabel.toolTip = text;
-        }
+        if (self->_activeWorkspaceTab == strongTab) self->_statusText = strongTab.status;
+        if ([self->_floatingSessionID isEqual:strongTab.sessionID]) self->_floatingStatusText = strongTab.status;
+        [self pushFrontendWindowState];
     };
     tab.bridge.toolPermissionRequested = ^(NSString *requestID, NSDictionary *request) {
         PTAppDelegate *self = weakSelf;
@@ -5194,6 +3161,12 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     tab.sessionID = @"";
     tab.draft = @"";
     tab.status = PTL(@"新标签已就绪，请从侧栏选择会话", @"New tab ready; choose a conversation from the sidebar");
+    tab.activeToolPageKind = @"";
+    tab.fileTreeRootPath = @"";
+    tab.reviewToolPageOpen = NO;
+    tab.fileToolPageOpen = NO;
+    tab.panelExpanded = NO;
+    tab.overviewExpanded = YES;
     tab.pendingImages = [NSMutableArray array];
     tab.pendingFiles = [NSMutableArray array];
     tab.bridge = [[PTClaudeBridge alloc] init];
@@ -5202,95 +3175,42 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     return tab;
 }
 
-- (void)saveActiveWorkspaceTabState {
-    if (!_activeWorkspaceTab) return;
-    _activeWorkspaceTab.sessionID = _selectedSession.sessionID ?: @"";
-    _activeWorkspaceTab.draft = _composerTextView.string ?: @"";
-    _activeWorkspaceTab.connecting = _connecting;
-}
-
 - (void)showEmptyWorkspaceTab {
     _selectedSession = nil;
-    [_sessionTable deselectAll:nil];
     [_transcriptWatcher stopWatching];
     _watchedTranscriptPath = nil;
-    _conversationTitle.stringValue = PTL(@"新标签", @"New tab");
-    _conversationDetail.stringValue = PTL(@"从左侧选择会话", @"Choose a conversation from the sidebar");
-    _connectButton.enabled = NO;
-    _renderedSessionID = nil;
-    _renderedModifiedAt = nil;
-    _renderedMessageCount = 0;
-    _renderedMessages = nil;
-    if (_webReady) {
-        NSString *script = [NSString stringWithFormat:
-            @"window.setClaudeSession({sessionId:'',title:'',messages:[],interfaceLanguage:'%@'}); null;",
-            PTInterfaceLanguageCode()];
-        [_conversationView evaluateJavaScript:script completionHandler:nil];
-    }
-    _statusLabel.stringValue = _activeWorkspaceTab.status ?: @"";
-    [self refreshAgentStateAndControls];
-    [self updateConnectButtonTitle];
-    [self updateFloatingControls];
-}
-
-- (void)activateWorkspaceTab:(PTWorkspaceTab *)tab animated:(BOOL)animated {
-    if (!tab || _activeWorkspaceTab == tab) return;
-    [self dismissCommandPalette];
-    [self saveActiveWorkspaceTabState];
-    _activeWorkspaceTab = tab;
-    _bridge = tab.bridge;
-    _connecting = tab.connecting;
-    _pendingImages = tab.pendingImages;
-    _pendingFiles = tab.pendingFiles;
-    _composerTextView.string = tab.draft ?: @"";
-    [self updateImagePreviews];
-
     _renderedSessionID = nil;
     _renderedModifiedAt = nil;
     _renderedMessageCount = 0;
     _renderedMessages = nil;
     _pendingRenderSession = nil;
-    PTSessionInfo *session = [self sessionWithID:tab.sessionID];
-    if (session) {
-        _selectedSession = session;
-        NSInteger row = [self sidebarRowForSessionID:session.sessionID];
-        if (row == NSNotFound) [_sessionTable deselectAll:nil];
-        else [_sessionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:row]
-                         byExtendingSelection:NO];
-        [self showSelectedSession];
-        _statusLabel.stringValue = tab.status.length ? tab.status :
-            PTL(@"标签已切换", @"Tab switched");
-    } else {
-        [self showEmptyWorkspaceTab];
-    }
-    [self updateWorkspaceTabBar];
-    if (animated && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        _conversationView.alphaValue = 0.72;
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.16;
-            self->_conversationView.animator.alphaValue = 1.0;
-        } completionHandler:nil];
-    }
+    [_lobeMainBridge deliverClaudeSession:@{@"sessionId": @"", @"messages": @[]} completion:nil];
+    _statusText = _activeWorkspaceTab.status ?: @"";
+    [self refreshAgentStateAndControls];
+    [self updateFloatingControls];
 }
 
-- (void)selectWorkspaceTab:(PTAnimatedButton *)sender {
-    NSString *identifier = sender.identifier ?: @"";
-    for (PTWorkspaceTab *tab in _workspaceTabs) {
-        if ([tab.identifier isEqual:identifier]) {
-            [self activateWorkspaceTab:tab animated:YES];
-            return;
-        }
-    }
+- (void)activateWorkspaceTab:(PTWorkspaceTab *)tab animated:(BOOL)animated {
+    (void)animated;
+    if (!tab || _activeWorkspaceTab == tab) return;
+    _activeWorkspaceTab = tab;
+    _bridge = tab.bridge;
+    _connecting = tab.connecting;
+    _pendingImages = tab.pendingImages;
+    _pendingFiles = tab.pendingFiles;
+    _renderedSessionID = nil;
+    _renderedModifiedAt = nil;
+    _renderedMessageCount = 0;
+    _renderedMessages = nil;
+    _pendingRenderSession = nil;
+    _selectedSession = [self sessionWithID:tab.sessionID];
+    _statusText = tab.status ?: @"";
+    if (_selectedSession) [self showSelectedSession];
+    else [self showEmptyWorkspaceTab];
+    [self pushFrontendWorkspace];
 }
 
-- (void)addWorkspaceTab:(id)sender {
-    (void)sender;
-    PTWorkspaceTab *tab = [self createWorkspaceTab];
-    [self activateWorkspaceTab:tab animated:YES];
-}
-
-- (void)closeWorkspaceTab:(PTAnimatedButton *)sender {
-    NSString *identifier = sender.identifier ?: @"";
+- (void)closeWorkspaceTabWithID:(NSString *)identifier {
     NSUInteger index = [_workspaceTabs indexOfObjectPassingTest:
         ^BOOL(PTWorkspaceTab *tab, NSUInteger tabIndex, BOOL *stop) {
             (void)tabIndex;
@@ -5301,7 +3221,6 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
     PTWorkspaceTab *closingTab = _workspaceTabs[index];
     BOOL closingActiveTab = closingTab == _activeWorkspaceTab;
-    if (closingActiveTab) [self saveActiveWorkspaceTabState];
     NSString *closingSessionID = closingTab.bridge.sessionID ?: closingTab.sessionID;
     [closingTab.bridge stop];
     if (closingSessionID.length > 0) {
@@ -5312,7 +3231,6 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     if (!closingActiveTab) {
         [self syncFullSessionIDs];
         [self updateWorkspaceTabBar];
-        [self updateFloatingComposerState];
         return;
     }
 
@@ -5325,8 +3243,6 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     } else {
         _pendingImages = [NSMutableArray array];
         _pendingFiles = [NSMutableArray array];
-        _composerTextView.string = @"";
-        [self updateImagePreviews];
         [self showEmptyWorkspaceTab];
         [self updateWorkspaceTabBar];
     }
@@ -5334,1179 +3250,14 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 
 - (void)updateWorkspaceTabBar {
-    if (!_workspaceTabStack) return;
-    for (NSView *view in _workspaceTabStack.arrangedSubviews.copy) {
-        [_workspaceTabStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    for (PTWorkspaceTab *tab in _workspaceTabs) {
-        PTSessionInfo *session = [self sessionWithID:tab.sessionID];
-        NSString *name = session.title.length ? session.title : PTL(@"新标签", @"New tab");
-        NSString *dot = tab.bridge.running ? @"●" : @"○";
-        NSView *item = [[NSView alloc] initWithFrame:NSZeroRect];
-        item.translatesAutoresizingMaskIntoConstraints = NO;
-
-        PTAnimatedButton *selectButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-        selectButton.translatesAutoresizingMaskIntoConstraints = NO;
-        selectButton.title = @"";
-        selectButton.identifier = tab.identifier;
-        selectButton.target = self;
-        selectButton.action = @selector(selectWorkspaceTab:);
-        selectButton.fillColor = _activeWorkspaceTab == tab ? PTWarmChipColor() : NSColor.clearColor;
-        selectButton.hoverFillColor = PTWarmChipColor();
-        selectButton.pressedFillColor = PTWarmBorderColor();
-        selectButton.strokeColor = _activeWorkspaceTab == tab ? PTWarmBorderColor() : NSColor.clearColor;
-        selectButton.cornerRadius = 11;
-        selectButton.toolTip = tab.bridge.running
-            ? [NSString stringWithFormat:PTL(@"已连接 Claude · %@", @"Terminal synced · %@"), name]
-            : name;
-        [selectButton setAccessibilityLabel:name];
-
-        PTPassthroughTextField *titleLabel = [[PTPassthroughTextField alloc] initWithFrame:NSZeroRect];
-        titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        titleLabel.stringValue = [NSString stringWithFormat:@"%@  %@", dot, name];
-        titleLabel.font = [NSFont systemFontOfSize:11.5 weight:
-            (_activeWorkspaceTab == tab ? NSFontWeightSemibold : NSFontWeightMedium)];
-        titleLabel.textColor = _activeWorkspaceTab == tab ? PTWarmAccentColor() : NSColor.secondaryLabelColor;
-        titleLabel.bezeled = NO;
-        titleLabel.bordered = NO;
-        titleLabel.drawsBackground = NO;
-        titleLabel.editable = NO;
-        titleLabel.selectable = NO;
-        titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-
-        PTAnimatedButton *closeButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-        closeButton.translatesAutoresizingMaskIntoConstraints = NO;
-        closeButton.title = @"×";
-        closeButton.identifier = tab.identifier;
-        closeButton.target = self;
-        closeButton.action = @selector(closeWorkspaceTab:);
-        closeButton.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
-        closeButton.contentTintColor = NSColor.secondaryLabelColor;
-        closeButton.fillColor = NSColor.clearColor;
-        closeButton.hoverFillColor = PTWarmBorderColor();
-        closeButton.pressedFillColor = PTWarmAccentColor();
-        closeButton.cornerRadius = 10;
-        closeButton.toolTip = PTL(@"关闭标签", @"Close tab");
-        [closeButton setAccessibilityLabel:closeButton.toolTip];
-
-        [item addSubview:selectButton];
-        [item addSubview:titleLabel];
-        [item addSubview:closeButton];
-        [NSLayoutConstraint activateConstraints:@[
-            [selectButton.leadingAnchor constraintEqualToAnchor:item.leadingAnchor],
-            [selectButton.trailingAnchor constraintEqualToAnchor:item.trailingAnchor],
-            [selectButton.topAnchor constraintEqualToAnchor:item.topAnchor],
-            [selectButton.bottomAnchor constraintEqualToAnchor:item.bottomAnchor],
-            [titleLabel.leadingAnchor constraintEqualToAnchor:item.leadingAnchor constant:14],
-            [titleLabel.centerYAnchor constraintEqualToAnchor:item.centerYAnchor],
-            [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:closeButton.leadingAnchor constant:-7],
-            [closeButton.trailingAnchor constraintEqualToAnchor:item.trailingAnchor constant:-6],
-            [closeButton.centerYAnchor constraintEqualToAnchor:item.centerYAnchor],
-            [closeButton.widthAnchor constraintEqualToConstant:22],
-            [closeButton.heightAnchor constraintEqualToConstant:22]
-        ]];
-        [_workspaceTabStack addArrangedSubview:item];
-        [item.widthAnchor constraintEqualToConstant:184].active = YES;
-        [item.heightAnchor constraintEqualToConstant:32].active = YES;
-    }
-
-    PTAnimatedButton *add = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    add.translatesAutoresizingMaskIntoConstraints = NO;
-    add.title = PTL(@"＋  新标签", @"＋  New tab");
-    add.target = self;
-    add.action = @selector(addWorkspaceTab:);
-    add.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
-    add.contentTintColor = NSColor.secondaryLabelColor;
-    add.fillColor = NSColor.clearColor;
-    add.hoverFillColor = PTWarmChipColor();
-    add.pressedFillColor = PTWarmBorderColor();
-    add.cornerRadius = 11;
-    [_workspaceTabStack addArrangedSubview:add];
-    [add.widthAnchor constraintEqualToConstant:100].active = YES;
-    [add.heightAnchor constraintEqualToConstant:32].active = YES;
-}
-
-- (NSView *)buildToolWorkspace {
-    PTAppearanceSurfaceView *tool = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    tool.translatesAutoresizingMaskIntoConstraints = NO;
-    tool.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
-    [tool setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
-    _toolWorkspaceView = tool;
-
-    NSVisualEffectView *header = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
-    header.translatesAutoresizingMaskIntoConstraints = NO;
-    header.material = NSVisualEffectMaterialHeaderView;
-    header.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    header.state = NSVisualEffectStateActive;
-    [tool addSubview:header];
-
-    _toolTabStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    _toolTabStack.translatesAutoresizingMaskIntoConstraints = NO;
-    _toolTabStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    _toolTabStack.alignment = NSLayoutAttributeCenterY;
-    _toolTabStack.spacing = 6;
-    [header addSubview:_toolTabStack];
-
-    _toolReviewRefreshButton = PTWarmButton(PTL(@"刷新", @"Refresh"),
-        self, @selector(refreshGitDiff:));
-    _toolReviewRefreshButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    [header addSubview:_toolReviewRefreshButton];
-    _fileTreeToggleButton = PTWarmButton(@"", self, @selector(toggleFileTree:));
-    _fileTreeToggleButton.image = [NSImage imageWithSystemSymbolName:@"folder"
-        accessibilityDescription:PTL(@"显示文件", @"Show files")];
-    _fileTreeToggleButton.toolTip = PTL(@"显示或隐藏文件树", @"Show or hide the file tree");
-    [header addSubview:_fileTreeToggleButton];
-
-    _toolContentView = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    _toolContentView.translatesAutoresizingMaskIntoConstraints = NO;
-    ((PTAppearanceSurfaceView *)_toolContentView).surfaceStyle = PTAppearanceSurfaceStyleCard;
-    [tool addSubview:_toolContentView];
-
-    _toolContentSplitView = [[PTWorkspaceSplitView alloc] initWithFrame:NSZeroRect];
-    _toolContentSplitView.translatesAutoresizingMaskIntoConstraints = NO;
-    _toolContentSplitView.vertical = YES;
-    _toolContentSplitView.dividerStyle = NSSplitViewDividerStyleThin;
-    _toolContentSplitView.delegate = self;
-    [_toolContentView addSubview:_toolContentSplitView];
-
-    _toolPageContainerView = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    _toolPageContainerView.translatesAutoresizingMaskIntoConstraints = NO;
-    ((PTAppearanceSurfaceView *)_toolPageContainerView).surfaceStyle = PTAppearanceSurfaceStyleCard;
-    [_toolContentSplitView addArrangedSubview:_toolPageContainerView];
-
-    _gitDiffScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    _gitDiffScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitDiffScroll.hasVerticalScroller = YES;
-    _gitDiffScroll.hasHorizontalScroller = YES;
-    _gitDiffScroll.autohidesScrollers = YES;
-    _gitDiffScroll.borderType = NSNoBorder;
-    _gitDiffScroll.drawsBackground = YES;
-    _gitDiffScroll.backgroundColor = PTWarmCardColor();
-    _gitDiffScroll.hidden = YES;
-    [_toolPageContainerView addSubview:_gitDiffScroll];
-
-    _gitDiffTextView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 0, 640)];
-    _gitDiffTextView.editable = NO;
-    _gitDiffTextView.selectable = YES;
-    _gitDiffTextView.richText = YES;
-    _gitDiffTextView.drawsBackground = NO;
-    _gitDiffTextView.usesFindBar = YES;
-    _gitDiffTextView.usesAdaptiveColorMappingForDarkAppearance = YES;
-    _gitDiffTextView.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    _gitDiffTextView.textContainerInset = NSMakeSize(18, 18);
-    _gitDiffTextView.horizontallyResizable = YES;
-    _gitDiffTextView.verticallyResizable = YES;
-    _gitDiffTextView.minSize = NSMakeSize(0, 0);
-    _gitDiffTextView.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
-    _gitDiffTextView.textContainer.widthTracksTextView = NO;
-    _gitDiffTextView.string = PTL(@"选择 Git 观察目录后打开审查。",
-        @"Select a Git observation directory, then open Review.");
-    _gitDiffScroll.documentView = _gitDiffTextView;
-
-    WKWebViewConfiguration *fileConfiguration = [[WKWebViewConfiguration alloc] init];
-    fileConfiguration.defaultWebpagePreferences.allowsContentJavaScript = YES;
-    _filePreviewWebView = [[WKWebView alloc] initWithFrame:NSZeroRect
-                                             configuration:fileConfiguration];
-    _filePreviewWebView.translatesAutoresizingMaskIntoConstraints = NO;
-    _filePreviewWebView.navigationDelegate = self;
-    _filePreviewWebView.hidden = YES;
-    if (@available(macOS 12.0, *)) _filePreviewWebView.underPageBackgroundColor = NSColor.clearColor;
-    [_toolPageContainerView addSubview:_filePreviewWebView];
-    NSURL *fileHTMLURL = [NSBundle.mainBundle URLForResource:@"index" withExtension:@"html"];
-    if (fileHTMLURL) {
-        [_filePreviewWebView loadFileURL:fileHTMLURL
-                   allowingReadAccessToURL:NSBundle.mainBundle.resourceURL];
-    }
-
-    NSVisualEffectView *fileTree = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
-    fileTree.translatesAutoresizingMaskIntoConstraints = NO;
-    fileTree.material = NSVisualEffectMaterialSidebar;
-    fileTree.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    fileTree.state = NSVisualEffectStateActive;
-    fileTree.hidden = YES;
-    _fileTreeView = fileTree;
-    [_toolContentSplitView addArrangedSubview:fileTree];
-
-    _fileTreeRootButton = PTWarmButton(PTL(@"选择文件夹", @"Choose folder"),
-        self, @selector(chooseFileTreeRoot:));
-    _fileTreeRootButton.image = [NSImage imageWithSystemSymbolName:@"folder"
-        accessibilityDescription:nil];
-    _fileTreeRootButton.imagePosition = NSImageLeft;
-    _fileTreeRootButton.alignment = NSTextAlignmentLeft;
-    [fileTree addSubview:_fileTreeRootButton];
-
-    _fileTreeSearchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
-    _fileTreeSearchField.translatesAutoresizingMaskIntoConstraints = NO;
-    _fileTreeSearchField.placeholderString = PTL(@"筛选文件…", @"Filter files…");
-    _fileTreeSearchField.target = self;
-    _fileTreeSearchField.action = @selector(filterFileTree:);
-    [fileTree addSubview:_fileTreeSearchField];
-
-    NSScrollView *fileTreeScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    fileTreeScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    fileTreeScroll.hasVerticalScroller = YES;
-    fileTreeScroll.autohidesScrollers = YES;
-    fileTreeScroll.drawsBackground = NO;
-    [fileTree addSubview:fileTreeScroll];
-    _fileOutlineView = [[NSOutlineView alloc] initWithFrame:NSZeroRect];
-    _fileOutlineView.headerView = nil;
-    _fileOutlineView.backgroundColor = NSColor.clearColor;
-    _fileOutlineView.rowHeight = 28.0;
-    _fileOutlineView.indentationPerLevel = 14.0;
-    _fileOutlineView.dataSource = self;
-    _fileOutlineView.delegate = self;
-    NSTableColumn *fileColumn = [[NSTableColumn alloc] initWithIdentifier:@"file"];
-    fileColumn.resizingMask = NSTableColumnAutoresizingMask;
-    [_fileOutlineView addTableColumn:fileColumn];
-    _fileOutlineView.outlineTableColumn = fileColumn;
-    fileTreeScroll.documentView = _fileOutlineView;
-    _fileTreeChildrenByPath = [NSMutableDictionary dictionary];
-    _fileTreeWidthBeforeCollapse = 260.0;
-    _fileTreeWidthConstraint = [fileTree.widthAnchor constraintEqualToConstant:0.0];
-    _fileTreeWidthConstraint.priority = 999;
-    _fileTreeWidthConstraint.active = YES;
-
-    [NSLayoutConstraint activateConstraints:@[
-        [header.topAnchor constraintEqualToAnchor:tool.topAnchor],
-        [header.leadingAnchor constraintEqualToAnchor:tool.leadingAnchor],
-        [header.trailingAnchor constraintEqualToAnchor:tool.trailingAnchor],
-        [header.heightAnchor constraintEqualToConstant:44],
-        [_toolTabStack.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:10],
-        [_toolTabStack.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_fileTreeToggleButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-10],
-        [_fileTreeToggleButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_fileTreeToggleButton.widthAnchor constraintEqualToConstant:34],
-        [_fileTreeToggleButton.heightAnchor constraintEqualToConstant:28],
-        [_toolReviewRefreshButton.trailingAnchor constraintEqualToAnchor:_fileTreeToggleButton.leadingAnchor constant:-7],
-        [_toolReviewRefreshButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_toolReviewRefreshButton.widthAnchor constraintEqualToConstant:54],
-        [_toolReviewRefreshButton.heightAnchor constraintEqualToConstant:28],
-        [_toolContentView.topAnchor constraintEqualToAnchor:header.bottomAnchor],
-        [_toolContentView.leadingAnchor constraintEqualToAnchor:tool.leadingAnchor],
-        [_toolContentView.trailingAnchor constraintEqualToAnchor:tool.trailingAnchor],
-        [_toolContentView.bottomAnchor constraintEqualToAnchor:tool.bottomAnchor],
-        [_toolContentSplitView.topAnchor constraintEqualToAnchor:_toolContentView.topAnchor],
-        [_toolContentSplitView.leadingAnchor constraintEqualToAnchor:_toolContentView.leadingAnchor],
-        [_toolContentSplitView.trailingAnchor constraintEqualToAnchor:_toolContentView.trailingAnchor],
-        [_toolContentSplitView.bottomAnchor constraintEqualToAnchor:_toolContentView.bottomAnchor],
-        [_gitDiffScroll.topAnchor constraintEqualToAnchor:_toolPageContainerView.topAnchor],
-        [_gitDiffScroll.leadingAnchor constraintEqualToAnchor:_toolPageContainerView.leadingAnchor],
-        [_gitDiffScroll.trailingAnchor constraintEqualToAnchor:_toolPageContainerView.trailingAnchor],
-        [_gitDiffScroll.bottomAnchor constraintEqualToAnchor:_toolPageContainerView.bottomAnchor],
-        [_filePreviewWebView.topAnchor constraintEqualToAnchor:_toolPageContainerView.topAnchor],
-        [_filePreviewWebView.leadingAnchor constraintEqualToAnchor:_toolPageContainerView.leadingAnchor],
-        [_filePreviewWebView.trailingAnchor constraintEqualToAnchor:_toolPageContainerView.trailingAnchor],
-        [_filePreviewWebView.bottomAnchor constraintEqualToAnchor:_toolPageContainerView.bottomAnchor],
-        [_fileTreeRootButton.topAnchor constraintEqualToAnchor:fileTree.topAnchor constant:10],
-        [_fileTreeRootButton.leadingAnchor constraintEqualToAnchor:fileTree.leadingAnchor constant:10],
-        [_fileTreeRootButton.trailingAnchor constraintEqualToAnchor:fileTree.trailingAnchor constant:-10],
-        [_fileTreeRootButton.heightAnchor constraintEqualToConstant:30],
-        [_fileTreeSearchField.topAnchor constraintEqualToAnchor:_fileTreeRootButton.bottomAnchor constant:8],
-        [_fileTreeSearchField.leadingAnchor constraintEqualToAnchor:fileTree.leadingAnchor constant:10],
-        [_fileTreeSearchField.trailingAnchor constraintEqualToAnchor:fileTree.trailingAnchor constant:-10],
-        [fileTreeScroll.topAnchor constraintEqualToAnchor:_fileTreeSearchField.bottomAnchor constant:8],
-        [fileTreeScroll.leadingAnchor constraintEqualToAnchor:fileTree.leadingAnchor],
-        [fileTreeScroll.trailingAnchor constraintEqualToAnchor:fileTree.trailingAnchor],
-        [fileTreeScroll.bottomAnchor constraintEqualToAnchor:fileTree.bottomAnchor]
-    ]];
-    _reviewToolPageOpen = NO;
-    _fileToolPageOpen = NO;
-    _activeToolPageKind = nil;
-    [self rebuildToolTabBar];
-    return tool;
-}
-
-- (NSView *)toolTabItemWithKind:(NSString *)kind title:(NSString *)title {
-    NSView *item = [[NSView alloc] initWithFrame:NSZeroRect];
-    item.translatesAutoresizingMaskIntoConstraints = NO;
-    PTAnimatedButton *select = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    select.translatesAutoresizingMaskIntoConstraints = NO;
-    select.title = @"";
-    select.identifier = kind;
-    select.target = self;
-    select.action = @selector(selectToolPage:);
-    select.fillColor = [_activeToolPageKind isEqual:kind] ? PTWarmChipColor() : NSColor.clearColor;
-    select.hoverFillColor = PTWarmChipColor();
-    select.pressedFillColor = PTWarmBorderColor();
-    select.strokeColor = [_activeToolPageKind isEqual:kind] ? PTWarmBorderColor() : NSColor.clearColor;
-    select.cornerRadius = 10.0;
-    [item addSubview:select];
-
-    NSTextField *label = [self label:title size:11.5 weight:NSFontWeightSemibold
-        color:[_activeToolPageKind isEqual:kind] ? NSColor.labelColor : NSColor.secondaryLabelColor];
-    [item addSubview:label];
-    PTAnimatedButton *close = PTWarmButton(@"×", self, @selector(closeToolPage:));
-    close.identifier = kind;
-    close.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
-    close.toolTip = PTL(@"关闭页面", @"Close page");
-    [item addSubview:close];
-    [NSLayoutConstraint activateConstraints:@[
-        [select.topAnchor constraintEqualToAnchor:item.topAnchor],
-        [select.leadingAnchor constraintEqualToAnchor:item.leadingAnchor],
-        [select.trailingAnchor constraintEqualToAnchor:item.trailingAnchor],
-        [select.bottomAnchor constraintEqualToAnchor:item.bottomAnchor],
-        [label.leadingAnchor constraintEqualToAnchor:item.leadingAnchor constant:12],
-        [label.centerYAnchor constraintEqualToAnchor:item.centerYAnchor],
-        [label.trailingAnchor constraintLessThanOrEqualToAnchor:close.leadingAnchor constant:-7],
-        [close.trailingAnchor constraintEqualToAnchor:item.trailingAnchor constant:-5],
-        [close.centerYAnchor constraintEqualToAnchor:item.centerYAnchor],
-        [close.widthAnchor constraintEqualToConstant:22],
-        [close.heightAnchor constraintEqualToConstant:22]
-    ]];
-    return item;
-}
-
-- (void)rebuildToolTabBar {
-    for (NSView *view in _toolTabStack.arrangedSubviews.copy) {
-        [_toolTabStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    if (_reviewToolPageOpen) {
-        NSView *review = [self toolTabItemWithKind:@"review"
-            title:PTL(@"▣  审查", @"▣  Review")];
-        [_toolTabStack addArrangedSubview:review];
-        [review.widthAnchor constraintEqualToConstant:148].active = YES;
-        [review.heightAnchor constraintEqualToConstant:32].active = YES;
-    }
-    if (_fileToolPageOpen) {
-        NSString *title = _activeFilePreviewPayload[@"title"] ?: PTL(@"打开文件", @"Open File");
-        NSView *file = [self toolTabItemWithKind:@"file"
-            title:[NSString stringWithFormat:@"▤  %@", title]];
-        [_toolTabStack addArrangedSubview:file];
-        [file.widthAnchor constraintEqualToConstant:184].active = YES;
-        [file.heightAnchor constraintEqualToConstant:32].active = YES;
-    }
-    BOOL reviewActive = [_activeToolPageKind isEqual:@"review"];
-    _toolReviewRefreshButton.hidden = !reviewActive || _gitReviewShowsTranscriptEdits;
-}
-
-- (void)showToolPageKind:(NSString *)kind animated:(BOOL)animated {
-    if (![kind isEqual:@"review"] && ![kind isEqual:@"file"]) return;
-    NSView *incoming = [kind isEqual:@"review"] ? _gitDiffScroll : _filePreviewWebView;
-    NSView *outgoing = [_activeToolPageKind isEqual:@"review"] ? _gitDiffScroll :
-        ([_activeToolPageKind isEqual:@"file"] ? _filePreviewWebView : nil);
-    _activeToolPageKind = [kind copy];
-    incoming.hidden = NO;
-    if (outgoing == incoming || !outgoing || !animated ||
-        NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        if (outgoing != incoming) outgoing.hidden = YES;
-        incoming.alphaValue = 1.0;
-        [self rebuildToolTabBar];
-        return;
-    }
-    incoming.alphaValue = 0.0;
-    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-        context.duration = 0.22;
-        context.timingFunction = [CAMediaTimingFunction functionWithName:
-            kCAMediaTimingFunctionEaseInEaseOut];
-        outgoing.animator.alphaValue = 0.0;
-        incoming.animator.alphaValue = 1.0;
-    } completionHandler:^{
-        if (![self->_activeToolPageKind isEqual:kind]) return;
-        outgoing.hidden = YES;
-        outgoing.alphaValue = 1.0;
-    }];
-    [self rebuildToolTabBar];
-}
-
-- (void)selectToolPage:(NSButton *)sender {
-    [self showToolPageKind:sender.identifier animated:YES];
-}
-
-- (void)closeToolPage:(NSButton *)sender {
-    NSString *kind = sender.identifier ?: @"";
-    if ([kind isEqual:@"review"]) {
-        _reviewToolPageOpen = NO;
-        _gitDiffExpanded = NO;
-        _gitReviewShowsTranscriptEdits = NO;
-        _transcriptEditReviewEvents = nil;
-        _gitDiffGeneration++;
-        [_gitDiffProgress stopAnimation:nil];
-        _gitDiffProgress.hidden = YES;
-        _gitDiffRefreshButton.hidden = YES;
-        _gitDiffToggleButton.title = PTL(@"打开 Git 审查  ›", @"Open Git Review  ›");
-    } else if ([kind isEqual:@"file"]) {
-        _fileToolPageOpen = NO;
-        _activeFilePreviewPayload = nil;
-    }
-    if (_reviewToolPageOpen) [self showToolPageKind:@"review" animated:YES];
-    else if (_fileToolPageOpen) [self showToolPageKind:@"file" animated:YES];
-    else {
-        _activeToolPageKind = nil;
-        [self rebuildToolTabBar];
-        [self setToolWorkspaceExpanded:NO animated:YES];
-    }
-}
-
-- (void)setFileTreeRootURL:(NSURL *)rootURL {
-    if (!rootURL.isFileURL) return;
-    BOOL directory = NO;
-    if (![NSFileManager.defaultManager fileExistsAtPath:rootURL.path isDirectory:&directory] ||
-        !directory) return;
-    _fileTreeRootURL = rootURL.URLByStandardizingPath;
-    [_fileTreeChildrenByPath removeAllObjects];
-    _fileTreeRootButton.title = _fileTreeRootURL.lastPathComponent.length
-        ? _fileTreeRootURL.lastPathComponent : _fileTreeRootURL.path;
-    _fileTreeRootButton.toolTip = _fileTreeRootURL.path;
-    [_fileOutlineView reloadData];
-}
-
-- (void)setFileTreeExpanded:(BOOL)expanded animated:(BOOL)animated {
-    if (!_fileTreeView || !_fileTreeWidthConstraint) return;
-    _fileTreeExpanded = expanded;
-    NSUInteger generation = ++_fileTreeAnimationGeneration;
-    BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    if (expanded) {
-        CGFloat desired = _fileTreeWidthBeforeCollapse > 0 ? _fileTreeWidthBeforeCollapse : 260.0;
-        CGFloat target = desired;
-        _fileTreeView.hidden = NO;
-        _fileTreeWidthConstraint.active = YES;
-        if (_fileTreeWidthConstraint.constant <= 0.0) {
-            _fileTreeWidthConstraint.constant = 0.0;
-            _fileTreeView.alphaValue = reduceMotion ? 1.0 : 0.0;
-            [_window.contentView layoutSubtreeIfNeeded];
-        }
-        if (!animated || reduceMotion) {
-            _fileTreeWidthConstraint.constant = target;
-            _fileTreeView.alphaValue = 1.0;
-            [_window.contentView layoutSubtreeIfNeeded];
-        } else {
-            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-                context.duration = 0.22;
-                context.timingFunction = [CAMediaTimingFunction functionWithName:
-                    kCAMediaTimingFunctionEaseInEaseOut];
-                self->_fileTreeWidthConstraint.animator.constant = target;
-                self->_fileTreeView.animator.alphaValue = 1.0;
-                [self->_window.contentView layoutSubtreeIfNeeded];
-            } completionHandler:nil];
-        }
-        return;
-    }
-    CGFloat width = NSWidth(_fileTreeView.frame);
-    if (width > 0.0) _fileTreeWidthBeforeCollapse = width;
-    if (!animated || reduceMotion) {
-        _fileTreeWidthConstraint.constant = 0.0;
-        _fileTreeView.alphaValue = 1.0;
-        _fileTreeView.hidden = YES;
-        [_window.contentView layoutSubtreeIfNeeded];
-        return;
-    }
-    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-        context.duration = 0.22;
-        context.timingFunction = [CAMediaTimingFunction functionWithName:
-            kCAMediaTimingFunctionEaseInEaseOut];
-        self->_fileTreeWidthConstraint.animator.constant = 0.0;
-        self->_fileTreeView.animator.alphaValue = 0.0;
-        [self->_window.contentView layoutSubtreeIfNeeded];
-    } completionHandler:^{
-        if (generation != self->_fileTreeAnimationGeneration || self->_fileTreeExpanded) return;
-        self->_fileTreeView.hidden = YES;
-        self->_fileTreeView.alphaValue = 1.0;
-    }];
-}
-
-- (void)toggleFileTree:(id)sender {
-    (void)sender;
-    [self setFileTreeExpanded:!_fileTreeExpanded animated:YES];
-}
-
-- (void)chooseFileTreeRoot:(id)sender {
-    (void)sender;
-    NSOpenPanel *panel = NSOpenPanel.openPanel;
-    panel.canChooseFiles = NO;
-    panel.canChooseDirectories = YES;
-    panel.allowsMultipleSelection = NO;
-    [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse result) {
-        if (result == NSModalResponseOK) {
-            self->_fileTreeRootManuallySelected = YES;
-            self->_fileTreeRootSessionID = [self->_selectedSession.sessionID copy];
-            [self setFileTreeRootURL:panel.URL];
-        }
-    }];
-}
-
-- (void)filterFileTree:(id)sender {
-    (void)sender;
-    [_fileOutlineView reloadData];
-}
-
-- (NSArray<NSDictionary *> *)fileTreeChildrenForItem:(NSDictionary *)item {
-    NSURL *directoryURL = item ? item[@"url"] : _fileTreeRootURL;
-    if (!directoryURL) return @[];
-    NSString *cacheKey = directoryURL.path ?: @"";
-    NSArray<NSDictionary *> *children = _fileTreeChildrenByPath[cacheKey];
-    if (!children) {
-        children = PTFileTreeChildren(directoryURL, nil) ?: @[];
-        _fileTreeChildrenByPath[cacheKey] = children;
-    }
-    NSString *query = [_fileTreeSearchField.stringValue
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (query.length == 0) return children;
-    NSPredicate *predicate = [NSPredicate predicateWithBlock:
-        ^BOOL(NSDictionary *child, NSDictionary *bindings) {
-            (void)bindings;
-            return [child[@"name"] rangeOfString:query
-                options:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch].location != NSNotFound;
-        }];
-    return [children filteredArrayUsingPredicate:predicate];
-}
-
-- (NSInteger)outlineView:(NSOutlineView *)outlineView numberOfChildrenOfItem:(id)item {
-    if (outlineView != _fileOutlineView) return 0;
-    return [self fileTreeChildrenForItem:[item isKindOfClass:NSDictionary.class] ? item : nil].count;
-}
-
-- (id)outlineView:(NSOutlineView *)outlineView child:(NSInteger)index ofItem:(id)item {
-    if (outlineView != _fileOutlineView) return nil;
-    NSArray *children = [self fileTreeChildrenForItem:
-        [item isKindOfClass:NSDictionary.class] ? item : nil];
-    return index >= 0 && index < (NSInteger)children.count ? children[index] : nil;
-}
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView isItemExpandable:(id)item {
-    return outlineView == _fileOutlineView &&
-        [item isKindOfClass:NSDictionary.class] && [item[@"directory"] boolValue];
-}
-
-- (NSView *)outlineView:(NSOutlineView *)outlineView
-     viewForTableColumn:(NSTableColumn *)tableColumn
-                  item:(id)item {
-    (void)tableColumn;
-    if (outlineView != _fileOutlineView || ![item isKindOfClass:NSDictionary.class]) return nil;
-    NSTableCellView *cell = [outlineView makeViewWithIdentifier:@"file-tree-cell" owner:self];
-    if (!cell) {
-        cell = [[NSTableCellView alloc] initWithFrame:NSZeroRect];
-        cell.identifier = @"file-tree-cell";
-        NSImageView *icon = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        icon.translatesAutoresizingMaskIntoConstraints = NO;
-        icon.imageScaling = NSImageScaleProportionallyDown;
-        cell.imageView = icon;
-        [cell addSubview:icon];
-        NSTextField *name = [NSTextField labelWithString:@""];
-        name.translatesAutoresizingMaskIntoConstraints = NO;
-        name.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        name.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightRegular];
-        cell.textField = name;
-        [cell addSubview:name];
-        [NSLayoutConstraint activateConstraints:@[
-            [icon.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:2],
-            [icon.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
-            [icon.widthAnchor constraintEqualToConstant:16],
-            [icon.heightAnchor constraintEqualToConstant:16],
-            [name.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:7],
-            [name.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-6],
-            [name.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor]
-        ]];
-    }
-    BOOL directory = [item[@"directory"] boolValue];
-    cell.textField.stringValue = item[@"name"] ?: @"";
-    cell.textField.toolTip = [item[@"url"] path];
-    cell.imageView.image = [NSImage imageWithSystemSymbolName:directory ? @"folder" : @"doc.text"
-        accessibilityDescription:directory ? PTL(@"文件夹", @"Folder") : PTL(@"文件", @"File")];
-    cell.imageView.contentTintColor = directory ? PTWarmAccentColor() : NSColor.secondaryLabelColor;
-    return cell;
-}
-
-- (void)outlineViewSelectionDidChange:(NSNotification *)notification {
-    if (notification.object != _fileOutlineView) return;
-    NSInteger row = _fileOutlineView.selectedRow;
-    if (row < 0) return;
-    NSDictionary *item = [_fileOutlineView itemAtRow:row];
-    if (![item isKindOfClass:NSDictionary.class]) return;
-    if ([item[@"directory"] boolValue]) {
-        if ([_fileOutlineView isItemExpanded:item]) [_fileOutlineView collapseItem:item];
-        else [_fileOutlineView expandItem:item];
-        return;
-    }
-    NSURL *url = item[@"url"];
-    if ([url isKindOfClass:NSURL.class]) [self openPreviewFileURL:url];
-}
-
-- (void)renderActiveFilePreview {
-    if (!_filePreviewWebReady) return;
-    if (!_activeFilePreviewPayload) {
-        [_filePreviewWebView evaluateJavaScript:@"document.body.classList.add('file-preview-mode');document.getElementById('content').innerHTML='<div class=\"file-empty\"><div>▱</div><h2>打开文件</h2><p>从右侧目录树选择文件</p></div>';" completionHandler:nil];
-        return;
-    }
-    NSData *data = [NSJSONSerialization dataWithJSONObject:_activeFilePreviewPayload options:0 error:nil];
-    NSString *json = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-    if (!json) return;
-    NSString *script = [NSString stringWithFormat:
-        @"window.PrettyTermRenderer.renderFilePreview(%@); null;", json];
-    [_filePreviewWebView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
-        (void)result;
-        if (error) self->_statusLabel.stringValue = PTL(@"文件预览显示失败", @"File preview display failed");
-    }];
-}
-
-- (void)openFileWorkspace:(id)sender {
-    (void)sender;
-    if (![_fileTreeRootSessionID isEqual:_selectedSession.sessionID]) {
-        _fileTreeRootManuallySelected = NO;
-        _fileTreeRootSessionID = [_selectedSession.sessionID copy];
-    }
-    if (!_fileTreeRootManuallySelected &&
-        (!_fileTreeRootURL || ![_fileTreeRootURL.path isEqual:_selectedSession.cwd])) {
-        NSString *cwd = _selectedSession.cwd.stringByStandardizingPath;
-        if (cwd.length > 0) [self setFileTreeRootURL:[NSURL fileURLWithPath:cwd isDirectory:YES]];
-    }
-    void (^openFiles)(void) = ^{
-        self->_fileToolPageOpen = YES;
-        [self showToolPageKind:@"file" animated:YES];
-        [self setToolWorkspaceExpanded:YES animated:YES];
-        [self setFileTreeExpanded:YES animated:YES];
-        [self rebuildToolTabBar];
-    };
-    openFiles();
-}
-
-- (void)openPreviewFileURL:(NSURL *)url {
-    NSError *error = nil;
-    NSDictionary<NSString *, NSString *> *payload = PTFilePreviewPayloadForURL(url, &error);
-    if (!payload) {
-        _statusLabel.stringValue = error.localizedDescription ?: PTL(@"这个文件不提供预览", @"Preview is unavailable for this file");
-        return;
-    }
-    _activeFilePreviewPayload = payload;
-    void (^openFile)(void) = ^{
-        self->_fileToolPageOpen = YES;
-        [self showToolPageKind:@"file" animated:YES];
-        [self setToolWorkspaceExpanded:YES animated:YES];
-        [self rebuildToolTabBar];
-        [self renderActiveFilePreview];
-    };
-    openFile();
-}
-
-- (NSView *)buildConversation {
-    PTAppearanceSurfaceView *workspace = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    workspace.translatesAutoresizingMaskIntoConstraints = NO;
-    workspace.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
-
-    PTWorkspaceSplitView *workspaceSplit = [[PTWorkspaceSplitView alloc] initWithFrame:NSZeroRect];
-    workspaceSplit.translatesAutoresizingMaskIntoConstraints = NO;
-    workspaceSplit.vertical = YES;
-    workspaceSplit.dividerStyle = NSSplitViewDividerStyleThin;
-    workspaceSplit.delegate = self;
-    _workspaceSplitView = workspaceSplit;
-    [workspace addSubview:workspaceSplit];
-
-    PTAppearanceSurfaceView *pane = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    pane.translatesAutoresizingMaskIntoConstraints = NO;
-    pane.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
-    _conversationPane = pane;
-
-    NSVisualEffectView *header = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
-    header.translatesAutoresizingMaskIntoConstraints = NO;
-    header.material = NSVisualEffectMaterialHeaderView;
-    header.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    header.state = NSVisualEffectStateActive;
-    [pane addSubview:header];
-
-    _conversationTitle = [self label:PTL(@"选择一个 Claude 会话", @"Select a conversation") size:14 weight:NSFontWeightBold color:NSColor.labelColor];
-    [_conversationTitle setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [header addSubview:_conversationTitle];
-    _conversationDetail = [self label:PTL(@"显示老师和 Claude 的文本对话", @"Claude transcript view") size:10.5 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    [_conversationDetail setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [header addSubview:_conversationDetail];
-
-    _modelPicker = [[PTWarmPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    _modelPicker.translatesAutoresizingMaskIntoConstraints = NO;
-    _modelPicker.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
-    _modelPicker.target = self;
-    _modelPicker.action = @selector(changeModel:);
-    [_modelPicker addItemWithTitle:PTL(@"当前模型", @"Current model")];
-    NSArray<NSArray<NSString *> *> *models = @[
-        @[@"Claude Fable 5", @"claude-fable-5"],
-        @[@"Claude Opus 5.5", @"claude-opus-5-5"],
-        @[@"Claude Sonnet 5.5", @"claude-sonnet-5-5"],
-        @[@"Claude Sonnet 4.6", @"claude-sonnet-4-6"],
-        @[@"Claude Haiku 4.5", @"claude-haiku-4-5"]
-    ];
-    for (NSArray<NSString *> *entry in models) {
-        [_modelPicker addItemWithTitle:entry[0]];
-        _modelPicker.lastItem.representedObject = entry[1];
-    }
-    _modelPicker.enabled = NO;
-
-    _remoteButton = PTWarmButton(@"Remote", self, @selector(enableRemoteControl:));
-    _remoteButton.enabled = NO;
-    _remoteButton.toolTip = PTL(@"在 Claude.ai 继续当前会话", @"Continue the current conversation on Claude.ai");
-    [header addSubview:_remoteButton];
-
-    _compactButton = PTWarmButton(@"Compact", self, @selector(compactConversation:));
-    _compactButton.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-    _compactButton.enabled = NO;
-    _compactButton.toolTip = PTL(@"向当前 Claude Code 会话发送 /compact", @"Send /compact to the current Claude Code conversation");
-    [header addSubview:_compactButton];
-
-    _inspectorToggleButton = PTWarmButton(@"", self, @selector(toggleInspector:));
-    _inspectorToggleButton.image = [NSImage imageWithSystemSymbolName:@"list.bullet" accessibilityDescription:PTL(@"检查器摘要", @"Inspector summary")];
-    _inspectorToggleButton.toolTip = PTL(@"显示或收起检查器", @"Show or collapse the inspector");
-    [header addSubview:_inspectorToggleButton];
-
-    _connectButton = PTWarmButton(PTL(@"连接 Claude", @"Sync"), self, @selector(connectSelectedSession:));
-    _connectButton.contentTintColor = PTWarmAccentColor();
-    _connectButton.enabled = NO;
-    _connectButton.toolTip = PTL(@"连接选中的 Claude Code 后台会话", @"Connect the selected Claude Code conversation");
-    [header addSubview:_connectButton];
-
-    PTAnimatedButton *floatingButton = PTWarmButton(@"", self, @selector(toggleFloatingConversation:));
-    floatingButton.image = [NSImage imageWithSystemSymbolName:@"pin"
-        accessibilityDescription:PTL(@"悬浮当前对话", @"Float current conversation")];
-    _floatingButton = floatingButton;
-    _floatingButton.toolTip = PTL(@"悬浮当前对话（⌘O）", @"Float current conversation (⌘O)");
-    _floatingButton.enabled = NO;
-    [header addSubview:_floatingButton];
-
-    _workspaceTabScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    _workspaceTabScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    _workspaceTabScroll.drawsBackground = NO;
-    _workspaceTabScroll.borderType = NSNoBorder;
-    _workspaceTabScroll.hasHorizontalScroller = NO;
-    _workspaceTabScroll.hasVerticalScroller = NO;
-    _workspaceTabScroll.autohidesScrollers = YES;
-    [pane addSubview:_workspaceTabScroll];
-
-    _workspaceTabStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    _workspaceTabStack.translatesAutoresizingMaskIntoConstraints = NO;
-    _workspaceTabStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    _workspaceTabStack.alignment = NSLayoutAttributeCenterY;
-    _workspaceTabStack.spacing = 6;
-    _workspaceTabStack.edgeInsets = NSEdgeInsetsMake(5, 10, 5, 10);
-    _workspaceTabScroll.documentView = _workspaceTabStack;
-
-    WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
-    configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
-    [configuration.userContentController addScriptMessageHandler:self name:@"quoteSelection"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptEditReview"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptFile"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"answerQuestion"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"copyAssistantOutput"];
-    _conversationView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
-    _conversationView.translatesAutoresizingMaskIntoConstraints = NO;
-    _conversationView.navigationDelegate = self;
-    if (@available(macOS 12.0, *)) _conversationView.underPageBackgroundColor = NSColor.clearColor;
-    [pane addSubview:_conversationView];
-    NSURL *htmlURL = [NSBundle.mainBundle URLForResource:@"index" withExtension:@"html"];
-    if (htmlURL) [_conversationView loadFileURL:htmlURL allowingReadAccessToURL:NSBundle.mainBundle.resourceURL];
-
-    PTAppearanceSurfaceView *composerBar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    composerBar.translatesAutoresizingMaskIntoConstraints = NO;
-    composerBar.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
-    [pane addSubview:composerBar];
-
-    _composerTargetLabel = [self label:PTL(@"发送给当前会话", @"Send to the current conversation") size:10.5 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
-    [composerBar addSubview:_composerTargetLabel];
-
-    _imagePreviewScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    _imagePreviewScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    _imagePreviewScroll.drawsBackground = NO;
-    _imagePreviewScroll.hasHorizontalScroller = YES;
-    _imagePreviewScroll.hasVerticalScroller = NO;
-    _imagePreviewScroll.autohidesScrollers = YES;
-    _imagePreviewScroll.hidden = YES;
-    _composerSurface = [[PTComposerDropSurfaceView alloc] initWithFrame:NSZeroRect];
-    _composerSurface.translatesAutoresizingMaskIntoConstraints = NO;
-    __weak typeof(self) weakSelf = self;
-    _composerSurface.dropHandler = ^BOOL(NSArray<NSURL *> *urls) {
-        return [weakSelf addComposerAttachmentURLs:urls floating:NO];
-    };
-    [composerBar addSubview:_composerSurface];
-
-    [_composerSurface addSubview:_imagePreviewScroll];
-
-    _imagePreviewStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    _imagePreviewStack.translatesAutoresizingMaskIntoConstraints = NO;
-    _imagePreviewStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    _imagePreviewStack.alignment = NSLayoutAttributeCenterY;
-    _imagePreviewStack.spacing = 7;
-    _imagePreviewStack.edgeInsets = NSEdgeInsetsMake(2, 0, 2, 0);
-    _imagePreviewScroll.documentView = _imagePreviewStack;
-
-    PTAnimatedButton *addButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    addButton.title = @"＋";
-    addButton.font = [NSFont systemFontOfSize:25 weight:NSFontWeightLight];
-    addButton.contentTintColor = NSColor.labelColor;
-    addButton.fillColor = NSColor.clearColor;
-    addButton.hoverFillColor = PTWarmChipColor();
-    addButton.pressedFillColor = PTWarmBorderColor();
-    addButton.cornerRadius = 19;
-    addButton.target = self;
-    addButton.action = @selector(chooseAttachments:);
-    _imageButton = addButton;
-    _imageButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _imageButton.toolTip = PTL(@"添加文件或图片，也可以直接拖入", @"Add files or images, or drag them here");
-    _imageButton.enabled = NO;
-    [_composerSurface addSubview:_imageButton];
-
-    NSScrollView *composerScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    composerScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    composerScroll.borderType = NSNoBorder;
-    composerScroll.hasVerticalScroller = YES;
-    composerScroll.autohidesScrollers = YES;
-    composerScroll.drawsBackground = NO;
-    [_composerSurface addSubview:composerScroll];
-
-    _composerTextView = [[PTComposerTextView alloc] initWithFrame:NSMakeRect(0, 0, 500, 52)];
-    _composerTextView.font = [NSFont systemFontOfSize:15 weight:NSFontWeightRegular];
-    _composerTextView.drawsBackground = NO;
-    _composerTextView.richText = NO;
-    _composerTextView.allowsUndo = YES;
-    _composerTextView.verticallyResizable = YES;
-    _composerTextView.horizontallyResizable = NO;
-    _composerTextView.textContainer.widthTracksTextView = YES;
-    _composerTextView.textContainerInset = NSMakeSize(7, 9);
-    _composerTextView.placeholderText = PTL(@"给 Claude 发消息", @"Message Claude");
-    _composerTextView.editable = YES;
-    _composerTextView.submitHandler = ^{
-        [weakSelf sendMessage:nil];
-    };
-    _composerTextView.commandMenuHandler = ^{
-        PTAppDelegate *self = weakSelf;
-        if (self) [self updateClaudeCommandsForComposer:self->_composerTextView];
-    };
-    _composerTextView.commandKeyHandler = ^BOOL(NSEvent *event) {
-        PTAppDelegate *self = weakSelf;
-        return self ? [self handleCommandKey:event composer:self->_composerTextView] : NO;
-    };
-    _composerTextView.imagePasteHandler = ^BOOL(NSPasteboard *pasteboard) {
-        return [weakSelf handleImagePasteboard:pasteboard];
-    };
-    _composerTextView.fileDropHandler = ^BOOL(NSArray<NSURL *> *urls) {
-        return [weakSelf addComposerAttachmentURLs:urls floating:NO];
-    };
-    composerScroll.documentView = _composerTextView;
-
-    _composerEffortButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    _composerEffortButton.title = PTL(@"推理强度⌄", @"Effort⌄");
-    _composerEffortButton.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-    _composerEffortButton.contentTintColor = NSColor.secondaryLabelColor;
-    _composerEffortButton.fillColor = NSColor.clearColor;
-    _composerEffortButton.hoverFillColor = PTWarmChipColor();
-    _composerEffortButton.pressedFillColor = PTWarmBorderColor();
-    _composerEffortButton.cornerRadius = 17;
-    _composerEffortButton.target = self;
-    _composerEffortButton.action = @selector(showComposerOptions:);
-    _composerEffortButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _composerEffortButton.enabled = NO;
-    [_composerSurface addSubview:_composerEffortButton];
-
-    PTAnimatedButton *sendButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    sendButton.title = @"↑";
-    sendButton.font = [NSFont systemFontOfSize:23 weight:NSFontWeightMedium];
-    sendButton.contentTintColor = NSColor.whiteColor;
-    sendButton.fillColor = PTColor(0.12, 0.11, 0.10);
-    sendButton.hoverFillColor = PTWarmAccentColor();
-    sendButton.pressedFillColor = PTColor(0.45, 0.18, 0.06);
-    sendButton.cornerRadius = 22;
-    sendButton.target = self;
-    sendButton.action = @selector(sendMessage:);
-    _sendButton = sendButton;
-    _sendButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _sendButton.toolTip = PTL(@"发送消息", @"Send message");
-    _sendButton.enabled = NO;
-    [_composerSurface addSubview:_sendButton];
-
-    NSVisualEffectView *statusBar = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
-    statusBar.translatesAutoresizingMaskIntoConstraints = NO;
-    statusBar.material = NSVisualEffectMaterialHeaderView;
-    statusBar.blendingMode = NSVisualEffectBlendingModeWithinWindow;
-    statusBar.state = NSVisualEffectStateActive;
-    [pane addSubview:statusBar];
-    _bottomStatusLabel = [self label:PTL(@"Claude Code 后台执行", @"Claude Code runs in the background") size:10 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
-    [statusBar addSubview:_bottomStatusLabel];
-
-    _composerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:112];
-    _imagePreviewHeightConstraint = [_imagePreviewScroll.heightAnchor constraintEqualToConstant:0];
-    [NSLayoutConstraint activateConstraints:@[
-        [header.topAnchor constraintEqualToAnchor:pane.topAnchor],
-        [header.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor],
-        [header.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
-        [header.heightAnchor constraintEqualToConstant:60],
-        [_conversationTitle.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:18],
-        [_conversationTitle.topAnchor constraintEqualToAnchor:header.topAnchor constant:10],
-        [_conversationDetail.leadingAnchor constraintEqualToAnchor:_conversationTitle.leadingAnchor],
-        [_conversationDetail.topAnchor constraintEqualToAnchor:_conversationTitle.bottomAnchor constant:2],
-        [_connectButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-14],
-        [_connectButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_connectButton.widthAnchor constraintEqualToConstant:84],
-        [_compactButton.trailingAnchor constraintEqualToAnchor:_connectButton.leadingAnchor constant:-8],
-        [_compactButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_compactButton.widthAnchor constraintEqualToConstant:68],
-        [_floatingButton.trailingAnchor constraintEqualToAnchor:_compactButton.leadingAnchor constant:-8],
-        [_floatingButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_floatingButton.widthAnchor constraintEqualToConstant:34],
-        [_floatingButton.heightAnchor constraintEqualToConstant:28],
-        [_remoteButton.trailingAnchor constraintEqualToAnchor:_floatingButton.leadingAnchor constant:-8],
-        [_remoteButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [_remoteButton.widthAnchor constraintEqualToConstant:60],
-        [_conversationTitle.trailingAnchor constraintLessThanOrEqualToAnchor:_remoteButton.leadingAnchor constant:-12],
-        [_conversationDetail.trailingAnchor constraintLessThanOrEqualToAnchor:_remoteButton.leadingAnchor constant:-12],
-
-        [_workspaceTabScroll.topAnchor constraintEqualToAnchor:header.bottomAnchor],
-        [_workspaceTabScroll.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor],
-        [_workspaceTabScroll.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
-        [_workspaceTabScroll.heightAnchor constraintEqualToConstant:44],
-        [_workspaceTabStack.leadingAnchor constraintEqualToAnchor:_workspaceTabScroll.contentView.leadingAnchor],
-        [_workspaceTabStack.topAnchor constraintEqualToAnchor:_workspaceTabScroll.contentView.topAnchor],
-        [_workspaceTabStack.bottomAnchor constraintEqualToAnchor:_workspaceTabScroll.contentView.bottomAnchor],
-
-        [composerBar.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor],
-        [composerBar.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
-        [composerBar.bottomAnchor constraintEqualToAnchor:statusBar.topAnchor],
-        _composerHeightConstraint,
-        [_composerTargetLabel.leadingAnchor constraintEqualToAnchor:_composerSurface.leadingAnchor constant:4],
-        [_composerTargetLabel.topAnchor constraintEqualToAnchor:composerBar.topAnchor constant:8],
-        [_composerSurface.centerXAnchor constraintEqualToAnchor:composerBar.centerXAnchor],
-        [_composerSurface.leadingAnchor constraintGreaterThanOrEqualToAnchor:composerBar.leadingAnchor constant:14],
-        [_composerSurface.widthAnchor constraintLessThanOrEqualToConstant:800],
-        [_composerSurface.topAnchor constraintEqualToAnchor:_composerTargetLabel.bottomAnchor constant:6],
-        [_composerSurface.bottomAnchor constraintEqualToAnchor:composerBar.bottomAnchor constant:-10],
-        [_imagePreviewScroll.leadingAnchor constraintEqualToAnchor:_composerSurface.leadingAnchor constant:12],
-        [_imagePreviewScroll.trailingAnchor constraintEqualToAnchor:_composerSurface.trailingAnchor constant:-12],
-        [_imagePreviewScroll.topAnchor constraintEqualToAnchor:_composerSurface.topAnchor constant:7],
-        _imagePreviewHeightConstraint,
-        [_imagePreviewStack.leadingAnchor constraintEqualToAnchor:_imagePreviewScroll.contentView.leadingAnchor],
-        [_imagePreviewStack.topAnchor constraintEqualToAnchor:_imagePreviewScroll.contentView.topAnchor],
-        [_imagePreviewStack.bottomAnchor constraintEqualToAnchor:_imagePreviewScroll.contentView.bottomAnchor],
-        [_imageButton.leadingAnchor constraintEqualToAnchor:_composerSurface.leadingAnchor constant:10],
-        [_imageButton.widthAnchor constraintEqualToConstant:38],
-        [_imageButton.heightAnchor constraintEqualToConstant:38],
-        [composerScroll.leadingAnchor constraintEqualToAnchor:_imageButton.trailingAnchor constant:6],
-        [composerScroll.topAnchor constraintEqualToAnchor:_imagePreviewScroll.bottomAnchor constant:2],
-        [composerScroll.bottomAnchor constraintEqualToAnchor:_composerSurface.bottomAnchor constant:-7],
-        [_imageButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [composerScroll.trailingAnchor constraintEqualToAnchor:_composerEffortButton.leadingAnchor constant:-5],
-        [_composerEffortButton.trailingAnchor constraintEqualToAnchor:_sendButton.leadingAnchor constant:-6],
-        [_composerEffortButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [_composerEffortButton.widthAnchor constraintEqualToConstant:92],
-        [_composerEffortButton.heightAnchor constraintEqualToConstant:34],
-        [_sendButton.trailingAnchor constraintEqualToAnchor:_composerSurface.trailingAnchor constant:-10],
-        [_sendButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [_sendButton.widthAnchor constraintEqualToConstant:44],
-        [_sendButton.heightAnchor constraintEqualToConstant:44],
-        [statusBar.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor],
-        [statusBar.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
-        [statusBar.bottomAnchor constraintEqualToAnchor:pane.bottomAnchor],
-        [statusBar.heightAnchor constraintEqualToConstant:26],
-        [_bottomStatusLabel.leadingAnchor constraintEqualToAnchor:statusBar.leadingAnchor constant:18],
-        [_bottomStatusLabel.trailingAnchor constraintEqualToAnchor:statusBar.trailingAnchor constant:-16],
-        [_bottomStatusLabel.centerYAnchor constraintEqualToAnchor:statusBar.centerYAnchor],
-
-        [_conversationView.topAnchor constraintEqualToAnchor:_workspaceTabScroll.bottomAnchor],
-        [_conversationView.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor],
-        [_conversationView.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
-        [_conversationView.bottomAnchor constraintEqualToAnchor:composerBar.topAnchor]
-    ]];
-    NSLayoutConstraint *readingWidth = [_composerSurface.widthAnchor constraintEqualToAnchor:composerBar.widthAnchor constant:-28];
-    readingWidth.priority = NSLayoutPriorityDragThatCannotResizeWindow;
-    readingWidth.active = YES;
-    [self updateWorkspaceTabBar];
-    [self buildHomeInPane:pane];
-    NSView *toolWorkspace = [self buildToolWorkspace];
-    [workspaceSplit addArrangedSubview:pane];
-    _toolWorkspaceWidthConstraint = [toolWorkspace.widthAnchor constraintEqualToConstant:0.0];
-    _toolWorkspaceWidthConstraint.priority = 999;
-    _toolWorkspaceWidthConstraint.active = YES;
-    toolWorkspace.hidden = YES;
-    _toolWorkspaceWidthBeforeCollapse = 620.0;
-    [NSLayoutConstraint activateConstraints:@[
-        [workspaceSplit.topAnchor constraintEqualToAnchor:workspace.topAnchor],
-        [workspaceSplit.leadingAnchor constraintEqualToAnchor:workspace.leadingAnchor],
-        [workspaceSplit.trailingAnchor constraintEqualToAnchor:workspace.trailingAnchor],
-        [workspaceSplit.bottomAnchor constraintEqualToAnchor:workspace.bottomAnchor]
-    ]];
-    return workspace;
-}
-
-- (void)buildHomeInPane:(NSView *)pane {
-    NSString *draft = _homePromptTextView.string ?: @"";
-    PTAppearanceSurfaceView *home = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    home.translatesAutoresizingMaskIntoConstraints = NO;
-    home.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
-    home.hidden = !_homeVisible;
-    _homeView = home;
-    [pane addSubview:home];
-    PTAnimatedButton *back = PTWarmButton(PTL(@"返回会话", @"Back to conversation"), self, @selector(hideHome:));
-    [home addSubview:back];
-    PTAnimatedButton *newConversation = PTWarmButton(PTL(@"＋ 新建对话", @"＋ New conversation"), self, @selector(startBlankHomeConversation:));
-    [home addSubview:newConversation];
-
-    NSView *welcome = [NSView new];
-    welcome.translatesAutoresizingMaskIntoConstraints = NO;
-    [home addSubview:welcome];
-    NSImageView *icon = [NSImageView new];
-    icon.translatesAutoresizingMaskIntoConstraints = NO;
-    icon.image = [NSImage imageNamed:@"PrettyTermLogo"];
-    icon.imageScaling = NSImageScaleProportionallyUpOrDown;
-    [welcome addSubview:icon];
-    _homeTitleLabel = [self label:@"" size:26 weight:NSFontWeightMedium color:NSColor.labelColor];
-    _homeTitleLabel.alignment = NSTextAlignmentCenter;
-    _homeTitleLabel.maximumNumberOfLines = 0;
-    _homeTitleLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    [welcome addSubview:_homeTitleLabel];
-    NSTextField *subtitle = [self label:PTL(@"从一个想法，开始新的对话", @"Start a new conversation with an idea")
-        size:13 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    subtitle.alignment = NSTextAlignmentCenter;
-    [welcome addSubview:subtitle];
-
-    NSView *inputArea = [NSView new];
-    inputArea.translatesAutoresizingMaskIntoConstraints = NO;
-    [home addSubview:inputArea];
-    _homeProjectPicker = [[PTWarmPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    _homeProjectPicker.translatesAutoresizingMaskIntoConstraints = NO;
-    _homeProjectPicker.target = self;
-    _homeProjectPicker.action = @selector(changeHomeProject:);
-    [inputArea addSubview:_homeProjectPicker];
-    PTComposerDropSurfaceView *card = [[PTComposerDropSurfaceView alloc] initWithFrame:NSZeroRect];
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-    [inputArea addSubview:card];
-    NSScrollView *scroll = [NSScrollView new];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    scroll.drawsBackground = NO;
-    scroll.hasVerticalScroller = YES;
-    scroll.autohidesScrollers = YES;
-    [card addSubview:scroll];
-    _homePromptTextView = [[PTComposerTextView alloc] initWithFrame:NSMakeRect(0, 0, 500, 90)];
-    _homePromptTextView.font = [NSFont systemFontOfSize:16];
-    _homePromptTextView.drawsBackground = NO;
-    _homePromptTextView.richText = NO;
-    _homePromptTextView.allowsUndo = YES;
-    _homePromptTextView.verticallyResizable = YES;
-    _homePromptTextView.horizontallyResizable = NO;
-    _homePromptTextView.textContainer.widthTracksTextView = YES;
-    _homePromptTextView.textContainerInset = NSMakeSize(8, 10);
-    _homePromptTextView.placeholderText = PTL(@"随心输入，开始新的对话", @"Ask anything to start a new conversation");
-    _homePromptTextView.string = draft;
-    __weak typeof(self) weakSelf = self;
-    _homePromptTextView.submitHandler = ^{ [weakSelf startHomeConversation:nil]; };
-    scroll.documentView = _homePromptTextView;
-    PTAnimatedButton *send = PTWarmButton(@"↑", self, @selector(startHomeConversation:));
-    send.font = [NSFont systemFontOfSize:23 weight:NSFontWeightMedium];
-    send.fillColor = PTColor(0.12, 0.11, 0.10);
-    send.contentTintColor = NSColor.whiteColor;
-    send.cornerRadius = 22;
-    [card addSubview:send];
-    NSTextField *engine = [self label:@"Claude Code" size:12 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
-    [card addSubview:engine];
-    _homeStatusLabel = [self label:@"" size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    _homeStatusLabel.maximumNumberOfLines = 2;
-    _homeStatusLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    [inputArea addSubview:_homeStatusLabel];
-    NSLayoutConstraint *width = [inputArea.widthAnchor constraintEqualToAnchor:home.widthAnchor constant:-64];
-    width.priority = NSLayoutPriorityDragThatCannotResizeWindow;
-    [NSLayoutConstraint activateConstraints:@[
-        [home.leadingAnchor constraintEqualToAnchor:pane.leadingAnchor], [home.trailingAnchor constraintEqualToAnchor:pane.trailingAnchor],
-        [home.topAnchor constraintEqualToAnchor:pane.topAnchor], [home.bottomAnchor constraintEqualToAnchor:pane.bottomAnchor],
-        [back.topAnchor constraintEqualToAnchor:home.topAnchor constant:16], [back.trailingAnchor constraintEqualToAnchor:home.trailingAnchor constant:-20],
-        [newConversation.topAnchor constraintEqualToAnchor:home.topAnchor constant:16], [newConversation.leadingAnchor constraintEqualToAnchor:home.leadingAnchor constant:20],
-        [welcome.centerXAnchor constraintEqualToAnchor:home.centerXAnchor], [welcome.centerYAnchor constraintEqualToAnchor:home.centerYAnchor constant:-80],
-        [welcome.widthAnchor constraintEqualToAnchor:home.widthAnchor constant:-48],
-        [icon.topAnchor constraintEqualToAnchor:welcome.topAnchor], [icon.centerXAnchor constraintEqualToAnchor:welcome.centerXAnchor],
-        [icon.widthAnchor constraintEqualToConstant:54], [icon.heightAnchor constraintEqualToConstant:54],
-        [_homeTitleLabel.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:24],
-        [_homeTitleLabel.leadingAnchor constraintEqualToAnchor:welcome.leadingAnchor], [_homeTitleLabel.trailingAnchor constraintEqualToAnchor:welcome.trailingAnchor],
-        [subtitle.topAnchor constraintEqualToAnchor:_homeTitleLabel.bottomAnchor constant:12],
-        [subtitle.centerXAnchor constraintEqualToAnchor:welcome.centerXAnchor], [subtitle.bottomAnchor constraintEqualToAnchor:welcome.bottomAnchor],
-        [inputArea.centerXAnchor constraintEqualToAnchor:home.centerXAnchor], width, [inputArea.widthAnchor constraintLessThanOrEqualToConstant:800],
-        [inputArea.bottomAnchor constraintEqualToAnchor:home.bottomAnchor constant:-28],
-        [_homeProjectPicker.topAnchor constraintEqualToAnchor:inputArea.topAnchor], [_homeProjectPicker.leadingAnchor constraintEqualToAnchor:inputArea.leadingAnchor constant:8],
-        [_homeProjectPicker.widthAnchor constraintLessThanOrEqualToAnchor:inputArea.widthAnchor constant:-16], [_homeProjectPicker.heightAnchor constraintEqualToConstant:32],
-        [card.topAnchor constraintEqualToAnchor:_homeProjectPicker.bottomAnchor constant:10],
-        [card.leadingAnchor constraintEqualToAnchor:inputArea.leadingAnchor], [card.trailingAnchor constraintEqualToAnchor:inputArea.trailingAnchor], [card.heightAnchor constraintEqualToConstant:164],
-        [scroll.topAnchor constraintEqualToAnchor:card.topAnchor constant:12], [scroll.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [scroll.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14], [scroll.bottomAnchor constraintEqualToAnchor:send.topAnchor constant:-6],
-        [send.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12], [send.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-12],
-        [send.widthAnchor constraintEqualToConstant:44], [send.heightAnchor constraintEqualToConstant:44],
-        [engine.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:22], [engine.centerYAnchor constraintEqualToAnchor:send.centerYAnchor],
-        [_homeStatusLabel.leadingAnchor constraintEqualToAnchor:inputArea.leadingAnchor constant:8], [_homeStatusLabel.trailingAnchor constraintEqualToAnchor:inputArea.trailingAnchor constant:-8],
-        [_homeStatusLabel.topAnchor constraintEqualToAnchor:card.bottomAnchor constant:8], [_homeStatusLabel.bottomAnchor constraintEqualToAnchor:inputArea.bottomAnchor]
-    ]];
-    [self updateHomeProjects];
-}
-
-- (void)updateHomeProjects {
-    [_homeProjectPicker removeAllItems];
-    NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
-    if (_homeProjectPath.length) [paths addObject:_homeProjectPath];
-    for (PTSessionInfo *session in _sessions) if (session.cwd.length) [paths addObject:session.cwd];
-    if (!_homeProjectPath.length) [_homeProjectPicker addItemWithTitle:PTL(@"选择项目", @"Choose a project")];
-    for (NSString *path in paths) {
-        [_homeProjectPicker addItemWithTitle:[NSString stringWithFormat:@"%@  ·  %@", path.lastPathComponent, path.stringByDeletingLastPathComponent]];
-        _homeProjectPicker.lastItem.representedObject = path;
-        _homeProjectPicker.lastItem.toolTip = path;
-        _homeProjectPicker.lastItem.image = [NSImage imageWithSystemSymbolName:@"folder" accessibilityDescription:nil];
-    }
-    [_homeProjectPicker.menu addItem:NSMenuItem.separatorItem];
-    [_homeProjectPicker addItemWithTitle:PTL(@"选择文件夹…", @"Choose folder…")];
-    _homeProjectPicker.lastItem.tag = 1;
-    for (NSMenuItem *item in _homeProjectPicker.itemArray)
-        if ([item.representedObject isEqual:_homeProjectPath]) [_homeProjectPicker selectItem:item];
-    _homeTitleLabel.stringValue = _homeProjectPath.length
-        ? [NSString stringWithFormat:PTL(@"想在 %@ 中做些什么？", @"What would you like to do in %@?"), _homeProjectPath.lastPathComponent]
-        : PTL(@"今天，想一起做些什么？", @"What would you like to work on today?");
-}
-
-- (void)showHome:(id)sender {
-    (void)sender;
-    [self dismissCommandPalette];
-    if (!_homeProjectPath.length) _homeProjectPath = [_selectedSession.cwd copy];
-    [self updateHomeProjects];
-    _homeVisible = YES;
-    _homeView.hidden = NO;
-    [_window makeFirstResponder:_homePromptTextView];
-}
-
-- (void)hideHome:(id)sender {
-    (void)sender;
-    _homeVisible = NO;
-    _homeView.hidden = YES;
-    [_window makeFirstResponder:_composerTextView];
-}
-
-- (void)chooseHomeFolderThen:(void (^)(void))completion {
-    NSOpenPanel *panel = NSOpenPanel.openPanel;
-    panel.canChooseFiles = NO;
-    panel.canChooseDirectories = YES;
-    panel.allowsMultipleSelection = NO;
-    [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse result) {
-        if (result == NSModalResponseOK) self->_homeProjectPath = panel.URL.path;
-        [self updateHomeProjects];
-        if (result == NSModalResponseOK && completion) completion();
-    }];
-}
-
-- (void)changeHomeProject:(NSPopUpButton *)sender {
-    if (sender.selectedItem.tag == 1) { [self chooseHomeFolderThen:nil]; return; }
-    if ([sender.selectedItem.representedObject isKindOfClass:NSString.class]) _homeProjectPath = sender.selectedItem.representedObject;
-    [self updateHomeProjects];
+    [self pushFrontendWorkspace];
 }
 
 - (PTClaudeBridge *)newHomeBridge { return [PTClaudeBridge new]; }
 
-- (void)startBlankHomeConversation:(id)sender {
-    (void)sender;
-    if (_homeStartingBridge) return;
-    if (!_homeProjectPath.length) {
-        [self chooseHomeFolderThen:^{ [self startBlankHomeConversation:nil]; }];
-        return;
-    }
-    _homeSubmittedPrompt = nil;
-    _homeBlankSessionDirectory = [_homeProjectPath copy];
-    _homeStartingBridge = [self newHomeBridge];
-    _homeStatusLabel.stringValue = PTL(@"正在启动新对话…", @"Starting a new conversation…");
-    __weak typeof(self) weakSelf = self;
-    _homeStartingBridge.statusChanged = ^(NSString *status) { [weakSelf homeLaunchStatusChanged:status]; };
-    [_homeStartingBridge startNewSessionInDirectory:_homeBlankSessionDirectory];
-}
-
 - (void)homeLaunchStatusChanged:(NSString *)status {
-    _homeStatusLabel.stringValue = status ?: @"";
+    _statusText = status ?: @"";
+    [self pushFrontendWindowState];
     if (!_homeStartingBridge.running) {
         _homeStartingSessionID = nil;
         _homeStartingBridge = nil;
@@ -6526,32 +3277,11 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
             if (!_newSessionsAwaitingTranscript) _newSessionsAwaitingTranscript = [NSMutableDictionary dictionary];
             _newSessionsAwaitingTranscript[session.sessionID] = session;
             _sessions = [(_sessions ?: @[]) arrayByAddingObject:session];
-            [self rebuildSessionSidebarRows];
-            [_sessionTable reloadData];
+            [self pushFrontendSessions];
         }
     }
     [_store refresh];
     [self finishHomeSessionIfAvailable];
-}
-
-- (void)startHomeConversation:(id)sender {
-    (void)sender;
-    NSString *prompt = _homePromptTextView.string ?: @"";
-    if (!prompt.length || _homeStartingBridge) return;
-    if (!_homeProjectPath.length) {
-        [self chooseHomeFolderThen:^{ [self startHomeConversation:nil]; }];
-        return;
-    }
-    PTSessionInfo *session = [PTSessionInfo new];
-    session.sessionID = NSUUID.UUID.UUIDString.lowercaseString;
-    session.cwd = _homeProjectPath;
-    _homeStartingSessionID = session.sessionID;
-    _homeSubmittedPrompt = [prompt copy];
-    _homeStartingBridge = [self newHomeBridge];
-    _homeStatusLabel.stringValue = PTL(@"正在启动新对话…", @"Starting a new conversation…");
-    __weak typeof(self) weakSelf = self;
-    _homeStartingBridge.statusChanged = ^(NSString *status) { [weakSelf homeLaunchStatusChanged:status]; };
-    [_homeStartingBridge startNewSession:session prompt:prompt];
 }
 
 - (void)finishHomeSessionIfAvailable {
@@ -6563,16 +3293,11 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     tab.bridge = _homeStartingBridge;
     tab.status = PTL(@"新对话已创建", @"New conversation created");
     [self configureBridgeCallbacksForWorkspaceTab:tab];
-    if (_homeSubmittedPrompt) [_homePromptTextView clearAfterSuccessfulSubmissionMatchingText:_homeSubmittedPrompt];
     _homeStartingSessionID = nil;
     _homeStartingBridge = nil;
-    _homeSubmittedPrompt = nil;
     _homeBlankSessionDirectory = nil;
-    _homeStatusLabel.stringValue = @"";
-    if (_homeVisible) {
-        [self hideHome:nil];
-        [self activateWorkspaceTab:tab animated:YES];
-    } else [self updateWorkspaceTabBar];
+    [self activateWorkspaceTab:tab animated:NO];
+    [self pushFrontendSessions];
 }
 
 - (PTSessionInfo *)sessionWithID:(NSString *)sessionID {
@@ -6605,38 +3330,30 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         [tab.bridge connectToSession:session completion:^(BOOL connected) {
             completion(connected ? tab.bridge : nil);
         }];
-        [self updateConnectButtonTitle];
         return;
     }
     completion(nil);
 }
 
 - (void)presentClaudeWaiting:(BOOL)waiting forSessionID:(NSString *)sessionID {
-    if (sessionID.length == 0) return;
-    NSString *script = [NSString stringWithFormat:
-        @"window.setClaudeWaiting && window.setClaudeWaiting(%@); null;",
-        waiting ? @"true" : @"false"];
-    if (_webReady && [_selectedSession.sessionID isEqual:sessionID]) {
-        [_conversationView evaluateJavaScript:script completionHandler:nil];
+    if (!sessionID.length) return;
+    if ([_selectedSession.sessionID isEqual:sessionID]) [_lobeMainBridge deliverClaudeWaiting:waiting];
+    if (_lobeFloatingPanel.visible && [_floatingSessionID isEqual:sessionID]) {
+        [_lobeFloatingBridge deliverClaudeWaiting:waiting];
     }
-    if (_floatingWebReady && _floatingPanel.visible && [_floatingSessionID isEqual:sessionID]) {
-        [_floatingConversationView evaluateJavaScript:script completionHandler:nil];
-    }
+    [self pushFrontendWorkspaceState];
+    [self pushFrontendSessions];
 }
 
 - (void)presentClaudeStreamForBridge:(PTClaudeBridge *)bridge {
     if (!bridge.sessionID.length) return;
-    BOOL mainVisible = _webReady && [_selectedSession.sessionID isEqual:bridge.sessionID];
-    BOOL floatingVisible = _floatingWebReady && _floatingPanel.visible &&
+    BOOL mainVisible = _lobeMainBridge.frontendReady && [_selectedSession.sessionID isEqual:bridge.sessionID];
+    BOOL floatingVisible = _lobeFloatingBridge.frontendReady && _lobeFloatingPanel.visible &&
         [_floatingSessionID isEqual:bridge.sessionID];
     if (!mainVisible && !floatingVisible) return;
-    // Keep the executable source constant: transcript/image data travels as
-    // structured arguments, rather than a newly compiled script on every token.
-    NSDictionary *arguments = @{@"snapshot": bridge.streamPayload};
-    if (mainVisible) [_conversationView callAsyncJavaScript:@"return window.setClaudeStream(snapshot);"
-        arguments:arguments inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
-    if (floatingVisible) [_floatingConversationView callAsyncJavaScript:@"return window.setClaudeStream(snapshot);"
-        arguments:arguments inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
+    NSDictionary *snapshot = bridge.streamPayload;
+    if (mainVisible) [_lobeMainBridge deliverClaudeStream:snapshot];
+    if (floatingVisible) [_lobeFloatingBridge deliverClaudeStream:snapshot];
 }
 
 - (void)beginAwaitingClaudeReplyForSessionID:(NSString *)sessionID {
@@ -6647,14 +3364,12 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     PTSessionInfo *session = [self sessionWithID:sessionID];
     _awaitingClaudeBaselineBySessionID[sessionID] = @(session.assistantMessages.count);
     [self presentClaudeWaiting:YES forSessionID:sessionID];
-    [self refreshAgentStateAndControls];
 }
 
 - (void)finishAwaitingClaudeReplyForSessionID:(NSString *)sessionID {
     if (!_awaitingClaudeBaselineBySessionID[sessionID]) return;
     [_awaitingClaudeBaselineBySessionID removeObjectForKey:sessionID];
     [self presentClaudeWaiting:NO forSessionID:sessionID];
-    [self refreshAgentStateAndControls];
 }
 
 - (void)reconcileAwaitingClaudeReplyWithSession:(PTSessionInfo *)session {
@@ -6670,243 +3385,25 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
             ? messages[index][@"role"] : @"";
         if (![role isEqual:@"user"]) {
             [self finishAwaitingClaudeReplyForSessionID:session.sessionID];
-            _statusLabel.stringValue = PTL(@"Claude 已开始回复", @"Claude has started responding");
+            _statusText = PTL(@"Claude 已开始回复", @"Claude has started responding");
             return;
         }
     }
 }
 
 - (void)updateFloatingControls {
-    BOOL hasSelection = _selectedSession.sessionID.length > 0;
-    BOOL showingSelection = _floatingPanel.visible &&
-        [_floatingSessionID isEqual:_selectedSession.sessionID];
-    _floatingButton.enabled = hasSelection;
-    _floatingButton.image = [NSImage imageWithSystemSymbolName:(showingSelection ? @"pin.fill" : @"pin")
-        accessibilityDescription:(showingSelection ? @"关闭悬浮对话" : @"悬浮当前对话")];
-    _floatingButton.toolTip = showingSelection ? @"关闭悬浮对话（⌘O）" : @"悬浮当前对话（⌘O）";
-    _floatingMenuItem.enabled = hasSelection;
-    _floatingMenuItem.title = showingSelection ? @"关闭悬浮对话" : @"悬浮当前对话";
-}
-
-- (void)buildFloatingPanelIfNeeded {
-    if (_floatingPanel) return;
-    NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-        NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow |
-        NSWindowStyleMaskNonactivatingPanel;
-    _floatingPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 520, 640)
-                                                styleMask:style
-                                                  backing:NSBackingStoreBuffered
-                                                    defer:NO];
-    _floatingPanel.delegate = self;
-    _floatingPanel.level = NSFloatingWindowLevel;
-    _floatingPanel.floatingPanel = YES;
-    _floatingPanel.hidesOnDeactivate = NO;
-    _floatingPanel.becomesKeyOnlyIfNeeded = YES;
-    _floatingPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-        NSWindowCollectionBehaviorFullScreenAuxiliary;
-    _floatingPanel.minSize = NSMakeSize(360, 320);
-    _floatingPanel.releasedWhenClosed = NO;
-    _floatingPanel.titlebarAppearsTransparent = YES;
-    _floatingPanel.backgroundColor = PTWarmCanvasColor();
-
-    PTAppearanceSurfaceView *surface = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    surface.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
-    _floatingPanel.contentView = surface;
-
-    WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
-    configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
-    [configuration.userContentController addScriptMessageHandler:self name:@"quoteSelection"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptEditReview"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"openTranscriptFile"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"answerQuestion"];
-    [configuration.userContentController addScriptMessageHandler:self name:@"copyAssistantOutput"];
-    _floatingConversationView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
-    _floatingConversationView.translatesAutoresizingMaskIntoConstraints = NO;
-    _floatingConversationView.navigationDelegate = self;
-    if (@available(macOS 12.0, *)) _floatingConversationView.underPageBackgroundColor = NSColor.clearColor;
-    [surface addSubview:_floatingConversationView];
-
-    PTAppearanceSurfaceView *composerBar = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-    composerBar.translatesAutoresizingMaskIntoConstraints = NO;
-    composerBar.surfaceStyle = PTAppearanceSurfaceStyleCanvas;
-    [surface addSubview:composerBar];
-
-    _floatingComposerLabel = [self label:PTL(@"发送给当前会话", @"Send to the current conversation") size:10.5
-        weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
-    [composerBar addSubview:_floatingComposerLabel];
-
-    _floatingImagePreviewScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    _floatingImagePreviewScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    _floatingImagePreviewScroll.drawsBackground = NO;
-    _floatingImagePreviewScroll.hasHorizontalScroller = YES;
-    _floatingImagePreviewScroll.hasVerticalScroller = NO;
-    _floatingImagePreviewScroll.autohidesScrollers = YES;
-    _floatingImagePreviewScroll.hidden = YES;
-    _floatingComposerSurface = [[PTComposerDropSurfaceView alloc] initWithFrame:NSZeroRect];
-    _floatingComposerSurface.translatesAutoresizingMaskIntoConstraints = NO;
-    __weak typeof(self) weakSelf = self;
-    _floatingComposerSurface.dropHandler = ^BOOL(NSArray<NSURL *> *urls) {
-        return [weakSelf addComposerAttachmentURLs:urls floating:YES];
-    };
-    [composerBar addSubview:_floatingComposerSurface];
-    [_floatingComposerSurface addSubview:_floatingImagePreviewScroll];
-
-    _floatingImagePreviewStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    _floatingImagePreviewStack.translatesAutoresizingMaskIntoConstraints = NO;
-    _floatingImagePreviewStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    _floatingImagePreviewStack.alignment = NSLayoutAttributeCenterY;
-    _floatingImagePreviewStack.spacing = 6;
-    _floatingImagePreviewScroll.documentView = _floatingImagePreviewStack;
-
-    PTAnimatedButton *floatingAdd = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    floatingAdd.title = @"＋";
-    floatingAdd.font = [NSFont systemFontOfSize:23 weight:NSFontWeightLight];
-    floatingAdd.contentTintColor = NSColor.labelColor;
-    floatingAdd.fillColor = NSColor.clearColor;
-    floatingAdd.hoverFillColor = PTWarmChipColor();
-    floatingAdd.pressedFillColor = PTWarmBorderColor();
-    floatingAdd.cornerRadius = 18;
-    floatingAdd.target = self;
-    floatingAdd.action = @selector(chooseFloatingAttachments:);
-    _floatingImageButton = floatingAdd;
-    _floatingImageButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _floatingImageButton.toolTip = PTL(@"添加文件或图片，也可以直接拖入", @"Add files or images, or drag them here");
-    _floatingImageButton.enabled = NO;
-    [_floatingComposerSurface addSubview:_floatingImageButton];
-
-    NSScrollView *composerScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    composerScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    composerScroll.borderType = NSNoBorder;
-    composerScroll.hasVerticalScroller = YES;
-    composerScroll.autohidesScrollers = YES;
-    composerScroll.drawsBackground = NO;
-    [_floatingComposerSurface addSubview:composerScroll];
-
-    _floatingComposerTextView = [[PTComposerTextView alloc] initWithFrame:NSMakeRect(0, 0, 360, 44)];
-    _floatingComposerTextView.font = [NSFont systemFontOfSize:14 weight:NSFontWeightRegular];
-    _floatingComposerTextView.drawsBackground = NO;
-    _floatingComposerTextView.richText = NO;
-    _floatingComposerTextView.allowsUndo = YES;
-    _floatingComposerTextView.verticallyResizable = YES;
-    _floatingComposerTextView.horizontallyResizable = NO;
-    _floatingComposerTextView.textContainer.widthTracksTextView = YES;
-    _floatingComposerTextView.textContainerInset = NSMakeSize(7, 7);
-    _floatingComposerTextView.placeholderText = PTL(@"给 Claude 发消息", @"Message Claude");
-    _floatingComposerTextView.editable = YES;
-    _floatingComposerTextView.submitHandler = ^{
-        [weakSelf sendFloatingMessage:nil];
-    };
-    _floatingComposerTextView.commandMenuHandler = ^{
-        PTAppDelegate *self = weakSelf;
-        if (self) [self updateClaudeCommandsForComposer:self->_floatingComposerTextView];
-    };
-    _floatingComposerTextView.commandKeyHandler = ^BOOL(NSEvent *event) {
-        PTAppDelegate *self = weakSelf;
-        return self ? [self handleCommandKey:event composer:self->_floatingComposerTextView] : NO;
-    };
-    _floatingComposerTextView.imagePasteHandler = ^BOOL(NSPasteboard *pasteboard) {
-        return [weakSelf handleFloatingImagePasteboard:pasteboard];
-    };
-    _floatingComposerTextView.fileDropHandler = ^BOOL(NSArray<NSURL *> *urls) {
-        return [weakSelf addComposerAttachmentURLs:urls floating:YES];
-    };
-    composerScroll.documentView = _floatingComposerTextView;
-
-    _floatingEffortButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    _floatingEffortButton.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
-    _floatingEffortButton.contentTintColor = NSColor.secondaryLabelColor;
-    _floatingEffortButton.fillColor = NSColor.clearColor;
-    _floatingEffortButton.hoverFillColor = PTWarmChipColor();
-    _floatingEffortButton.pressedFillColor = PTWarmBorderColor();
-    _floatingEffortButton.cornerRadius = 16;
-    _floatingEffortButton.target = self;
-    _floatingEffortButton.action = @selector(showComposerOptions:);
-    _floatingEffortButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [_floatingComposerSurface addSubview:_floatingEffortButton];
-
-    PTAnimatedButton *floatingSend = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    floatingSend.title = @"↑";
-    floatingSend.font = [NSFont systemFontOfSize:21 weight:NSFontWeightMedium];
-    floatingSend.contentTintColor = NSColor.whiteColor;
-    floatingSend.fillColor = PTColor(0.12, 0.11, 0.10);
-    floatingSend.hoverFillColor = PTWarmAccentColor();
-    floatingSend.pressedFillColor = PTColor(0.45, 0.18, 0.06);
-    floatingSend.cornerRadius = 20;
-    floatingSend.target = self;
-    floatingSend.action = @selector(sendFloatingMessage:);
-    _floatingSendButton = floatingSend;
-    _floatingSendButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _floatingSendButton.enabled = NO;
-    [_floatingComposerSurface addSubview:_floatingSendButton];
-
-    _floatingComposerHeightConstraint = [composerBar.heightAnchor constraintEqualToConstant:108];
-    _floatingImagePreviewHeightConstraint = [_floatingImagePreviewScroll.heightAnchor constraintEqualToConstant:0];
-    [NSLayoutConstraint activateConstraints:@[
-        [_floatingConversationView.topAnchor constraintEqualToAnchor:surface.topAnchor],
-        [_floatingConversationView.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor],
-        [_floatingConversationView.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor],
-        [_floatingConversationView.bottomAnchor constraintEqualToAnchor:composerBar.topAnchor],
-        [composerBar.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor],
-        [composerBar.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor],
-        [composerBar.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor],
-        _floatingComposerHeightConstraint,
-        [_floatingComposerLabel.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:14],
-        [_floatingComposerLabel.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-14],
-        [_floatingComposerLabel.topAnchor constraintEqualToAnchor:composerBar.topAnchor constant:7],
-        [_floatingComposerSurface.leadingAnchor constraintEqualToAnchor:composerBar.leadingAnchor constant:12],
-        [_floatingComposerSurface.trailingAnchor constraintEqualToAnchor:composerBar.trailingAnchor constant:-12],
-        [_floatingComposerSurface.topAnchor constraintEqualToAnchor:_floatingComposerLabel.bottomAnchor constant:5],
-        [_floatingComposerSurface.bottomAnchor constraintEqualToAnchor:composerBar.bottomAnchor constant:-9],
-        [_floatingImagePreviewScroll.leadingAnchor constraintEqualToAnchor:_floatingComposerSurface.leadingAnchor constant:10],
-        [_floatingImagePreviewScroll.trailingAnchor constraintEqualToAnchor:_floatingComposerSurface.trailingAnchor constant:-10],
-        [_floatingImagePreviewScroll.topAnchor constraintEqualToAnchor:_floatingComposerSurface.topAnchor constant:6],
-        _floatingImagePreviewHeightConstraint,
-        [_floatingImagePreviewStack.leadingAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.contentView.leadingAnchor],
-        [_floatingImagePreviewStack.topAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.contentView.topAnchor],
-        [_floatingImagePreviewStack.bottomAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.contentView.bottomAnchor],
-        [_floatingImageButton.leadingAnchor constraintEqualToAnchor:_floatingComposerSurface.leadingAnchor constant:8],
-        [_floatingImageButton.widthAnchor constraintEqualToConstant:36],
-        [_floatingImageButton.heightAnchor constraintEqualToConstant:36],
-        [composerScroll.leadingAnchor constraintEqualToAnchor:_floatingImageButton.trailingAnchor constant:5],
-        [composerScroll.topAnchor constraintEqualToAnchor:_floatingImagePreviewScroll.bottomAnchor constant:2],
-        [composerScroll.bottomAnchor constraintEqualToAnchor:_floatingComposerSurface.bottomAnchor constant:-6],
-        [_floatingImageButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [composerScroll.trailingAnchor constraintEqualToAnchor:_floatingEffortButton.leadingAnchor constant:-4],
-        [_floatingEffortButton.trailingAnchor constraintEqualToAnchor:_floatingSendButton.leadingAnchor constant:-4],
-        [_floatingEffortButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [_floatingEffortButton.widthAnchor constraintEqualToConstant:74],
-        [_floatingEffortButton.heightAnchor constraintEqualToConstant:32],
-        [_floatingSendButton.trailingAnchor constraintEqualToAnchor:_floatingComposerSurface.trailingAnchor constant:-8],
-        [_floatingSendButton.centerYAnchor constraintEqualToAnchor:composerScroll.centerYAnchor],
-        [_floatingSendButton.widthAnchor constraintEqualToConstant:40],
-        [_floatingSendButton.heightAnchor constraintEqualToConstant:40]
-    ]];
-    [self updateComposerConfigurationButtons];
-
-    NSURL *htmlURL = [NSBundle.mainBundle URLForResource:@"index" withExtension:@"html"];
-    if (htmlURL) {
-        [_floatingConversationView loadFileURL:htmlURL allowingReadAccessToURL:NSBundle.mainBundle.resourceURL];
-    }
-}
-
-- (void)positionFloatingPanelNearMainWindow {
-    NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
-    NSRect visible = screen.visibleFrame;
-    NSRect mainFrame = _window.frame;
-    NSRect panelFrame = _floatingPanel.frame;
-    panelFrame.origin.x = MIN(NSMaxX(mainFrame) - panelFrame.size.width - 22,
-                              NSMaxX(visible) - panelFrame.size.width - 12);
-    panelFrame.origin.x = MAX(panelFrame.origin.x, NSMinX(visible) + 12);
-    panelFrame.origin.y = MIN(NSMaxY(mainFrame) - panelFrame.size.height - 22,
-                              NSMaxY(visible) - panelFrame.size.height - 12);
-    panelFrame.origin.y = MAX(panelFrame.origin.y, NSMinY(visible) + 12);
-    [_floatingPanel setFrame:panelFrame display:NO];
+    BOOL showingSelection = _lobeFloatingPanel.visible && [_floatingSessionID isEqual:_selectedSession.sessionID];
+    _floatingMenuItem.enabled = _selectedSession.sessionID.length > 0;
+    _floatingMenuItem.title = showingSelection
+        ? PTL(@"关闭悬浮对话", @"Close Floating Conversation")
+        : PTL(@"悬浮当前对话", @"Float Current Conversation");
 }
 
 - (void)renderFloatingSession:(PTSessionInfo *)session {
-    if (!_floatingWebReady || !_floatingPanel.visible || !session) return;
+    if (!session) return;
+    BOOL panelReady = _lobeFloatingBridge.frontendReady && _lobeFloatingPanel.visible;
+    if (!panelReady) return;
     PTClaudeBridge *streamBridge = [self bridgeForSessionID:session.sessionID];
-    [streamBridge reconcileStreamWithMessages:session.assistantMessages];
     if (_floatingRenderInFlight) {
         if (!_pendingFloatingSession ||
             ![_pendingFloatingSession.sessionID isEqual:session.sessionID] ||
@@ -6923,6 +3420,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         session.modifiedAt,
         session.assistantMessages.count
     )) return;
+    [streamBridge reconcileStreamWithMessages:session.assistantMessages];
+
 
     NSUInteger messageCount = session.assistantMessages.count;
     NSArray<NSDictionary *> *messages = session.assistantMessages ?: @[];
@@ -6957,133 +3456,114 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     payload[@"questionUpdates"] = PTQuestionUpdates(session.assistantMessages);
     if (!canAppend && !canPatch) payload[@"messages"] = session.assistantMessages ?: @[];
 
-    NSDictionary *arguments = canAppend
-        ? @{@"metadata": payload, @"messages": [messages subarrayWithRange:
-            NSMakeRange(_floatingRenderedMessageCount, messageCount - _floatingRenderedMessageCount)]}
-        : canPatch ? @{@"metadata": payload, @"updates": updates,
-            @"messages": [messages subarrayWithRange:NSMakeRange(_floatingRenderedMessageCount, messageCount - _floatingRenderedMessageCount)]}
-        : @{@"metadata": payload};
-    NSString *script = canAppend
-        ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.appendClaudeMessages(metadata, messages); return 1;"
-        : canPatch ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.updateClaudeMessages(metadata, updates); if (messages.length) await window.appendClaudeMessages(metadata, messages); return 1;"
-        : @"await window.setClaudeSession(metadata); return 1;";
+    NSArray<NSDictionary *> *deltaMessages = (canAppend || canPatch)
+        ? [messages subarrayWithRange:NSMakeRange(_floatingRenderedMessageCount, messageCount - _floatingRenderedMessageCount)]
+        : @[];
 
     NSUInteger generation = _floatingRenderGeneration;
+    PTFrontendBridge *frontend = _lobeFloatingBridge;
+    NSUInteger frontendGeneration = frontend.frontendGeneration;
     NSString *targetSessionID = [session.sessionID copy];
     NSDate *targetModifiedAt = session.modifiedAt;
     _floatingRenderInFlight = YES;
     __weak typeof(self) weakSelf = self;
-    [_floatingConversationView callAsyncJavaScript:script arguments:arguments
-        inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
+    void (^finishFloatingRender)(BOOL, NSError *) = ^(BOOL ok, NSError *error) {
         PTAppDelegate *self = weakSelf;
         if (!self) return;
+        if (self->_lobeFloatingBridge != frontend || frontend.frontendGeneration != frontendGeneration) return;
         self->_floatingRenderInFlight = NO;
-        BOOL appendRejected = (canAppend || canPatch) && [result isKindOfClass:NSNumber.class] &&
-            ![(NSNumber *)result boolValue];
+        BOOL visible = self->_lobeFloatingPanel.visible;
         BOOL stillCurrent = generation == self->_floatingRenderGeneration &&
-            self->_floatingPanel.visible && [self->_floatingSessionID isEqual:targetSessionID];
-        if (stillCurrent && !error && !appendRejected) {
+            visible && [self->_floatingSessionID isEqual:targetSessionID];
+        if (stillCurrent && !error && ok) {
             self->_floatingRenderedSessionID = targetSessionID;
             self->_floatingRenderedModifiedAt = targetModifiedAt;
             self->_floatingRenderedMessageCount = messageCount;
             self->_floatingRenderedMessages = [renderSnapshot copy];
             [self presentClaudeStreamForBridge:streamBridge];
-        } else if (stillCurrent && (error || appendRejected)) {
-            self->_floatingPanel.title = @"悬浮对话 · 显示更新失败";
+        } else if (stillCurrent && (error || !ok)) {
+            self->_lobeFloatingPanel.title = @"悬浮对话 · 显示更新失败";
         }
         PTSessionInfo *pending = self->_pendingFloatingSession;
         self->_pendingFloatingSession = nil;
-        if (pending && self->_floatingPanel.visible) {
+        if (pending && visible) {
             [self renderFloatingSession:pending];
         }
-    }];
+    };
+
+    if (canAppend) {
+        [_lobeFloatingBridge deliverClaudeAppend:payload messages:deltaMessages completion:finishFloatingRender];
+    } else if (canPatch) {
+        [_lobeFloatingBridge deliverClaudePatch:payload updates:updates messages:deltaMessages completion:finishFloatingRender];
+    } else {
+        [_lobeFloatingBridge deliverClaudeSession:payload completion:finishFloatingRender];
+    }
 }
 
 - (void)refreshFloatingConversation {
-    if (!_floatingPanel.visible || _floatingSessionID.length == 0) return;
+    if (!_lobeFloatingPanel.visible || !_floatingSessionID.length) return;
     PTSessionInfo *session = [self sessionWithID:_floatingSessionID];
-    if (!session) return;
-    [self updateFloatingTitleForSession:session];
-    [self renderFloatingSession:session];
-    [self updateFloatingComposerState];
+    if (session) [self renderFloatingSession:session];
 }
 
 - (void)toggleFloatingConversation:(id)sender {
     (void)sender;
+    BOOL visible = _lobeFloatingPanel.visible;
     PTFloatingConversationAction action = PTFloatingConversationActionForState(
-        _floatingPanel.visible,
-        _floatingSessionID,
-        _selectedSession.sessionID
-    );
-    if (action == PTFloatingConversationActionNone) {
-        return;
-    }
+        visible, _floatingSessionID, _selectedSession.sessionID);
+    if (action == PTFloatingConversationActionNone) return;
     if (action == PTFloatingConversationActionClose) {
-        [_floatingPanel close];
+        [_lobeFloatingPanel close];
         return;
     }
 
-    BOOL wasVisible = _floatingPanel.visible;
-    [self buildFloatingPanelIfNeeded];
-    if (_floatingSessionID.length && ![_floatingSessionID isEqual:_selectedSession.sessionID]) {
+    if (![_floatingSessionID isEqual:_selectedSession.sessionID]) {
         [self clearFloatingPendingImagesAfterSuccessfulSend];
-        _floatingComposerTextView.string = @"";
+        _floatingPendingImages = [NSMutableArray array];
+        _floatingPendingFiles = [NSMutableArray array];
+        _floatingDraft = @"";
+        _floatingDraftRevision++;
     }
     _floatingSessionID = [_selectedSession.sessionID copy];
+    _floatingStatusText = @"";
     _floatingRenderedSessionID = nil;
     _floatingRenderedModifiedAt = nil;
     _floatingRenderedMessageCount = 0;
     _floatingRenderedMessages = nil;
     _pendingFloatingSession = nil;
-    _floatingRenderGeneration += 1;
-    if (!wasVisible) [self positionFloatingPanelNearMainWindow];
-    [_floatingPanel orderFrontRegardless];
+    _floatingRenderGeneration++;
+    [self buildLobeFloatingPanelIfNeeded];
+    if (!visible) [self positionLobeFloatingPanelNearMainWindow];
+    [_lobeFloatingPanel orderFrontRegardless];
     [self syncFullSessionIDs];
     [self refreshFloatingConversation];
     [self updateFloatingControls];
-    [self updateFloatingComposerState];
+    [self pushFrontendWorkspace];
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
-    if (notification.object != _floatingPanel) return;
-    _floatingRenderGeneration += 1;
+    if (notification.object != _lobeFloatingPanel) return;
+    [_lobeFloatingBridge detach];
+    [_lobeFloatingWebView removeFromSuperview];
+    _lobeFloatingBridge = nil;
+    _lobeFloatingWebView = nil;
+    _lobeFloatingPanel = nil;
+    _floatingRenderGeneration++;
+    _floatingRenderInFlight = NO;
     _floatingSessionID = nil;
     _floatingRenderedSessionID = nil;
     _floatingRenderedModifiedAt = nil;
     _floatingRenderedMessageCount = 0;
     _floatingRenderedMessages = nil;
     _pendingFloatingSession = nil;
+    _floatingDraft = @"";
+    _floatingDraftRevision++;
     [self clearFloatingPendingImagesAfterSuccessfulSend];
-    _floatingComposerTextView.string = @"";
+    _floatingPendingImages = [NSMutableArray array];
+    _floatingPendingFiles = [NSMutableArray array];
     [self syncFullSessionIDs];
     [self updateFloatingControls];
-    [self updateFloatingComposerState];
-}
-
-- (NSArray<NSData *> *)pendingImagePNGsForClaude {
-    NSMutableArray<NSData *> *images = [NSMutableArray arrayWithCapacity:_pendingImages.count];
-    for (NSDictionary *item in _pendingImages) {
-        NSData *png = [item[@"pngData"] isKindOfClass:NSData.class] ? item[@"pngData"] : nil;
-        if (png.length) [images addObject:png];
-    }
-    return images;
-}
-
-- (NSArray<NSString *> *)pendingFilesForClaude {
-    return [_pendingFiles copy] ?: @[];
-}
-
-- (NSArray<NSData *> *)floatingPendingImagePNGsForClaude {
-    NSMutableArray<NSData *> *images = [NSMutableArray arrayWithCapacity:_floatingPendingImages.count];
-    for (NSDictionary *item in _floatingPendingImages) {
-        NSData *png = [item[@"pngData"] isKindOfClass:NSData.class] ? item[@"pngData"] : nil;
-        if (png.length) [images addObject:png];
-    }
-    return images;
-}
-
-- (NSArray<NSString *> *)floatingPendingFilesForClaude {
-    return [_floatingPendingFiles copy] ?: @[];
+    [self pushFrontendWorkspace];
 }
 
 - (BOOL)addComposerAttachmentURLs:(NSArray<NSURL *> *)urls floating:(BOOL)floating {
@@ -7103,17 +3583,15 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         }
         NSMutableArray<NSString *> *files = floating ? _floatingPendingFiles : _pendingFiles;
         if (![files containsObject:path]) {
-            [files addObject:path];
+            [files addObject:path.mutableCopy];
             added++;
         }
     }
     if (floating) {
-        [self updateFloatingImagePreviews];
-        _floatingComposerLabel.stringValue = [NSString stringWithFormat:
+        _floatingStatusText = [NSString stringWithFormat:
             PTL(@"已添加 %lu 个附件", @"Added %lu attachments"), (unsigned long)added];
     } else {
-        [self updateImagePreviews];
-        _statusLabel.stringValue = [NSString stringWithFormat:
+        _statusText = [NSString stringWithFormat:
             PTL(@"已添加 %lu 个附件", @"Added %lu attachments"), (unsigned long)added];
     }
     return added > 0;
@@ -7133,10 +3611,10 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         @"path": url.path,
         @"image": image,
         @"pngData": pngData,
+        @"thumbnail": PTAttachmentThumbnail(pngData),
         @"temporary": @(temporary)
     }];
     if (temporary) [_temporaryImagePaths addObject:url.path];
-    [self updateFloatingImagePreviews];
     return YES;
 }
 
@@ -7152,153 +3630,11 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     if (!image || !image.isValid) return NO;
     NSURL *temporaryURL = [self writeTemporaryPasteImage:image];
     if (!temporaryURL || ![self addFloatingImageURL:temporaryURL temporary:YES]) {
-        _floatingComposerLabel.stringValue = @"无法读取剪贴板图片";
+        _floatingStatusText = @"无法读取剪贴板图片";
         return YES;
     }
-    _floatingComposerLabel.stringValue = @"已从剪贴板添加图片";
+    _floatingStatusText = @"已从剪贴板添加图片";
     return YES;
-}
-
-- (void)chooseFloatingAttachments:(id)sender {
-    (void)sender;
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.title = PTL(@"添加文件或图片", @"Add files or images");
-    panel.prompt = PTL(@"添加", @"Add");
-    panel.canChooseDirectories = NO;
-    panel.canChooseFiles = YES;
-    panel.allowsMultipleSelection = YES;
-    panel.resolvesAliases = YES;
-    [panel beginSheetModalForWindow:_floatingPanel completionHandler:^(NSModalResponse response) {
-        if (response != NSModalResponseOK) return;
-        [self addComposerAttachmentURLs:panel.URLs floating:YES];
-    }];
-}
-
-- (void)chooseFloatingImages:(id)sender {
-    [self chooseFloatingAttachments:sender];
-}
-
-- (void)removeFloatingPendingFile:(NSButton *)sender {
-    NSString *path = [sender.identifier isKindOfClass:NSString.class] ? sender.identifier : @"";
-    if (path.length == 0) return;
-    [_floatingPendingFiles removeObject:path];
-    [self updateFloatingImagePreviews];
-}
-
-- (void)removeFloatingPendingImage:(NSButton *)sender {
-    NSString *path = [sender.identifier isKindOfClass:NSString.class] ? sender.identifier : @"";
-    NSUInteger index = [_floatingPendingImages indexOfObjectPassingTest:
-        ^BOOL(NSDictionary *item, NSUInteger itemIndex, BOOL *stop) {
-            (void)itemIndex;
-            (void)stop;
-            return [item[@"path"] isEqual:path];
-        }];
-    if (index == NSNotFound) return;
-    NSDictionary *item = _floatingPendingImages[index];
-    [_floatingPendingImages removeObjectAtIndex:index];
-    if ([item[@"temporary"] boolValue]) {
-        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-        [_temporaryImagePaths removeObject:path];
-    }
-    [self updateFloatingImagePreviews];
-}
-
-- (void)updateFloatingImagePreviews {
-    for (NSView *view in _floatingImagePreviewStack.arrangedSubviews.copy) {
-        [_floatingImagePreviewStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    for (NSDictionary *item in _floatingPendingImages) {
-        PTAppearanceSurfaceView *chip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-        chip.translatesAutoresizingMaskIntoConstraints = NO;
-        chip.surfaceStyle = PTAppearanceSurfaceStyleChip;
-        chip.layer.cornerRadius = 9;
-        chip.layer.borderWidth = 0.6;
-
-        NSImageView *thumbnail = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        thumbnail.translatesAutoresizingMaskIntoConstraints = NO;
-        thumbnail.image = item[@"image"];
-        thumbnail.imageScaling = NSImageScaleProportionallyUpOrDown;
-        thumbnail.wantsLayer = YES;
-        thumbnail.layer.cornerRadius = 6;
-        thumbnail.layer.masksToBounds = YES;
-        [chip addSubview:thumbnail];
-
-        PTAnimatedButton *remove = PTWarmButton(@"", self, @selector(removeFloatingPendingImage:));
-        remove.image = [NSImage imageWithSystemSymbolName:@"xmark"
-            accessibilityDescription:@"移除图片"];
-        remove.fillColor = NSColor.clearColor;
-        remove.strokeColor = NSColor.clearColor;
-        remove.cornerRadius = 8;
-        remove.contentTintColor = NSColor.tertiaryLabelColor;
-        remove.identifier = item[@"path"];
-        [chip addSubview:remove];
-        [_floatingImagePreviewStack addArrangedSubview:chip];
-        [NSLayoutConstraint activateConstraints:@[
-            [chip.widthAnchor constraintEqualToConstant:64],
-            [chip.heightAnchor constraintEqualToConstant:42],
-            [thumbnail.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor constant:5],
-            [thumbnail.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [thumbnail.widthAnchor constraintEqualToConstant:32],
-            [thumbnail.heightAnchor constraintEqualToConstant:32],
-            [remove.leadingAnchor constraintEqualToAnchor:thumbnail.trailingAnchor constant:3],
-            [remove.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:-3],
-            [remove.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [remove.widthAnchor constraintEqualToConstant:20]
-        ]];
-    }
-    for (NSString *path in _floatingPendingFiles) {
-        PTAppearanceSurfaceView *chip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-        chip.translatesAutoresizingMaskIntoConstraints = NO;
-        chip.surfaceStyle = PTAppearanceSurfaceStyleChip;
-        chip.layer.cornerRadius = 9;
-        chip.layer.borderWidth = 0.6;
-        NSImageView *icon = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        icon.translatesAutoresizingMaskIntoConstraints = NO;
-        BOOL isDirectory = NO;
-        [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory];
-        icon.image = [NSImage imageWithSystemSymbolName:isDirectory ? @"folder.fill" : @"doc.fill"
-            accessibilityDescription:isDirectory ? PTL(@"文件夹", @"Folder") : PTL(@"文件", @"File")];
-        icon.contentTintColor = PTWarmAccentColor();
-        [chip addSubview:icon];
-        NSTextField *name = [self label:path.lastPathComponent ?: PTL(@"文件", @"File")
-            size:10 weight:NSFontWeightMedium color:NSColor.labelColor];
-        name.toolTip = path;
-        [chip addSubview:name];
-        PTAnimatedButton *remove = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-        remove.translatesAutoresizingMaskIntoConstraints = NO;
-        remove.title = @"×";
-        remove.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
-        remove.contentTintColor = NSColor.secondaryLabelColor;
-        remove.hoverFillColor = PTWarmBorderColor();
-        remove.cornerRadius = 9;
-        remove.target = self;
-        remove.action = @selector(removeFloatingPendingFile:);
-        remove.identifier = path;
-        [chip addSubview:remove];
-        [_floatingImagePreviewStack addArrangedSubview:chip];
-        [NSLayoutConstraint activateConstraints:@[
-            [chip.widthAnchor constraintEqualToConstant:160],
-            [chip.heightAnchor constraintEqualToConstant:42],
-            [icon.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor constant:8],
-            [icon.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [icon.widthAnchor constraintEqualToConstant:20],
-            [icon.heightAnchor constraintEqualToConstant:20],
-            [name.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:7],
-            [name.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [remove.leadingAnchor constraintEqualToAnchor:name.trailingAnchor constant:3],
-            [remove.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:-5],
-            [remove.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [remove.widthAnchor constraintEqualToConstant:20],
-            [remove.heightAnchor constraintEqualToConstant:20],
-            [name.widthAnchor constraintLessThanOrEqualToConstant:96]
-        ]];
-    }
-    BOOL hasAttachments = _floatingPendingImages.count > 0 || _floatingPendingFiles.count > 0;
-    _floatingImagePreviewScroll.hidden = !hasAttachments;
-    _floatingImagePreviewHeightConstraint.constant = hasAttachments ? 46 : 0;
-    _floatingComposerHeightConstraint.constant = hasAttachments ? 156 : 108;
-    [_floatingPanel.contentView layoutSubtreeIfNeeded];
 }
 
 - (void)clearFloatingPendingImagesAfterSuccessfulSend {
@@ -7310,7 +3646,6 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     }
     [_floatingPendingImages removeAllObjects];
     [_floatingPendingFiles removeAllObjects];
-    [self updateFloatingImagePreviews];
 }
 
 - (BOOL)addImageURL:(NSURL *)url temporary:(BOOL)temporary {
@@ -7327,10 +3662,10 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         @"path": url.path,
         @"image": image,
         @"pngData": pngData,
+        @"thumbnail": PTAttachmentThumbnail(pngData),
         @"temporary": @(temporary)
     }];
     if (temporary) [_temporaryImagePaths addObject:url.path];
-    [self updateImagePreviews];
     return YES;
 }
 
@@ -7354,194 +3689,11 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     if (!image || !image.isValid) return NO;
     NSURL *temporaryURL = [self writeTemporaryPasteImage:image];
     if (!temporaryURL || ![self addImageURL:temporaryURL temporary:YES]) {
-        _statusLabel.stringValue = @"无法读取剪贴板图片";
+        _statusText = @"无法读取剪贴板图片";
         return YES;
     }
-    _statusLabel.stringValue = @"已从剪贴板添加图片";
+    _statusText = @"已从剪贴板添加图片";
     return YES;
-}
-
-- (void)chooseAttachments:(id)sender {
-    (void)sender;
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.title = PTL(@"添加文件或图片", @"Add files or images");
-    panel.prompt = PTL(@"添加", @"Add");
-    panel.canChooseDirectories = NO;
-    panel.canChooseFiles = YES;
-    panel.allowsMultipleSelection = YES;
-    panel.resolvesAliases = YES;
-    [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse response) {
-        if (response != NSModalResponseOK) return;
-        [self addComposerAttachmentURLs:panel.URLs floating:NO];
-    }];
-}
-
-- (void)chooseImages:(id)sender {
-    [self chooseAttachments:sender];
-}
-
-- (void)removePendingFile:(NSButton *)sender {
-    NSString *path = [sender.identifier isKindOfClass:NSString.class] ? sender.identifier : @"";
-    if (path.length == 0) return;
-    [_pendingFiles removeObject:path];
-    [self updateImagePreviews];
-}
-
-- (void)removePendingImage:(NSButton *)sender {
-    NSString *path = [sender.identifier isKindOfClass:NSString.class] ? sender.identifier : @"";
-    NSUInteger index = [_pendingImages indexOfObjectPassingTest:
-        ^BOOL(NSDictionary *item, NSUInteger itemIndex, BOOL *stop) {
-            (void)itemIndex;
-            (void)stop;
-            return [item[@"path"] isEqual:path];
-        }];
-    if (index == NSNotFound) return;
-    NSDictionary *item = _pendingImages[index];
-    [_pendingImages removeObjectAtIndex:index];
-    if ([item[@"temporary"] boolValue]) {
-        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-        [_temporaryImagePaths removeObject:path];
-    }
-    [self updateImagePreviews];
-}
-
-- (void)updateImagePreviews {
-    for (NSView *view in _imagePreviewStack.arrangedSubviews.copy) {
-        [_imagePreviewStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    for (NSDictionary *item in _pendingImages) {
-        PTAppearanceSurfaceView *chip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-        chip.translatesAutoresizingMaskIntoConstraints = NO;
-        chip.surfaceStyle = PTAppearanceSurfaceStyleChip;
-        chip.layer.cornerRadius = 10;
-        chip.layer.borderWidth = 0.6;
-
-        NSImageView *thumbnail = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        thumbnail.translatesAutoresizingMaskIntoConstraints = NO;
-        thumbnail.image = item[@"image"];
-        thumbnail.imageScaling = NSImageScaleProportionallyUpOrDown;
-        thumbnail.wantsLayer = YES;
-        thumbnail.layer.cornerRadius = 7;
-        thumbnail.layer.masksToBounds = YES;
-        [chip addSubview:thumbnail];
-
-        NSString *path = item[@"path"];
-        NSTextField *name = [self label:path.lastPathComponent ?: @"图片"
-            size:10.5 weight:NSFontWeightMedium color:NSColor.labelColor];
-        name.toolTip = path;
-        [chip addSubview:name];
-
-        PTAnimatedButton *remove = PTWarmButton(@"", self, @selector(removePendingImage:));
-        remove.image = [NSImage imageWithSystemSymbolName:@"xmark"
-            accessibilityDescription:@"移除图片"];
-        remove.fillColor = NSColor.clearColor;
-        remove.strokeColor = NSColor.clearColor;
-        remove.cornerRadius = 8;
-        remove.contentTintColor = NSColor.tertiaryLabelColor;
-        remove.identifier = path;
-        [chip addSubview:remove];
-
-        [_imagePreviewStack addArrangedSubview:chip];
-        [NSLayoutConstraint activateConstraints:@[
-            [chip.widthAnchor constraintEqualToConstant:180],
-            [chip.heightAnchor constraintEqualToConstant:40],
-            [thumbnail.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor constant:5],
-            [thumbnail.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [thumbnail.widthAnchor constraintEqualToConstant:30],
-            [thumbnail.heightAnchor constraintEqualToConstant:30],
-            [name.leadingAnchor constraintEqualToAnchor:thumbnail.trailingAnchor constant:7],
-            [name.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [remove.leadingAnchor constraintEqualToAnchor:name.trailingAnchor constant:5],
-            [remove.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:-5],
-            [remove.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [remove.widthAnchor constraintEqualToConstant:20],
-            [name.widthAnchor constraintLessThanOrEqualToConstant:108]
-        ]];
-    }
-    for (NSString *path in _pendingFiles) {
-        PTAppearanceSurfaceView *chip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
-        chip.translatesAutoresizingMaskIntoConstraints = NO;
-        chip.surfaceStyle = PTAppearanceSurfaceStyleChip;
-        chip.layer.cornerRadius = 10;
-        chip.layer.borderWidth = 0.6;
-
-        NSImageView *icon = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        icon.translatesAutoresizingMaskIntoConstraints = NO;
-        BOOL isDirectory = NO;
-        [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory];
-        icon.image = [NSImage imageWithSystemSymbolName:isDirectory ? @"folder.fill" : @"doc.fill"
-            accessibilityDescription:isDirectory ? PTL(@"文件夹", @"Folder") : PTL(@"文件", @"File")];
-        icon.contentTintColor = PTWarmAccentColor();
-        [chip addSubview:icon];
-
-        NSTextField *name = [self label:path.lastPathComponent ?: PTL(@"文件", @"File")
-            size:10.5 weight:NSFontWeightMedium color:NSColor.labelColor];
-        name.toolTip = path;
-        [chip addSubview:name];
-
-        PTAnimatedButton *remove = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-        remove.translatesAutoresizingMaskIntoConstraints = NO;
-        remove.title = @"×";
-        remove.font = [NSFont systemFontOfSize:15 weight:NSFontWeightMedium];
-        remove.contentTintColor = NSColor.secondaryLabelColor;
-        remove.fillColor = NSColor.clearColor;
-        remove.hoverFillColor = PTWarmBorderColor();
-        remove.cornerRadius = 9;
-        remove.target = self;
-        remove.action = @selector(removePendingFile:);
-        remove.identifier = path;
-        [chip addSubview:remove];
-
-        [_imagePreviewStack addArrangedSubview:chip];
-        [NSLayoutConstraint activateConstraints:@[
-            [chip.widthAnchor constraintEqualToConstant:190],
-            [chip.heightAnchor constraintEqualToConstant:40],
-            [icon.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor constant:9],
-            [icon.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [icon.widthAnchor constraintEqualToConstant:22],
-            [icon.heightAnchor constraintEqualToConstant:22],
-            [name.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:8],
-            [name.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [remove.leadingAnchor constraintEqualToAnchor:name.trailingAnchor constant:4],
-            [remove.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:-6],
-            [remove.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
-            [remove.widthAnchor constraintEqualToConstant:20],
-            [remove.heightAnchor constraintEqualToConstant:20],
-            [name.widthAnchor constraintLessThanOrEqualToConstant:116]
-        ]];
-    }
-    BOOL hasAttachments = _pendingImages.count > 0 || _pendingFiles.count > 0;
-    _imagePreviewScroll.hidden = !hasAttachments;
-    CGFloat previewHeight = hasAttachments ? 44 : 0;
-    CGFloat composerHeight = hasAttachments ? 160 : 112;
-    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        _imagePreviewHeightConstraint.constant = previewHeight;
-        _composerHeightConstraint.constant = composerHeight;
-        [_window.contentView layoutSubtreeIfNeeded];
-    } else {
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.24;
-            context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-            self->_imagePreviewHeightConstraint.animator.constant = previewHeight;
-            self->_composerHeightConstraint.animator.constant = composerHeight;
-            [self->_window.contentView.animator layoutSubtreeIfNeeded];
-        } completionHandler:nil];
-    }
-}
-
-- (void)clearPendingImagesAfterSuccessfulSend {
-    for (NSDictionary *item in _pendingImages.copy) {
-        if (![item[@"temporary"] boolValue]) continue;
-        NSString *path = item[@"path"];
-        // Ctrl+V 返回后 Claude Code 已经把图片读入自己的输入缓冲区并在提交时
-        // 写进 JSONL 的 base64 block；PrettyTerm 的预览临时文件无需继续保留。
-        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-        [_temporaryImagePaths removeObject:path];
-    }
-    [_pendingImages removeAllObjects];
-    [_pendingFiles removeAllObjects];
-    [self updateImagePreviews];
 }
 
 - (NSTextField *)label:(NSString *)text size:(CGFloat)size weight:(NSFontWeight)weight color:(NSColor *)color {
@@ -7589,10 +3741,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 
 - (NSString *)composerModelForSessionID:(NSString *)sessionID {
-    PTClaudeBridge *bridge = [self bridgeForSessionID:sessionID];
-    if (bridge) return bridge.currentModel;
-    if (sessionID.length) return [self sessionWithID:sessionID].model;
-    return _selectedComposerModelID;
+    return sessionID.length ? [self bridgeForSessionID:sessionID].currentModel : _selectedComposerModelID;
 }
 
 - (NSString *)composerEffortForSessionID:(NSString *)sessionID {
@@ -7603,13 +3752,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 }
 
 - (void)updateComposerConfigurationButtons {
-    for (PTAnimatedButton *button in [NSArray arrayWithObjects:_composerEffortButton, _floatingEffortButton, nil]) {
-        NSString *sessionID = button == _floatingEffortButton ? _floatingSessionID : _selectedSession.sessionID;
-        NSString *effort = [self composerEffortTitle:[self composerEffortForSessionID:sessionID]];
-        button.title = [NSString stringWithFormat:@"%@ ⌄", effort];
-        button.toolTip = [NSString stringWithFormat:PTL(@"模型：%@ · 推理强度：%@", @"Model: %@ · Effort: %@"),
-            [self composerModelShortTitle:[self composerModelForSessionID:sessionID]], effort];
-    }
+    [self pushFrontendWindowState];
+    [self pushFrontendSessions];
 }
 
 - (void)showConfigurationStatus:(NSString *)status forSessionID:(NSString *)sessionID {
@@ -7619,193 +3763,8 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
             tab.commandOutput = status;
         }
     }
-    if ([_selectedSession.sessionID isEqual:sessionID]) _statusLabel.stringValue = status;
-    if ([_floatingSessionID isEqual:sessionID]) _floatingComposerLabel.stringValue = status;
-}
-
-- (void)refreshComposerConfigurationPopoverForSessionID:(NSString *)sessionID {
-    if (!_composerOptionsPopover.shown || ![_configurationSessionID isEqual:sessionID]) return;
-    if ([_composerConfigurationPage isEqual:@"effort"]) {
-        NSString *effort = [self composerEffortForSessionID:sessionID];
-        _composerEffortPopoverTitle.stringValue = [NSString stringWithFormat:PTL(@"推理强度 · %@", @"Reasoning effort · %@"),
-            [self composerEffortTitle:effort]];
-        NSUInteger index = [[self composerEffortLevels] indexOfObject:effort ?: @""];
-        _composerEffortSlider.selectedIndex = index == NSNotFound ? -1 : (NSInteger)index;
-    } else if ([_composerConfigurationPage isEqual:@"model"]) [self showComposerModelPage:nil];
-    else if ([_composerConfigurationPage isEqual:@"mode"]) [self showComposerModePage:nil];
-    else if ([_composerConfigurationPage isEqual:@"advanced"]) [self showComposerAdvancedPage:nil];
-}
-
-- (PTAnimatedButton *)composerPopoverButtonWithTitle:(NSString *)title
-                                               action:(SEL)action
-                                           identifier:(NSString *)identifier {
-    PTAnimatedButton *button = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    button.title = title;
-    button.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
-    button.contentTintColor = NSColor.labelColor;
-    button.fillColor = NSColor.clearColor;
-    button.hoverFillColor = PTWarmChipColor();
-    button.pressedFillColor = PTWarmBorderColor();
-    button.strokeColor = PTWarmBorderColor();
-    button.cornerRadius = 14;
-    button.target = self;
-    button.action = action;
-    button.identifier = identifier;
-    [button.heightAnchor constraintEqualToConstant:44].active = YES;
-    return button;
-}
-
-- (void)replaceComposerOptionsWithViews:(NSArray<NSView *> *)views height:(CGFloat)height {
-    for (NSView *view in _composerOptionsStack.arrangedSubviews.copy) {
-        [_composerOptionsStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    for (NSView *view in views) {
-        view.alphaValue = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion ? 1 : 0;
-        [_composerOptionsStack addArrangedSubview:view];
-        [view.widthAnchor constraintEqualToAnchor:_composerOptionsStack.widthAnchor constant:-30].active = YES;
-    }
-    _composerOptionsPopover.contentSize = NSMakeSize(310, height);
-    if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.20;
-            context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-            for (NSView *view in views) view.animator.alphaValue = 1;
-        } completionHandler:nil];
-    }
-}
-
-- (void)showComposerEffortPage:(id)sender {
-    (void)sender;
-    _composerConfigurationPage = @"effort";
-    NSString *effort = [self composerEffortForSessionID:_configurationSessionID ?: _selectedSession.sessionID];
-    NSTextField *title = [self label:[NSString stringWithFormat:PTL(@"推理强度 · %@", @"Reasoning effort · %@"),
-        [self composerEffortTitle:effort]] size:15 weight:NSFontWeightSemibold color:NSColor.labelColor];
-    _composerEffortPopoverTitle = title;
-    _composerEffortSlider = [[PTEffortSlider alloc] initWithFrame:NSZeroRect];
-    _composerEffortSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    NSUInteger index = [[self composerEffortLevels] indexOfObject:effort ?: @""];
-    _composerEffortSlider.selectedIndex = index == NSNotFound ? -1 : (NSInteger)index;
-    _composerEffortSlider.target = self;
-    _composerEffortSlider.action = @selector(changeComposerEffort:);
-    [_composerEffortSlider.heightAnchor constraintEqualToConstant:62].active = YES;
-
-    NSView *captions = [[NSView alloc] initWithFrame:NSZeroRect];
-    captions.translatesAutoresizingMaskIntoConstraints = NO;
-    NSTextField *faster = [self label:PTL(@"更快", @"Faster") size:10.5 weight:NSFontWeightMedium color:NSColor.tertiaryLabelColor];
-    NSTextField *deeper = [self label:PTL(@"更深入", @"Deeper") size:10.5 weight:NSFontWeightMedium color:NSColor.tertiaryLabelColor];
-    [captions addSubview:faster];
-    [captions addSubview:deeper];
-    [NSLayoutConstraint activateConstraints:@[
-        [captions.heightAnchor constraintEqualToConstant:16],
-        [faster.leadingAnchor constraintEqualToAnchor:captions.leadingAnchor constant:4],
-        [faster.centerYAnchor constraintEqualToAnchor:captions.centerYAnchor],
-        [deeper.trailingAnchor constraintEqualToAnchor:captions.trailingAnchor constant:-4],
-        [deeper.centerYAnchor constraintEqualToAnchor:captions.centerYAnchor]
-    ]];
-
-    PTAnimatedButton *advanced = [self composerPopoverButtonWithTitle:PTL(@"高级设置  ›", @"Advanced  ›")
-        action:@selector(showComposerAdvancedPage:) identifier:nil];
-    [self replaceComposerOptionsWithViews:@[title, _composerEffortSlider, captions, advanced] height:216];
-}
-
-- (void)showComposerAdvancedPage:(id)sender {
-    (void)sender;
-    _composerConfigurationPage = @"advanced";
-    _composerEffortPopoverTitle = nil;
-    PTAnimatedButton *back = [self composerPopoverButtonWithTitle:PTL(@"‹  高级", @"‹  Advanced")
-        action:@selector(showComposerEffortPage:) identifier:nil];
-    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
-    NSString *model = [self composerModelShortTitle:[self composerModelForSessionID:sessionID]];
-    NSString *effort = [self composerEffortTitle:[self composerEffortForSessionID:sessionID]];
-    PTAnimatedButton *modelRow = [self composerPopoverButtonWithTitle:
-        [NSString stringWithFormat:PTL(@"模型   ·   %@   ›", @"Model   ·   %@   ›"), model]
-        action:@selector(showComposerModelPage:) identifier:nil];
-    PTAnimatedButton *effortRow = [self composerPopoverButtonWithTitle:
-        [NSString stringWithFormat:PTL(@"推理强度   ·   %@   ›", @"Effort   ·   %@   ›"), effort]
-        action:@selector(showComposerEffortPage:) identifier:nil];
-    PTClaudeBridge *bridge = [self bridgeForSessionID:_configurationSessionID ?: _selectedSession.sessionID];
-    NSString *mode = bridge.permissionMode ?: PTL(@"未读取", @"Unknown");
-    PTAnimatedButton *modeRow = [self composerPopoverButtonWithTitle:
-        [NSString stringWithFormat:PTL(@"模式   ·   %@   ›", @"Mode   ·   %@   ›"), mode]
-        action:@selector(showComposerModePage:) identifier:nil];
-    PTAnimatedButton *commands = [self composerPopoverButtonWithTitle:PTL(@"命令 /   ›", @"Commands /   ›")
-        action:@selector(showClaudeCommands:) identifier:nil];
-    PTAnimatedButton *result = [self composerPopoverButtonWithTitle:PTL(@"查看命令结果   ›", @"View command result   ›")
-        action:@selector(showClaudeCommandResult:) identifier:nil];
-    [self replaceComposerOptionsWithViews:@[back, modelRow, effortRow, modeRow, commands, result] height:325];
-}
-
-- (void)showComposerModePage:(id)sender {
-    (void)sender;
-    _composerConfigurationPage = @"mode";
-    NSMutableArray *views = [NSMutableArray arrayWithObject:[self composerPopoverButtonWithTitle:PTL(@"‹  模式", @"‹  Mode") action:@selector(showComposerAdvancedPage:) identifier:nil]];
-    NSString *mode = [self bridgeForSessionID:_configurationSessionID ?: _selectedSession.sessionID].permissionMode;
-    for (NSArray *entry in @[@[@"Plan", @"plan"], @[@"Auto", @"auto"], @[@"Bypass", @"bypass"], @[@"Default", @"default"], @[@"Accept edits", @"acceptEdits"]]) {
-        NSString *wireMode = [entry[1] isEqual:@"bypass"] ? @"bypassPermissions" : entry[1];
-        NSString *title = [[wireMode isEqual:mode] ? @"✓  " : @"    " stringByAppendingString:entry[0]];
-        [views addObject:[self composerPopoverButtonWithTitle:title action:@selector(changeComposerMode:) identifier:entry[1]]];
-    }
-    [self replaceComposerOptionsWithViews:views height:320];
-}
-
-- (void)changeComposerMode:(PTAnimatedButton *)sender {
-    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
-    [self sendOutgoingMessage:[@"/mode " stringByAppendingString:sender.identifier] imagePNGs:@[] forSessionID:sessionID success:^{
-        [self refreshComposerConfigurationPopoverForSessionID:sessionID];
-        [self showConfigurationStatus:[NSString stringWithFormat:PTL(@"当前模式：%@", @"Current mode: %@"),
-            [self bridgeForSessionID:sessionID].permissionMode] forSessionID:sessionID];
-    } failureResponder:nil];
-}
-
-- (void)dismissCommandPalette {
-    [_commandPalette removeFromSuperview];
-    _commandMenuComposer = nil;
-    if (_commandDismissMonitor) { [NSEvent removeMonitor:_commandDismissMonitor]; _commandDismissMonitor = nil; }
-    if (_commandLayoutObserver) { [NSNotificationCenter.defaultCenter removeObserver:_commandLayoutObserver]; _commandLayoutObserver = nil; }
-}
-
-- (NSString *)commandQueryForComposer:(PTComposerTextView *)composer {
-    NSString *text = composer.string;
-    if (![text hasPrefix:@"/"] || [text rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) return nil;
-    return [text substringFromIndex:1];
-}
-
-- (void)updateClaudeCommandsForComposer:(PTComposerTextView *)composer {
-    if (composer.window.firstResponder != composer) return;
-    if ([self commandQueryForComposer:composer] == nil) {
-        if (_commandMenuComposer == composer) [self dismissCommandPalette];
-        return;
-    }
-    [self showClaudeCommands:composer];
-}
-
-- (BOOL)handleCommandKey:(NSEvent *)event composer:(PTComposerTextView *)composer {
-    if (!_commandPalette.superview || _commandMenuComposer != composer) return NO;
-    NSEventModifierFlags modifiers = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
-    if (modifiers & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift)) return NO;
-    if (event.keyCode == 53) { [self dismissCommandPalette]; return YES; }
-    if (event.keyCode == 125 || event.keyCode == 126) { [_commandPalette moveSelection:event.keyCode == 125 ? 1 : -1]; return YES; }
-    if (event.keyCode == 48 || event.keyCode == 36 || event.keyCode == 76) {
-        if ([_commandPalette chooseSelection]) return YES;
-        [self dismissCommandPalette];
-    }
-    return NO;
-}
-
-- (void)layoutCommandPalette {
-    NSView *root = _commandPalette.superview;
-    if (!root || !_commandMenuComposer) return;
-    NSView *surface = _commandMenuComposer == _floatingComposerTextView ? _floatingComposerSurface : _composerSurface;
-    NSRect anchor = [surface convertRect:surface.bounds toView:root];
-    CGFloat available = root.isFlipped ? NSMinY(anchor) - 16 : NSHeight(root.bounds) - NSMaxY(anchor) - 16;
-    CGFloat height = MIN(MAX(54, _commandPalette.commands.count * 42 + 12), MIN(348, MAX(0, available)));
-    CGFloat width = MIN(NSWidth(anchor), MAX(0, NSWidth(root.bounds) - 24));
-    CGFloat x = MAX(12, MIN(NSMinX(anchor), NSWidth(root.bounds) - width - 12));
-    CGFloat y = root.isFlipped ? NSMinY(anchor) - height - 8 : NSMaxY(anchor) + 8;
-    _commandPalette.frame = NSMakeRect(x, y, width, height);
-    [_commandPalette setNeedsLayout:YES];
+    if ([_selectedSession.sessionID isEqual:sessionID]) _statusText = status;
+    if ([_floatingSessionID isEqual:sessionID]) _floatingStatusText = status;
 }
 
 - (NSArray<NSDictionary *> *)commandSuggestions:(PTClaudeBridge *)bridge query:(NSString *)query {
@@ -7881,512 +3840,12 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     return results;
 }
 
-- (void)showClaudeCommands:(id)sender {
-    PTComposerTextView *composer = [sender isKindOfClass:PTComposerTextView.class] ? sender :
-        ([_configurationSessionID isEqual:_floatingSessionID] && _floatingPanel.visible ? _floatingComposerTextView : _composerTextView);
-    NSString *sessionID = composer == _floatingComposerTextView ? _floatingSessionID : _selectedSession.sessionID;
-    if (!sessionID.length) return;
-    if (_commandMenuComposer != composer) [self dismissCommandPalette];
-    _commandMenuComposer = composer;
-    _configurationSessionID = sessionID;
-    [_composerOptionsPopover close];
-    if (!_commandPalette) {
-        _commandPalette = [[PTCommandPaletteView alloc] initWithFrame:NSZeroRect];
-        __weak typeof(self) weakSelf = self;
-        _commandPalette.chooseCommand = ^(NSDictionary *command) { [weakSelf insertClaudeCommand:command]; };
-    }
-    PTClaudeBridge *bridge = [self bridgeForSessionID:sessionID];
-    _commandPalette.commands = [self commandSuggestions:bridge query:[self commandQueryForComposer:composer] ?: @""];
-    if (!_commandPalette.superview) {
-        [composer.window.contentView addSubview:_commandPalette positioned:NSWindowAbove relativeTo:nil];
-        __weak typeof(self) weakSelf = self;
-        _commandDismissMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent *(NSEvent *event) {
-            PTAppDelegate *self = weakSelf;
-            if (!self) return event;
-            NSView *hit = [event.window.contentView hitTest:[event.window.contentView convertPoint:event.locationInWindow fromView:nil]];
-            if (event.window != composer.window || (!([hit isDescendantOf:self->_commandPalette]) && ![hit isDescendantOf:composer]))
-                [self dismissCommandPalette];
-            return event;
-        }];
-        NSView *surface = composer == _floatingComposerTextView ? _floatingComposerSurface : _composerSurface;
-        surface.postsFrameChangedNotifications = YES;
-        _commandLayoutObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSViewFrameDidChangeNotification
-            object:surface queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) { (void)note; [weakSelf layoutCommandPalette]; }];
-    }
-    [self layoutCommandPalette];
-    [composer.window makeFirstResponder:composer];
-    if (!bridge) {
-        [self prepareBridgeForSessionID:sessionID completion:^(PTClaudeBridge *connected) {
-            if (connected && self->_commandMenuComposer == composer && self->_commandPalette.superview) {
-                self->_commandPalette.commands = [self commandSuggestions:connected query:[self commandQueryForComposer:composer] ?: @""];
-                [self layoutCommandPalette];
-            }
-        }];
-    }
-}
-
-- (void)insertClaudeCommand:(NSDictionary *)command {
-    PTComposerTextView *composer = _commandMenuComposer;
-    if (!composer) return;
-    NSString *text = composer.string;
-    NSRange range = composer.selectedRange;
-    if ([text hasPrefix:@"/"]) {
-        NSRange end = [text rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        range = NSMakeRange(0, end.location == NSNotFound ? text.length : end.location);
-    }
-    [self dismissCommandPalette];
-    [composer.window makeFirstResponder:composer];
-    NSString *suffix = NSMaxRange(range) < text.length && [NSCharacterSet.whitespaceAndNewlineCharacterSet
-        characterIsMember:[text characterAtIndex:NSMaxRange(range)]] ? @"" : @" ";
-    [composer insertText:[NSString stringWithFormat:@"/%@%@", command[@"name"], suffix] replacementRange:range];
-}
-
-- (void)showClaudeCommandResult:(id)sender {
-    [_composerOptionsPopover close];
-    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
-    NSString *text = nil;
-    for (PTWorkspaceTab *tab in _workspaceTabs) if ([tab.sessionID isEqual:sessionID]) text = tab.commandOutput;
-    text = text ?: PTL(@"暂无命令结果", @"No command result yet");
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 340)];
-    scroll.hasVerticalScroller = YES;
-    NSTextView *view = [[NSTextView alloc] initWithFrame:scroll.bounds];
-    view.editable = NO; view.selectable = YES; view.textContainerInset = NSMakeSize(14, 14);
-    view.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
-    view.autoresizingMask = NSViewWidthSizable;
-    view.textContainer.widthTracksTextView = YES;
-    view.string = text; scroll.documentView = view;
-    NSViewController *controller = [NSViewController new]; controller.view = scroll;
-    _commandResultPopover = [NSPopover new];
-    _commandResultPopover.behavior = NSPopoverBehaviorTransient;
-    _commandResultPopover.contentViewController = controller;
-    _commandResultPopover.contentSize = scroll.frame.size;
-    NSView *anchor = [sessionID isEqual:_floatingSessionID] && _floatingPanel.visible ? _floatingEffortButton : _composerEffortButton;
-    [_commandResultPopover showRelativeToRect:anchor.bounds ofView:anchor preferredEdge:NSRectEdgeMaxY];
-}
-
-- (void)showComposerModelPage:(id)sender {
-    (void)sender;
-    _composerConfigurationPage = @"model";
-    NSString *model = [self composerModelForSessionID:_configurationSessionID ?: _selectedSession.sessionID];
-    _composerEffortPopoverTitle = nil;
-    PTAnimatedButton *back = [self composerPopoverButtonWithTitle:PTL(@"‹  选择模型", @"‹  Choose model")
-        action:@selector(showComposerAdvancedPage:) identifier:nil];
-    NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObject:back];
-    for (NSArray<NSString *> *entry in [self composerModelEntries]) {
-        NSString *mark = [entry[2] isEqual:model] ? @"✓  " : @"    ";
-        PTAnimatedButton *row = [self composerPopoverButtonWithTitle:
-            [mark stringByAppendingString:entry[0]] action:@selector(changeComposerModel:) identifier:entry[2]];
-        [views addObject:row];
-    }
-    [self replaceComposerOptionsWithViews:views height:300];
-}
-
-- (void)showComposerOptions:(id)sender {
-    _configurationSessionID = sender == _floatingEffortButton ? _floatingSessionID : _selectedSession.sessionID;
-    if (!_composerOptionsPopover) {
-        _composerOptionsPopover = [[NSPopover alloc] init];
-        _composerOptionsPopover.behavior = NSPopoverBehaviorTransient;
-        _composerOptionsPopover.animates = YES;
-        NSViewController *controller = [[NSViewController alloc] init];
-        PTAppearanceSurfaceView *surface = [[PTAppearanceSurfaceView alloc] initWithFrame:NSMakeRect(0, 0, 310, 216)];
-        surface.surfaceStyle = PTAppearanceSurfaceStyleCard;
-        _composerOptionsStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-        _composerOptionsStack.translatesAutoresizingMaskIntoConstraints = NO;
-        _composerOptionsStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-        _composerOptionsStack.alignment = NSLayoutAttributeLeading;
-        _composerOptionsStack.spacing = 9;
-        _composerOptionsStack.edgeInsets = NSEdgeInsetsMake(15, 15, 15, 15);
-        [surface addSubview:_composerOptionsStack];
-        [NSLayoutConstraint activateConstraints:@[
-            [_composerOptionsStack.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor],
-            [_composerOptionsStack.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor],
-            [_composerOptionsStack.topAnchor constraintEqualToAnchor:surface.topAnchor],
-            [_composerOptionsStack.bottomAnchor constraintLessThanOrEqualToAnchor:surface.bottomAnchor]
-        ]];
-        controller.view = surface;
-        _composerOptionsPopover.contentViewController = controller;
-    }
-    [self showComposerEffortPage:nil];
-    [_composerOptionsPopover showRelativeToRect:[sender bounds] ofView:sender preferredEdge:NSRectEdgeMaxY];
-    [[self bridgeForSessionID:_configurationSessionID] refreshSettingsWithCompletion:nil];
-}
-
-- (void)changeComposerEffort:(PTEffortSlider *)slider {
-    NSArray<NSString *> *levels = [self composerEffortLevels];
-    if (slider.submittedIndex < 0 || slider.submittedIndex >= (NSInteger)levels.count) return;
-    NSString *effort = levels[slider.submittedIndex];
-    NSString *sessionID = _configurationSessionID ?: _selectedSession.sessionID;
-    [self sendOutgoingMessage:[NSString stringWithFormat:@"/effort %@", effort]
-                    imagePNGs:@[]
-                 forSessionID:sessionID
-                      success:^{
-        [self updateComposerConfigurationButtons];
-        [self refreshComposerConfigurationPopoverForSessionID:sessionID];
-        [self showConfigurationStatus:[NSString stringWithFormat:PTL(@"当前推理强度：%@", @"Current effort: %@"),
-            [self composerEffortTitle:[self composerEffortForSessionID:sessionID]]] forSessionID:sessionID];
-    } failureResponder:nil];
-}
-
-- (void)changeComposerModel:(PTAnimatedButton *)sender {
-    [self changeComposerToModel:sender.identifier];
-}
-
-- (void)changeComposerToModel:(NSString *)modelID {
-    if (modelID.length == 0) return;
-    NSString *sessionID = [_configurationSessionID ?: _selectedSession.sessionID copy];
-    [self sendOutgoingMessage:[NSString stringWithFormat:@"/model %@", modelID]
-                    imagePNGs:@[]
-                 forSessionID:sessionID
-                      success:^{
-        [self updateComposerConfigurationButtons];
-        [self refreshComposerConfigurationPopoverForSessionID:sessionID];
-        [self showConfigurationStatus:[NSString stringWithFormat:PTL(@"当前模型：%@", @"Current model: %@"),
-            [self composerModelShortTitle:[self composerModelForSessionID:sessionID]]] forSessionID:sessionID];
-    } failureResponder:nil];
-}
-
 - (void)refreshAgentStateAndControls {
     _agentState.selectedSessionID = _selectedSession.sessionID ?: @"";
     _agentState.boundSessionID = _bridge.sessionID ?: @"";
     _agentState.bridgeRunning = _bridge.running;
-    BOOL ready = _agentState.commandsEnabled;
-    BOOL awaiting = _bridge.responding || _awaitingClaudeBaselineBySessionID[_selectedSession.sessionID] != nil;
-    _composerTextView.editable = ready;
-    _sendButton.enabled = ready;
-    _sendButton.title = awaiting ? @"■" : @"↑";
-    _sendButton.font = [NSFont systemFontOfSize:(awaiting ? 18 : 23) weight:NSFontWeightMedium];
-    _sendButton.action = awaiting
-        ? @selector(stopSelectedClaudeOutput:) : @selector(sendMessage:);
-    _sendButton.toolTip = awaiting
-        ? PTL(@"停止 Claude 输出", @"Stop Claude output")
-        : PTL(@"发送消息", @"Send message");
-    _imageButton.enabled = ready;
-    _composerSurface.dropEnabled = ready;
-    _composerEffortButton.enabled = ready;
-    _remoteButton.enabled = ready;
-    _modelPicker.enabled = ready;
-    _compactButton.enabled = ready;
-    _compactButton.title = _bridge.compacting ? PTL(@"压缩中…", @"Compacting…") : @"Compact";
-    [self updateComposerConfigurationButtons];
-
-    NSString *ttyState = _bridge.running
-        ? PTL(@"Claude 后台已连接", @"Claude background session connected")
-        : PTL(@"Claude 后台未连接", @"Claude background session disconnected");
-    NSString *mode = [_bridge.permissionMode isEqual:@"bypassPermissions"] ? @"Bypass" : _bridge.permissionMode;
-    _inspectorConnectionLabel.stringValue = [NSString stringWithFormat:@"%@ · %@\n%@",
-        ttyState, mode ?: @"—", ready ? PTL(@"当前选中会话可操作", @"Selected conversation is available")
-                        : PTL(@"请选择会话", @"Choose a conversation")];
-    _composerTargetLabel.stringValue = awaiting
-        ? PTL(@"Claude 正在工作 · 点击停止键中断",
-              @"Claude is working · click Stop to interrupt")
-        : ready
-        ? [NSString stringWithFormat:PTL(@"发送给：%@ · 可添加或拖入附件 · ↩ 发送，⌘↩ 换行", @"To: %@ · add or drop attachments · ↩ send, ⌘↩ newline"),
-            _selectedSession.title ?: PTL(@"当前会话", @"Current conversation")]
-        : PTL(@"请选择会话", @"Choose a conversation");
-    _bottomStatusLabel.stringValue = awaiting
-        ? PTL(@"■ 正在工作 · 可随时停止",
-              @"■ Working · Stop is available")
-        : _bridge.running
-        ? [NSString stringWithFormat:PTL(@"● 已连接 · %@ · 等待操作 · Claude Code 后台执行", @"● Connected · %@ · ready · Claude Code runs in the background"),
-            _selectedSession.title ?: PTL(@"当前会话", @"Current conversation")]
-        : PTL(@"○ Claude 后台未连接 · 操作时自动连接", @"○ Claude background session disconnected · controls remain available");
-    [self updateFloatingComposerState];
-}
-
-- (void)updateFloatingComposerState {
-    if (!_floatingComposerTextView || !_floatingSendButton) return;
-    PTSessionInfo *session = [self sessionWithID:_floatingSessionID];
-    PTClaudeBridge *floatingBridge = [self bridgeForSessionID:_floatingSessionID];
-    BOOL awaiting = floatingBridge.responding || _awaitingClaudeBaselineBySessionID[_floatingSessionID] != nil;
-    BOOL ready = _floatingPanel.visible && _floatingSessionID.length > 0;
-    _floatingComposerTextView.editable = ready;
-    _floatingSendButton.enabled = ready;
-    _floatingSendButton.title = awaiting ? @"■" : @"↑";
-    _floatingSendButton.font = [NSFont systemFontOfSize:(awaiting ? 17 : 21) weight:NSFontWeightMedium];
-    _floatingSendButton.action = awaiting
-        ? @selector(stopFloatingClaudeOutput:) : @selector(sendFloatingMessage:);
-    _floatingSendButton.toolTip = awaiting
-        ? PTL(@"停止 Claude 输出", @"Stop Claude output")
-        : PTL(@"发送消息", @"Send message");
-    _floatingImageButton.enabled = ready;
-    _floatingComposerSurface.dropEnabled = ready;
-    _floatingEffortButton.enabled = ready;
-    if (awaiting) {
-        _floatingComposerLabel.stringValue = PTL(@"Claude 正在工作 · 点击停止键中断",
-                                                   @"Claude is working · click Stop to interrupt");
-    } else if (ready) {
-        _floatingComposerLabel.stringValue = [NSString stringWithFormat:
-            PTL(@"发送给：%@ · 可添加或拖入附件 · ↩ 发送，⌘↩ 换行", @"To: %@ · add or drop attachments · ↩ send, ⌘↩ newline"),
-            session.title ?: PTL(@"悬浮会话", @"Floating conversation")];
-    } else if (_agentState.sendInFlight && floatingBridge.running) {
-        _floatingComposerLabel.stringValue = PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…");
-    } else {
-        _floatingComposerLabel.stringValue = [NSString stringWithFormat:
-            PTL(@"发送给：%@ · Claude 后台尚未连接", @"To: %@ · Claude background session is not connected"),
-            session.title ?: PTL(@"悬浮会话", @"Floating conversation")];
-    }
-}
-
-- (void)updateFloatingTitleForSession:(PTSessionInfo *)session {
-    if (!_floatingPanel || !session) return;
-    NSString *quota = _planUsageAvailable
-        ? [NSString stringWithFormat:@"5h %@%% · 7d %@%%",
-            _fiveHourPercent < 10.0 ? [NSString stringWithFormat:@"%.1f", _fiveHourPercent] : [NSString stringWithFormat:@"%.0f", _fiveHourPercent],
-            _sevenDayPercent < 10.0 ? [NSString stringWithFormat:@"%.1f", _sevenDayPercent] : [NSString stringWithFormat:@"%.0f", _sevenDayPercent]]
-        : @"额度 —";
-    NSString *cost = session.apiCostAvailable
-        ? [NSString stringWithFormat:@"API≈%@", PTAPIEquivalentCostDisplay(session.apiEquivalentCostUSD)]
-        : @"API≈—";
-    _floatingPanel.title = [NSString stringWithFormat:@"%@ · %@ · %@",
-        session.title ?: @"悬浮对话", quota, cost];
-}
-
-static NSColor *PTQuotaTierColor(double percent) {
-    if (percent >= 90.0) return NSColor.systemRedColor;
-    if (percent >= 75.0) return NSColor.systemYellowColor;
-    return NSColor.systemGreenColor;
-}
-
-static NSString *PTContextCategoryDisplayName(NSString *key) {
-    NSDictionary<NSString *, NSArray<NSString *> *> *names = @{
-        @"system_prompt": @[@"系统提示词", @"System prompt"],
-        @"system_tools": @[@"系统工具", @"System tools"],
-        @"memory_files": @[@"记忆文件", @"Memory files"],
-        @"skills": @[@"Skills", @"Skills"],
-        @"messages": @[@"消息", @"Messages"],
-        @"conversation_system": @[@"对话 · 系统开销", @"Conversation & system"],
-        @"free_space": @[@"剩余空间", @"Free space"],
-        @"autocompact_buffer": @[@"自动压缩缓冲", @"Autocompact buffer"]
-    };
-    NSArray<NSString *> *localized = names[key];
-    return localized ? PTL(localized[0], localized[1]) : key;
-}
-
-- (void)clearContextBreakdownRows {
-    for (NSView *view in _inspectorContextDetailStack.arrangedSubviews.copy) {
-        [_inspectorContextDetailStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-}
-
-- (void)rebuildContextBreakdownRows:(NSArray<NSDictionary *> *)breakdown {
-    [self clearContextBreakdownRows];
-    if (breakdown.count == 0) {
-        NSString *message = PTL(@"会话刚开始，还没有 usage 数据。",
-                                @"Session just started — no usage data yet.");
-        NSTextField *empty = [self label:message size:10 weight:NSFontWeightRegular
-                                   color:NSColor.tertiaryLabelColor];
-        empty.lineBreakMode = NSLineBreakByWordWrapping;
-        empty.maximumNumberOfLines = 0;
-        [empty setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [empty setContentHuggingPriority:NSLayoutPriorityDefaultLow
-                          forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [_inspectorContextDetailStack addArrangedSubview:empty];
-        [empty.widthAnchor constraintEqualToAnchor:_inspectorContextDetailStack.widthAnchor].active = YES;
-        return;
-    }
-    NSDictionary<NSString *, NSColor *> *colors = @{
-        @"system_prompt": NSColor.systemGrayColor,
-        @"system_tools": PTWarmBorderColor(),
-        @"memory_files": NSColor.systemPinkColor,
-        @"skills": NSColor.systemOrangeColor,
-        @"messages": NSColor.systemPurpleColor,
-        @"conversation_system": NSColor.systemPurpleColor,
-        @"free_space": NSColor.systemGreenColor,
-        @"autocompact_buffer": NSColor.tertiaryLabelColor
-    };
-    for (NSDictionary *entry in breakdown) {
-        NSString *key = [entry[@"category"] isKindOfClass:NSString.class]
-            ? entry[@"category"] : @"";
-        NSColor *color = colors[key] ?: PTWarmAccentColor();
-        double percentage = [entry[@"percentage"] doubleValue];
-
-        NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
-        row.translatesAutoresizingMaskIntoConstraints = NO;
-        NSTextField *dot = [self label:@"●" size:8.5 weight:NSFontWeightBold color:color];
-        NSTextField *name = [self label:PTContextCategoryDisplayName(key)
-                                   size:10.5 weight:NSFontWeightMedium color:NSColor.labelColor];
-        NSTextField *value = [self label:[NSString stringWithFormat:@"%@ · %.1f%%",
-            PTCompactTokenCount([entry[@"tokens"] unsignedIntegerValue]), percentage]
-                                    size:10.5 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
-        value.font = [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightSemibold];
-        PTMeterView *meter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
-        meter.translatesAutoresizingMaskIntoConstraints = NO;
-        meter.progress = percentage / 100.0;
-        meter.fillColor = color;
-        [row addSubview:dot];
-        [row addSubview:name];
-        [row addSubview:value];
-        [row addSubview:meter];
-        [NSLayoutConstraint activateConstraints:@[
-            [dot.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [dot.firstBaselineAnchor constraintEqualToAnchor:name.firstBaselineAnchor],
-            [name.topAnchor constraintEqualToAnchor:row.topAnchor],
-            [name.leadingAnchor constraintEqualToAnchor:dot.trailingAnchor constant:5],
-            [value.firstBaselineAnchor constraintEqualToAnchor:name.firstBaselineAnchor],
-            [value.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [value.leadingAnchor constraintGreaterThanOrEqualToAnchor:name.trailingAnchor constant:6],
-            [meter.topAnchor constraintEqualToAnchor:name.bottomAnchor constant:4],
-            [meter.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [meter.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [meter.heightAnchor constraintEqualToConstant:4],
-            [meter.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
-        ]];
-        [_inspectorContextDetailStack addArrangedSubview:row];
-        [row.widthAnchor constraintEqualToAnchor:_inspectorContextDetailStack.widthAnchor].active = YES;
-    }
-}
-
-- (void)clearCostBreakdownRows {
-    for (NSView *view in _inspectorCostDetailStack.arrangedSubviews.copy) {
-        [_inspectorCostDetailStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-}
-
-- (void)rebuildCostBreakdownRows:(NSDictionary<NSString *, NSDictionary *> *)breakdown {
-    NSArray<NSString *> *modelKeys = [breakdown.allKeys sortedArrayUsingComparator:
-        ^NSComparisonResult(NSString *modelA, NSString *modelB) {
-            double costA = [breakdown[modelA][@"cost"] doubleValue];
-            double costB = [breakdown[modelB][@"cost"] doubleValue];
-            return costA < costB ? NSOrderedDescending : (costA > costB ? NSOrderedAscending : NSOrderedSame);
-        }];
-    [self clearCostBreakdownRows];
-
-    NSArray<NSColor *> *modelColors = @[PTWarmAccentColor(), NSColor.systemBlueColor,
-        NSColor.systemPurpleColor, NSColor.systemTealColor];
-    NSUInteger colorIndex = 0;
-    for (NSString *modelKey in modelKeys) {
-        NSDictionary *entry = breakdown[modelKey];
-        double modelCost = [entry[@"cost"] doubleValue];
-        double share = _selectedSession.apiEquivalentCostUSD > 0
-            ? modelCost / _selectedSession.apiEquivalentCostUSD : 0;
-
-        NSView *row = [[NSView alloc] initWithFrame:NSZeroRect];
-        row.translatesAutoresizingMaskIntoConstraints = NO;
-        NSTextField *nameLabel = [self label:modelKey size:11 weight:NSFontWeightSemibold color:NSColor.labelColor];
-        NSTextField *costLabel = [self label:PTAPIEquivalentCostDisplay(modelCost) size:11 weight:NSFontWeightBold color:NSColor.labelColor];
-        PTMeterView *meter = [[PTMeterView alloc] initWithFrame:NSZeroRect];
-        meter.translatesAutoresizingMaskIntoConstraints = NO;
-        meter.progress = share;
-        meter.fillColor = modelColors[colorIndex % modelColors.count];
-        colorIndex++;
-        NSTextField *tokenCaption = [self label:[NSString stringWithFormat:
-            @"%@ input · %@ output · %@ cache read · %@ cache write",
-            PTCompactTokenCount([entry[@"input"] unsignedIntegerValue]),
-            PTCompactTokenCount([entry[@"output"] unsignedIntegerValue]),
-            PTCompactTokenCount([entry[@"cacheRead"] unsignedIntegerValue]),
-            PTCompactTokenCount([entry[@"cacheWrite"] unsignedIntegerValue])]
-            size:10 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
-        tokenCaption.lineBreakMode = NSLineBreakByWordWrapping;
-        tokenCaption.maximumNumberOfLines = 0;
-
-        [row addSubview:nameLabel];
-        [row addSubview:costLabel];
-        [row addSubview:meter];
-        [row addSubview:tokenCaption];
-        [NSLayoutConstraint activateConstraints:@[
-            [nameLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
-            [nameLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [costLabel.firstBaselineAnchor constraintEqualToAnchor:nameLabel.firstBaselineAnchor],
-            [costLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [costLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:nameLabel.trailingAnchor constant:6],
-            [meter.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:5],
-            [meter.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [meter.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [meter.heightAnchor constraintEqualToConstant:5],
-            [tokenCaption.topAnchor constraintEqualToAnchor:meter.bottomAnchor constant:4],
-            [tokenCaption.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-            [tokenCaption.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-            [tokenCaption.bottomAnchor constraintEqualToAnchor:row.bottomAnchor]
-        ]];
-        [_inspectorCostDetailStack addArrangedSubview:row];
-        [row.widthAnchor constraintEqualToAnchor:_inspectorCostDetailStack.widthAnchor].active = YES;
-    }
-}
-
-- (void)updateUsageDisplays {
-    if (_planUsageAvailable) {
-        NSString *fivePercentText = _fiveHourPercent < 10.0
-            ? [NSString stringWithFormat:@"%.1f", _fiveHourPercent]
-            : [NSString stringWithFormat:@"%.0f", _fiveHourPercent];
-        NSString *sevenPercentText = _sevenDayPercent < 10.0
-            ? [NSString stringWithFormat:@"%.1f", _sevenDayPercent]
-            : [NSString stringWithFormat:@"%.0f", _sevenDayPercent];
-        _quotaLabel.stringValue = [NSString stringWithFormat:@"5h %@%% · 7d %@%%",
-            fivePercentText, sevenPercentText];
-        _quotaLabel.textColor = MAX(_fiveHourPercent, _sevenDayPercent) >= 80.0
-            ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
-        NSString *fiveCountdown = PTCountdownDescription(_fiveHourResetAt, NSDate.date);
-        NSString *sevenCountdown = PTCountdownDescription(_sevenDayResetAt, NSDate.date);
-        _quotaLabel.toolTip = [NSString stringWithFormat:
-            PTL(@"5 小时：%@%%，%@\n7 天：%@%%，%@\n随本会话每次 API 响应更新",
-                @"5 hours: %@%%, %@\n7 days: %@%%, %@\nUpdates with each API response in this conversation"),
-            fivePercentText, fiveCountdown, sevenPercentText, sevenCountdown];
-
-        _inspectorFiveHourPercentLabel.stringValue = [NSString stringWithFormat:@"%@%%", fivePercentText];
-        _inspectorFiveHourPercentLabel.textColor = PTQuotaTierColor(_fiveHourPercent);
-        _inspectorFiveHourMeter.progress = _fiveHourPercent / 100.0;
-        _inspectorFiveHourMeter.fillColor = PTQuotaTierColor(_fiveHourPercent);
-        _inspectorFiveHourCaption.stringValue = fiveCountdown;
-
-        _inspectorSevenDayPercentLabel.stringValue = [NSString stringWithFormat:@"%@%%", sevenPercentText];
-        _inspectorSevenDayPercentLabel.textColor = PTQuotaTierColor(_sevenDayPercent);
-        _inspectorSevenDayMeter.progress = _sevenDayPercent / 100.0;
-        _inspectorSevenDayMeter.fillColor = PTQuotaTierColor(_sevenDayPercent);
-        _inspectorSevenDayCaption.stringValue = sevenCountdown;
-    } else {
-        _quotaLabel.stringValue = @"5h — · 7d —";
-        _quotaLabel.textColor = NSColor.secondaryLabelColor;
-        NSString *reason = _planUsageError.length ? _planUsageError : @"正在读取 Claude 套餐额度";
-        _quotaLabel.toolTip = reason;
-
-        _inspectorFiveHourPercentLabel.stringValue = @"—";
-        _inspectorFiveHourPercentLabel.textColor = NSColor.labelColor;
-        _inspectorFiveHourMeter.progress = 0;
-        _inspectorFiveHourCaption.stringValue = reason;
-
-        _inspectorSevenDayPercentLabel.stringValue = @"—";
-        _inspectorSevenDayPercentLabel.textColor = NSColor.labelColor;
-        _inspectorSevenDayMeter.progress = 0;
-        _inspectorSevenDayCaption.stringValue = reason;
-    }
-
-    if (_selectedSession.apiCostAvailable) {
-        _inspectorCostHeadline.stringValue = PTAPIEquivalentCostDisplay(_selectedSession.apiEquivalentCostUSD);
-        if (_selectedSession.codeLinesAdded > 0 || _selectedSession.codeLinesRemoved > 0) {
-            NSMutableAttributedString *pill = [[NSMutableAttributedString alloc] init];
-            NSFont *pillFont = [NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightSemibold];
-            [pill appendAttributedString:[[NSAttributedString alloc]
-                initWithString:[NSString stringWithFormat:@" +%lu ", (unsigned long)_selectedSession.codeLinesAdded]
-                    attributes:@{NSForegroundColorAttributeName: NSColor.systemGreenColor, NSFontAttributeName: pillFont}]];
-            [pill appendAttributedString:[[NSAttributedString alloc]
-                initWithString:[NSString stringWithFormat:@"/ -%lu ", (unsigned long)_selectedSession.codeLinesRemoved]
-                    attributes:@{NSForegroundColorAttributeName: NSColor.systemRedColor, NSFontAttributeName: pillFont}]];
-            _inspectorCostChangesPill.attributedStringValue = pill;
-            _inspectorCostChangesPill.hidden = NO;
-        } else {
-            _inspectorCostChangesPill.hidden = YES;
-        }
-
-        // 跟 changedFiles / tasks 一样按值比较：这段每次 transcript 变动都会被调到，
-        // 无条件重建整棵子视图树 + 重新激活 Auto Layout 约束会白白拖慢主线程。
-        NSDictionary<NSString *, NSDictionary *> *breakdown = _selectedSession.modelUsageBreakdown ?: @{};
-        if (![_renderedCostBreakdown isEqualToDictionary:breakdown]) {
-            _renderedCostBreakdown = [breakdown copy];
-            [self rebuildCostBreakdownRows:breakdown];
-        }
-    } else if (!_renderedCostBreakdown || _renderedCostBreakdown.count > 0) {
-        _renderedCostBreakdown = @{};
-        _inspectorCostHeadline.stringValue = PTL(@"暂无可计价 usage", @"No priceable usage yet");
-        _inspectorCostChangesPill.hidden = YES;
-        [self clearCostBreakdownRows];
-    }
-
-    if (_floatingPanel.visible && _floatingSessionID.length) {
-        [self updateFloatingTitleForSession:[self sessionWithID:_floatingSessionID]];
-    }
+    [self pushFrontendWorkspace];
+    [self pushFrontendWindowState];
 }
 
 - (void)finishClaudeUsageWithPayload:(NSDictionary *)payload error:(NSString *)errorMessage {
@@ -8413,7 +3872,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         _sevenDayResetAt = nil;
         _planUsageError = errorMessage.length ? errorMessage : @"Claude 未返回额度字段";
     }
-    [self updateUsageDisplays];
+    [self pushFrontendWindowState];
 }
 
 - (void)refreshClaudeUsage:(NSTimer *)timer {
@@ -8421,27 +3880,9 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     [[self bridgeForSessionID:_selectedSession.sessionID] refreshUsage];
 }
 
-- (void)reloadGitDirectoryPickerSelecting:(NSString *)selectedPath {
-    [_gitDirectoryPicker removeAllItems];
-    for (NSString *path in _gitDirectoryPaths ?: @[]) {
-        NSString *name = path.lastPathComponent.length ? path.lastPathComponent : path;
-        [_gitDirectoryPicker addItemWithTitle:name];
-        NSMenuItem *item = _gitDirectoryPicker.lastItem;
-        item.representedObject = path;
-        item.toolTip = path;
-    }
-    _gitDirectoryPicker.enabled = _gitDirectoryPaths.count > 0;
-    _removeGitDirectoryButton.enabled = _gitDirectoryPaths.count > 0;
-    _gitPublishButton.enabled = _gitDirectoryPaths.count > 0 && !_gitActionInFlight;
-    if (_gitDirectoryPaths.count == 0) {
-        [_gitDirectoryPicker addItemWithTitle:PTL(@"尚未发现目录", @"No directory found")];
-        _gitObservedDirectory = nil;
-        return;
-    }
-    NSUInteger selectedIndex = [_gitDirectoryPaths indexOfObject:selectedPath];
-    if (selectedIndex == NSNotFound) selectedIndex = 0;
-    [_gitDirectoryPicker selectItemAtIndex:selectedIndex];
-    _gitObservedDirectory = [_gitDirectoryPaths[selectedIndex] copy];
+- (void)selectObservedGitDirectory:(NSString *)path {
+    _gitObservedDirectory = [_gitDirectoryPaths containsObject:path ?: @""]
+        ? [path copy] : [_gitDirectoryPaths.firstObject copy];
 }
 
 - (void)rememberGitDirectoriesForSession:(PTSessionInfo *)session {
@@ -8468,778 +3909,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     if (![_gitDirectoryPaths isEqualToArray:nextPaths]) {
         _gitDirectoryPaths = [nextPaths mutableCopy];
         [NSUserDefaults.standardUserDefaults setObject:nextPaths forKey:@"PTGitObservedDirectories"];
-        [self reloadGitDirectoryPickerSelecting:preferred];
+        [self selectObservedGitDirectory:preferred];
     } else if (!_gitObservedDirectory.length && nextPaths.count > 0) {
-        [self reloadGitDirectoryPickerSelecting:preferred];
+        [self selectObservedGitDirectory:preferred];
     }
-}
-
-- (void)restoreInspectorAfterToolWorkspaceCollapseIfNeeded:(BOOL)animated {
-    if (!_restoreInspectorAfterTools) return;
-    _restoreInspectorAfterTools = NO;
-    [self setInspectorExpanded:YES animated:animated];
-}
-
-- (void)setToolWorkspaceExpanded:(BOOL)expanded animated:(BOOL)animated {
-    if (!_toolWorkspaceView || !_toolWorkspaceWidthConstraint) return;
-    if (expanded && _inspectorExpanded) {
-        _restoreInspectorAfterTools = YES;
-        [self setInspectorExpanded:NO animated:NO];
-    }
-    NSUInteger generation = ++_toolWorkspaceAnimationGeneration;
-    BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    if (expanded) {
-        if (![_workspaceSplitView.arrangedSubviews containsObject:_toolWorkspaceView]) {
-            [_workspaceSplitView addArrangedSubview:_toolWorkspaceView];
-            [_workspaceSplitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
-        }
-        CGFloat available = NSWidth(_workspaceSplitView.bounds);
-        CGFloat desired = _toolWorkspaceWidthBeforeCollapse > 0
-            ? _toolWorkspaceWidthBeforeCollapse : MAX(360.0, available * 0.58);
-        CGFloat target = desired;
-        _toolWorkspaceView.hidden = NO;
-        _gitDiffScroll.hidden = ![_activeToolPageKind isEqual:@"review"];
-        _filePreviewWebView.hidden = ![_activeToolPageKind isEqual:@"file"];
-        _toolWorkspaceWidthConstraint.active = YES;
-        if (_toolWorkspaceWidthConstraint.constant <= 0.0) {
-            _toolWorkspaceWidthConstraint.constant = 0.0;
-            _toolWorkspaceView.alphaValue = reduceMotion ? 1.0 : 0.0;
-            [_window.contentView layoutSubtreeIfNeeded];
-        }
-        if (!animated || reduceMotion) {
-            _toolWorkspaceWidthConstraint.constant = target;
-            _toolWorkspaceView.alphaValue = 1.0;
-            [_window.contentView layoutSubtreeIfNeeded];
-            return;
-        }
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.22;
-            context.timingFunction = [CAMediaTimingFunction functionWithName:
-                kCAMediaTimingFunctionEaseInEaseOut];
-            self->_toolWorkspaceWidthConstraint.animator.constant = target;
-            self->_toolWorkspaceView.animator.alphaValue = 1.0;
-            [self->_window.contentView layoutSubtreeIfNeeded];
-        } completionHandler:nil];
-        return;
-    }
-
-    CGFloat visibleWidth = NSWidth(_toolWorkspaceView.frame);
-    if (visibleWidth > 0.0) _toolWorkspaceWidthBeforeCollapse = visibleWidth;
-    if (!animated || reduceMotion) {
-        _toolWorkspaceWidthConstraint.constant = 0.0;
-        _toolWorkspaceView.alphaValue = 1.0;
-        _toolWorkspaceView.hidden = YES;
-        _gitDiffScroll.hidden = YES;
-        _filePreviewWebView.hidden = YES;
-        [_workspaceSplitView removeArrangedSubview:_toolWorkspaceView];
-        [_toolWorkspaceView removeFromSuperview];
-        [_window.contentView layoutSubtreeIfNeeded];
-        [self restoreInspectorAfterToolWorkspaceCollapseIfNeeded:animated];
-        return;
-    }
-    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-        context.duration = 0.22;
-        context.timingFunction = [CAMediaTimingFunction functionWithName:
-            kCAMediaTimingFunctionEaseInEaseOut];
-        self->_toolWorkspaceWidthConstraint.animator.constant = 0.0;
-        self->_toolWorkspaceView.animator.alphaValue = 0.0;
-        [self->_window.contentView layoutSubtreeIfNeeded];
-    } completionHandler:^{
-        if (generation != self->_toolWorkspaceAnimationGeneration) return;
-        self->_toolWorkspaceView.hidden = YES;
-        self->_gitDiffScroll.hidden = YES;
-        self->_filePreviewWebView.hidden = YES;
-        self->_toolWorkspaceView.alphaValue = 1.0;
-        [self->_workspaceSplitView removeArrangedSubview:self->_toolWorkspaceView];
-        [self->_toolWorkspaceView removeFromSuperview];
-        [self->_window.contentView layoutSubtreeIfNeeded];
-        [self restoreInspectorAfterToolWorkspaceCollapseIfNeeded:animated];
-    }];
-}
-
-- (void)setInspectorExpanded:(BOOL)expanded animated:(BOOL)animated {
-    [self setInspectorExpanded:expanded animated:animated completion:nil];
-}
-
-- (void)setInspectorExpanded:(BOOL)expanded
-                     animated:(BOOL)animated
-                   completion:(void (^)(void))completion {
-    if (!_inspectorView || !_window.contentView) {
-        if (completion) completion();
-        return;
-    }
-    _inspectorExpanded = expanded;
-    [self updateInspectorPresentation];
-    if (_inspectorFloating) {
-        _inspectorView.hidden = !expanded;
-        _inspectorView.alphaValue = 1.0;
-        _inspectorToggleButton.state = expanded
-            ? NSControlStateValueOn : NSControlStateValueOff;
-        if (completion) completion();
-        return;
-    }
-
-    NSUInteger generation = ++_inspectorAnimationGeneration;
-    BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    CGFloat targetWidth = [self adaptiveInspectorWidth];
-    _inspectorWidthConstraint.constant = targetWidth;
-    if (expanded) {
-        _inspectorView.hidden = NO;
-        _inspectorView.alphaValue = reduceMotion ? 1.0 : 0.0;
-        if (!animated || reduceMotion) {
-            _inspectorView.alphaValue = 1.0;
-            if (completion) completion();
-        } else {
-            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-                context.duration = 0.22;
-                context.timingFunction = [CAMediaTimingFunction functionWithName:
-                    kCAMediaTimingFunctionEaseInEaseOut];
-                self->_inspectorView.animator.alphaValue = 1.0;
-            } completionHandler:^{
-                if (generation != self->_inspectorAnimationGeneration) return;
-                if (completion) completion();
-            }];
-        }
-        _inspectorToggleButton.state = NSControlStateValueOn;
-        return;
-    }
-
-    if (!animated || reduceMotion) {
-        _inspectorView.alphaValue = 1.0;
-        _inspectorView.hidden = YES;
-        if (completion) completion();
-    } else {
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.22;
-            context.timingFunction = [CAMediaTimingFunction functionWithName:
-                kCAMediaTimingFunctionEaseInEaseOut];
-            self->_inspectorView.animator.alphaValue = 0.0;
-        } completionHandler:^{
-            if (generation != self->_inspectorAnimationGeneration) return;
-            self->_inspectorView.hidden = YES;
-            self->_inspectorView.alphaValue = 1.0;
-            if (completion) completion();
-        }];
-    }
-    _inspectorToggleButton.state = NSControlStateValueOff;
-}
-
-- (void)closeToolWorkspace:(id)sender {
-    (void)sender;
-    _reviewToolPageOpen = NO;
-    _gitDiffExpanded = NO;
-    _gitReviewShowsTranscriptEdits = NO;
-    _transcriptEditReviewEvents = nil;
-    _gitDiffGeneration++;
-    [_gitDiffProgress stopAnimation:nil];
-    _gitDiffProgress.hidden = YES;
-    _gitDiffRefreshButton.hidden = YES;
-    _gitDiffToggleButton.title = PTL(@"打开 Git 审查  ›", @"Open Git Review  ›");
-    if (_fileToolPageOpen) [self showToolPageKind:@"file" animated:YES];
-    else {
-        _activeToolPageKind = nil;
-        [self rebuildToolTabBar];
-        [self setToolWorkspaceExpanded:NO animated:YES];
-    }
-}
-
-- (void)gitDirectorySelectionChanged:(id)sender {
-    (void)sender;
-    NSString *path = [_gitDirectoryPicker.selectedItem.representedObject isKindOfClass:NSString.class]
-        ? _gitDirectoryPicker.selectedItem.representedObject : @"";
-    if (path.length == 0) return;
-    _gitObservedDirectory = [path copy];
-    _gitDirectoryManuallySelected = YES;
-    _statusLabel.stringValue = PTL(@"已切换 PrettyTerm 的 Git 观察目录；Claude Code 目录未改变", @"PrettyTerm's Git directory changed; Claude Code's directory did not");
-    _bottomStatusLabel.stringValue = PTL(@"Git 观察目录已切换 · Claude Code 如需访问，请执行 /add-dir", @"Git observation changed · run /add-dir if Claude Code needs access");
-    if (_gitDiffExpanded && !_gitReviewShowsTranscriptEdits) [self refreshGitDiff:nil];
-}
-
-- (void)addManualGitDirectory:(id)sender {
-    (void)sender;
-    NSString *rawPath = [_gitDirectoryInput.stringValue
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    NSString *path = rawPath.stringByExpandingTildeInPath.stringByStandardizingPath;
-    BOOL isDirectory = NO;
-    BOOL valid = path.length > 0 && [path hasPrefix:@"/"] &&
-        [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory] && isDirectory;
-    if (!valid) {
-        _statusLabel.stringValue = PTL(@"请输入存在的绝对文件夹路径", @"Enter an existing absolute folder path");
-        return;
-    }
-    if (!_gitDirectoryPaths) _gitDirectoryPaths = [NSMutableArray array];
-    [_suppressedGitDirectoryPaths removeObject:path];
-    [NSUserDefaults.standardUserDefaults setObject:
-        [_suppressedGitDirectoryPaths.allObjects sortedArrayUsingSelector:@selector(compare:)]
-        forKey:@"PTGitSuppressedDirectories"];
-    if (![_gitDirectoryPaths containsObject:path]) [_gitDirectoryPaths insertObject:path atIndex:0];
-    _gitObservedDirectory = [path copy];
-    _gitDirectoryManuallySelected = YES;
-    [NSUserDefaults.standardUserDefaults setObject:_gitDirectoryPaths forKey:@"PTGitObservedDirectories"];
-    [self reloadGitDirectoryPickerSelecting:path];
-    _gitDirectoryInput.stringValue = @"";
-    _statusLabel.stringValue = PTL(@"已添加 Git 观察目录；这不会改变 Claude Code 的目录", @"Git observation directory added; Claude Code's directory is unchanged");
-    _bottomStatusLabel.stringValue = [NSString stringWithFormat:PTL(@"如需 Claude 访问，请在 Claude Code 执行 /add-dir %@", @"To give Claude access, run /add-dir %@ in Claude Code"), path];
-    if (_gitDiffExpanded && !_gitReviewShowsTranscriptEdits) [self refreshGitDiff:nil];
-}
-
-- (void)removeSelectedGitDirectory:(id)sender {
-    (void)sender;
-    NSString *path = [_gitDirectoryPicker.selectedItem.representedObject
-        isKindOfClass:NSString.class] ? _gitDirectoryPicker.selectedItem.representedObject : @"";
-    NSUInteger removedIndex = [_gitDirectoryPaths indexOfObject:path];
-    if (path.length == 0 || removedIndex == NSNotFound) return;
-
-    if (!_suppressedGitDirectoryPaths) {
-        _suppressedGitDirectoryPaths = [NSMutableSet set];
-    }
-    [_suppressedGitDirectoryPaths addObject:path];
-    [NSUserDefaults.standardUserDefaults setObject:
-        [_suppressedGitDirectoryPaths.allObjects sortedArrayUsingSelector:@selector(compare:)]
-        forKey:@"PTGitSuppressedDirectories"];
-    [_gitDirectoryPaths removeObjectAtIndex:removedIndex];
-    [NSUserDefaults.standardUserDefaults setObject:_gitDirectoryPaths
-        forKey:@"PTGitObservedDirectories"];
-
-    NSString *nextSelection = @"";
-    if (_gitDirectoryPaths.count > 0) {
-        NSUInteger nextIndex = MIN(removedIndex, _gitDirectoryPaths.count - 1);
-        nextSelection = _gitDirectoryPaths[nextIndex];
-    }
-    _gitObservedDirectory = nil;
-    _gitDirectoryManuallySelected = nextSelection.length > 0;
-    [self reloadGitDirectoryPickerSelecting:nextSelection];
-
-    if (_gitDirectoryPaths.count == 0 && !_gitReviewShowsTranscriptEdits) {
-        _gitDiffGeneration++;
-        [self replaceGitReviewDocument:[self gitReviewDocumentForSnapshot:@{
-            @"error": PTL(@"尚未选择 Git 观察目录。", @"No Git observation directory is selected.")
-        }] animated:_gitDiffExpanded];
-        _gitDiffRefreshButton.enabled = NO;
-    } else if (_gitDiffExpanded && !_gitReviewShowsTranscriptEdits) {
-        [self refreshGitDiff:nil];
-    }
-    _statusLabel.stringValue = [NSString stringWithFormat:
-        PTL(@"已从 PrettyTerm 记忆中删除 %@", @"Removed %@ from PrettyTerm memory"), path.lastPathComponent ?: path];
-    _bottomStatusLabel.stringValue = PTL(
-        @"已持续排除此目录 · 仅手动重新添加可恢复 · Claude Code 目录未改变",
-        @"Directory stays excluded · add it manually to restore · Claude Code is unchanged");
-}
-
-- (void)buildGitActionPopoverIfNeeded {
-    if (_gitActionPopover) return;
-    _gitActionPopover = [[NSPopover alloc] init];
-    _gitActionPopover.behavior = NSPopoverBehaviorTransient;
-    _gitActionPopover.contentSize = NSMakeSize(360, 300);
-
-    NSViewController *controller = [[NSViewController alloc] init];
-    PTAppearanceSurfaceView *surface = [[PTAppearanceSurfaceView alloc]
-        initWithFrame:NSMakeRect(0, 0, 360, 300)];
-    surface.surfaceStyle = PTAppearanceSurfaceStyleCard;
-    controller.view = surface;
-    _gitActionPopover.contentViewController = controller;
-
-    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 10;
-    [surface addSubview:stack];
-
-    _gitActionBranchLabel = [self label:PTL(@"⌘ 读取当前分支…", @"⌘ Reading current branch…") size:13
-        weight:NSFontWeightSemibold color:NSColor.labelColor];
-    [stack addArrangedSubview:_gitActionBranchLabel];
-
-    _gitCommitMessageField = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    _gitCommitMessageField.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitCommitMessageField.placeholderString = PTL(@"提交信息", @"Commit message");
-    _gitCommitMessageField.font = [NSFont systemFontOfSize:12 weight:NSFontWeightRegular];
-    _gitCommitMessageField.delegate = self;
-    [stack addArrangedSubview:_gitCommitMessageField];
-
-    _gitIncludeUnstagedButton = [[PTWarmToggleButton alloc] initWithFrame:NSZeroRect];
-    _gitIncludeUnstagedButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitIncludeUnstagedButton.state = NSControlStateValueOn;
-    _gitIncludeUnstagedButton.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
-    _gitIncludeUnstagedButton.contentTintColor = PTWarmAccentColor();
-    NSStackView *unstagedRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    unstagedRow.translatesAutoresizingMaskIntoConstraints = NO;
-    unstagedRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    unstagedRow.alignment = NSLayoutAttributeCenterY;
-    unstagedRow.spacing = 5;
-    NSTextField *unstagedLabel = [self label:PTL(@"包含未暂存的更改", @"Include unstaged changes") size:11.5
-        weight:NSFontWeightMedium color:NSColor.labelColor];
-    [unstagedRow addArrangedSubview:_gitIncludeUnstagedButton];
-    [unstagedRow addArrangedSubview:unstagedLabel];
-    [_gitIncludeUnstagedButton.widthAnchor constraintEqualToConstant:24].active = YES;
-    [_gitIncludeUnstagedButton.heightAnchor constraintEqualToConstant:24].active = YES;
-    [stack addArrangedSubview:unstagedRow];
-
-    NSBox *separator = [[NSBox alloc] initWithFrame:NSZeroRect];
-    separator.translatesAutoresizingMaskIntoConstraints = NO;
-    separator.boxType = NSBoxSeparator;
-    [stack addArrangedSubview:separator];
-
-    _gitCommitButton = PTWarmButton(PTL(@"提交", @"Commit"), self, @selector(commitGitChanges:));
-    _gitCommitAndPushButton = PTWarmButton(PTL(@"提交并推送", @"Commit and Push"),
-        self, @selector(commitAndPushGitChanges:));
-    _gitPushButton = PTWarmButton(PTL(@"推送", @"Push"), self, @selector(pushGitChanges:));
-    for (NSButton *button in @[_gitCommitButton, _gitCommitAndPushButton, _gitPushButton]) {
-        button.alignment = NSTextAlignmentLeft;
-        button.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
-        button.contentTintColor = PTWarmAccentColor();
-        [stack addArrangedSubview:button];
-        [button.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
-    }
-    _gitCommitButton.toolTip = PTL(@"只提交暂存区；勾选后会先暂存仓库内全部改动", @"Commit staged changes only; when checked, all repository changes are staged first");
-    _gitCommitAndPushButton.toolTip = PTL(@"提交成功后再执行 git push", @"Run git push after a successful commit");
-    _gitPushButton.toolTip = PTL(@"推送已有提交", @"Push existing commits");
-
-    NSStackView *statusRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    statusRow.translatesAutoresizingMaskIntoConstraints = NO;
-    statusRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    statusRow.alignment = NSLayoutAttributeCenterY;
-    statusRow.spacing = 7;
-    _gitActionProgress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
-    _gitActionProgress.translatesAutoresizingMaskIntoConstraints = NO;
-    _gitActionProgress.style = NSProgressIndicatorStyleSpinning;
-    _gitActionProgress.controlSize = NSControlSizeSmall;
-    _gitActionProgress.displayedWhenStopped = NO;
-    _gitActionProgress.hidden = YES;
-    _gitActionStatusLabel = [self label:PTL(@"填写提交信息后可提交", @"Enter a commit message to commit") size:10
-        weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    _gitActionStatusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [statusRow addArrangedSubview:_gitActionProgress];
-    [statusRow addArrangedSubview:_gitActionStatusLabel];
-    [stack addArrangedSubview:statusRow];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:surface.topAnchor constant:18],
-        [stack.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:18],
-        [stack.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-18],
-        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:surface.bottomAnchor constant:-14],
-        [_gitCommitMessageField.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
-        [separator.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
-        [_gitActionProgress.widthAnchor constraintEqualToConstant:14],
-        [_gitActionProgress.heightAnchor constraintEqualToConstant:14],
-        [_gitActionStatusLabel.widthAnchor constraintLessThanOrEqualToConstant:300]
-    ]];
-}
-
-- (void)updateGitActionControls {
-    NSString *message = [_gitCommitMessageField.stringValue
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    BOOL canCommit = !_gitActionInFlight && _gitObservedDirectory.length > 0 && message.length > 0;
-    _gitCommitButton.enabled = canCommit;
-    _gitCommitAndPushButton.enabled = canCommit;
-    _gitPushButton.enabled = !_gitActionInFlight && _gitObservedDirectory.length > 0;
-    _gitCommitMessageField.enabled = !_gitActionInFlight;
-    _gitIncludeUnstagedButton.enabled = !_gitActionInFlight;
-    _gitPublishButton.enabled = !_gitActionInFlight && _gitObservedDirectory.length > 0;
-}
-
-- (void)controlTextDidChange:(NSNotification *)notification {
-    if (notification.object == _gitCommitMessageField) [self updateGitActionControls];
-}
-
-- (void)showGitActions:(id)sender {
-    if (_gitObservedDirectory.length == 0) {
-        _statusLabel.stringValue = PTL(@"请先选择 Git 观察目录", @"Select a Git observation directory first");
-        return;
-    }
-    [self buildGitActionPopoverIfNeeded];
-    _gitActionStatusLabel.stringValue = PTL(@"填写提交信息后可提交", @"Enter a commit message to commit");
-    [self updateGitActionControls];
-    [_gitActionPopover showRelativeToRect:[sender bounds]
-                                   ofView:sender
-                            preferredEdge:NSRectEdgeMaxY];
-    [_gitCommitMessageField.window makeFirstResponder:_gitCommitMessageField];
-
-    NSString *directory = [_gitObservedDirectory copy];
-    _gitActionBranchLabel.stringValue = PTL(@"⌘ 读取当前分支…", @"⌘ Reading current branch…");
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        int status = 0;
-        NSString *branch = [[PTRunGit(directory, @[@"branch", @"--show-current"], &status)
-            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (![directory isEqual:self->_gitObservedDirectory]) return;
-            self->_gitActionBranchLabel.stringValue = status == 0 && branch.length > 0
-                ? [NSString stringWithFormat:@"⌘  %@", branch]
-                : @"⌘  detached HEAD";
-        });
-    });
-}
-
-- (void)performGitCommit:(BOOL)commit push:(BOOL)push {
-    if (_gitActionInFlight || _gitObservedDirectory.length == 0) return;
-    NSString *message = [_gitCommitMessageField.stringValue
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (commit && message.length == 0) {
-        _gitActionStatusLabel.stringValue = PTL(@"提交信息为空", @"Commit message is empty");
-        return;
-    }
-
-    NSString *directory = [_gitObservedDirectory copy];
-    BOOL includeUnstaged = _gitIncludeUnstagedButton.state == NSControlStateValueOn;
-    _gitActionInFlight = YES;
-    _gitActionStatusLabel.stringValue = commit
-        ? PTL(@"正在提交…", @"Committing…") : PTL(@"正在推送…", @"Pushing…");
-    _gitActionProgress.hidden = NO;
-    [_gitActionProgress startAnimation:nil];
-    [self updateGitActionControls];
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        int status = 0;
-        NSString *root = [[PTRunGit(directory, @[@"rev-parse", @"--show-toplevel"], &status)
-            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
-        NSMutableArray<NSString *> *outputs = [NSMutableArray array];
-        if (status != 0 && root.length) [outputs addObject:root];
-        if (status == 0 && commit && includeUnstaged) {
-            NSString *output = PTRunGit(root, @[@"add", @"-A", @"--", @"."], &status);
-            if (output.length) [outputs addObject:output];
-        }
-        if (status == 0 && commit) {
-            NSString *output = PTRunGit(root, @[@"commit", @"-m", message], &status);
-            if (output.length) [outputs addObject:output];
-        }
-        if (status == 0 && push) {
-            NSString *output = PTRunGit(root, @[@"push"], &status);
-            if (output.length) [outputs addObject:output];
-        }
-        NSString *combined = [[outputs componentsJoinedByString:@"\n"]
-            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (combined.length > 360) {
-            NSRange tailRange = [combined rangeOfComposedCharacterSequencesForRange:
-                NSMakeRange(combined.length - 360, 360)];
-            combined = [[combined substringWithRange:tailRange]
-                stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        }
-        NSString *success = commit && push
-            ? PTL(@"提交并推送完成", @"Commit and push completed")
-            : (commit ? PTL(@"提交完成", @"Commit completed") : PTL(@"推送完成", @"Push completed"));
-        NSString *result = status == 0 ? success
-            : (combined.length ? combined : PTL(@"Git 操作失败", @"Git operation failed"));
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self->_gitActionInFlight = NO;
-            [self->_gitActionProgress stopAnimation:nil];
-            self->_gitActionProgress.hidden = YES;
-            self->_gitActionStatusLabel.stringValue = result;
-            self->_gitActionStatusLabel.toolTip = combined;
-            if (status == 0 && commit) self->_gitCommitMessageField.stringValue = @"";
-            [self updateGitActionControls];
-            self->_statusLabel.stringValue = result;
-            self->_bottomStatusLabel.stringValue = result;
-            if (self->_gitDiffExpanded && !self->_gitReviewShowsTranscriptEdits) {
-                [self refreshGitDiff:nil];
-            }
-        });
-    });
-}
-
-- (void)commitGitChanges:(id)sender {
-    (void)sender;
-    [self performGitCommit:YES push:NO];
-}
-
-- (void)commitAndPushGitChanges:(id)sender {
-    (void)sender;
-    [self performGitCommit:YES push:YES];
-}
-
-- (void)pushGitChanges:(id)sender {
-    (void)sender;
-    [self performGitCommit:NO push:YES];
-}
-
-- (void)toggleGitDiff:(id)sender {
-    (void)sender;
-    if (!_gitDiffExpanded && _gitObservedDirectory.length == 0) {
-        _statusLabel.stringValue = PTL(@"请先选择或添加 Git 观察目录", @"Select or add a Git observation directory first");
-        return;
-    }
-    if (_gitDiffExpanded) {
-        [self closeToolWorkspace:nil];
-        return;
-    }
-    _gitDiffExpanded = YES;
-    _reviewToolPageOpen = YES;
-    _gitReviewShowsTranscriptEdits = NO;
-    _transcriptEditReviewEvents = nil;
-    _gitDiffToggleButton.title = PTL(@"关闭 Git 审查  ‹", @"Close Git Review  ‹");
-    _gitDiffRefreshButton.hidden = NO;
-    [self showToolPageKind:@"review" animated:YES];
-    [self setToolWorkspaceExpanded:YES animated:YES];
-    [self rebuildToolTabBar];
-    [self refreshGitDiff:nil];
-}
-
-- (NSAttributedString *)transcriptEditReviewDocumentForEvents:
-    (NSArray<NSDictionary *> *)events {
-    __block NSAttributedString *document = nil;
-    [_gitDiffTextView.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        document = PTTranscriptEditReviewAttributedString(events ?: @[]);
-    }];
-    return document ?: [[NSAttributedString alloc] initWithString:@""];
-}
-
-- (void)showTranscriptEditReviewWithEvents:(NSArray<NSDictionary *> *)events {
-    _gitDiffGeneration++;
-    [_gitDiffProgress stopAnimation:nil];
-    _gitDiffProgress.hidden = YES;
-    _gitDiffRefreshButton.hidden = YES;
-    _gitReviewShowsTranscriptEdits = YES;
-    _transcriptEditReviewEvents = [events copy];
-    _gitDiffExpanded = YES;
-    _reviewToolPageOpen = YES;
-    _gitDiffToggleButton.title = PTL(@"关闭本轮审查  ‹", @"Close Turn Review  ‹");
-    [self showToolPageKind:@"review" animated:YES];
-    [self setToolWorkspaceExpanded:YES animated:YES];
-    [self rebuildToolTabBar];
-    [self replaceGitReviewDocument:[self transcriptEditReviewDocumentForEvents:events]
-                          animated:YES];
-}
-
-- (NSAttributedString *)gitReviewDocumentForSnapshot:
-    (NSDictionary<NSString *, NSString *> *)snapshot {
-    __block NSAttributedString *document = nil;
-    [_gitDiffTextView.effectiveAppearance performAsCurrentDrawingAppearance:^{
-        document = PTGitReviewAttributedString(snapshot);
-    }];
-    return document ?: [[NSAttributedString alloc] initWithString:@""];
-}
-
-- (void)replaceGitReviewDocument:(NSAttributedString *)document animated:(BOOL)animated {
-    if (!document) return;
-    BOOL reduceMotion = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    if (!animated || reduceMotion || _gitDiffScroll.hidden) {
-        [_gitDiffTextView.textStorage setAttributedString:document];
-        _gitDiffTextView.alphaValue = 1.0;
-        [_gitDiffTextView scrollRangeToVisible:NSMakeRange(0, 0)];
-        return;
-    }
-    _gitDiffTextView.wantsLayer = YES;
-    CATransition *transition = [CATransition animation];
-    transition.type = kCATransitionFade;
-    transition.duration = 0.22;
-    transition.timingFunction = [CAMediaTimingFunction functionWithName:
-        kCAMediaTimingFunctionEaseInEaseOut];
-    [_gitDiffTextView.layer addAnimation:transition forKey:@"replace-review-document"];
-    [_gitDiffTextView.textStorage setAttributedString:document];
-    [_gitDiffTextView scrollRangeToVisible:NSMakeRange(0, 0)];
-}
-
-- (void)refreshGitDiff:(id)sender {
-    (void)sender;
-    NSString *directory = [_gitObservedDirectory copy];
-    if (directory.length == 0) return;
-    _gitReviewShowsTranscriptEdits = NO;
-    _transcriptEditReviewEvents = nil;
-    _gitDiffToggleButton.title = PTL(@"关闭 Git 审查  ‹", @"Close Git Review  ‹");
-    NSUInteger generation = ++_gitDiffGeneration;
-    _gitDiffRefreshButton.enabled = NO;
-    _gitDiffProgress.hidden = NO;
-    [_gitDiffProgress startAnimation:nil];
-    if (_gitDiffTextView.string.length == 0 ||
-        [_gitDiffTextView.string containsString:@"选择目录后"]) {
-        [self replaceGitReviewDocument:PTGitReviewLoadingAttributedString() animated:NO];
-    } else if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        _gitDiffTextView.animator.alphaValue = 0.58;
-    }
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary<NSString *, NSString *> *snapshot =
-            PTGitReviewSnapshotForDirectory(directory);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (generation != self->_gitDiffGeneration ||
-                ![directory isEqual:self->_gitObservedDirectory]) return;
-            [self->_gitDiffProgress stopAnimation:nil];
-            self->_gitDiffProgress.hidden = YES;
-            self->_gitDiffRefreshButton.enabled = YES;
-            [self replaceGitReviewDocument:[self gitReviewDocumentForSnapshot:snapshot]
-                                  animated:YES];
-        });
-    });
-}
-
-- (NSArray<NSDictionary *> *)existingChangedFilesFromFiles:(NSArray<NSDictionary *> *)files {
-    NSMutableArray<NSDictionary *> *existing = [NSMutableArray arrayWithCapacity:files.count];
-    for (NSDictionary *file in files) {
-        NSString *path = [file[@"filePath"] isKindOfClass:NSString.class] ? file[@"filePath"] : @"";
-        BOOL directory = NO;
-        if (path.length == 0 || ![path hasPrefix:@"/"] ||
-            ![NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&directory] || directory) {
-            continue;
-        }
-        [existing addObject:file];
-    }
-    return existing;
-}
-
-- (void)showEmptyChangedFilesState {
-    for (NSView *view in _changedFilesStack.arrangedSubviews.copy) {
-        [_changedFilesStack removeArrangedSubview:view];
-        [view removeFromSuperview];
-    }
-    _changedFileButtonsByPath = @{};
-    NSTextField *empty = [self label:PTL(@"本轮没有 Edit / Write 改动", @"No Edit / Write changes in this turn")
-        size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
-    [_changedFilesStack addArrangedSubview:empty];
-}
-
-- (void)updateInspectorForSession:(PTSessionInfo *)session {
-    if (!session) return;
-    [self rememberGitDirectoriesForSession:session];
-    BOOL hasContextUsage = session.contextUsed > 0 && session.contextWindow > 0;
-    double contextRatio = hasContextUsage
-        ? MIN(1.0, (double)session.contextUsed / (double)session.contextWindow) : 0;
-    _inspectorContextLabel.stringValue = hasContextUsage
-        ? [NSString stringWithFormat:@"%@ / %@ tokens",
-            PTCompactTokenCount(session.contextUsed), PTCompactTokenCount(session.contextWindow)]
-        : PTL(@"暂无 usage 数据", @"No usage data yet");
-    _inspectorContextPercentLabel.stringValue = hasContextUsage
-        ? [NSString stringWithFormat:(contextRatio * 100.0 < 10.0 ? @"%.1f%%" : @"%.0f%%"),
-            contextRatio * 100.0]
-        : @"—";
-    _inspectorContextMeter.progress = contextRatio;
-    _inspectorContextMeter.fillColor = PTWarmAccentColor();
-
-    NSArray<NSDictionary *> *contextBreakdown = session.contextBreakdown ?: @[];
-    // 总 usage 在普通 assistant 记录里就有，而分类只在 Claude Code 自己已写入
-    // /context 记录时可用。详情始终可点，但绝不为此向 Terminal 发送命令。
-    _contextDisclosureButton.enabled = YES;
-    if (![_renderedContextBreakdown isEqualToArray:contextBreakdown]) {
-        _renderedContextBreakdown = [contextBreakdown copy];
-        [self rebuildContextBreakdownRows:contextBreakdown];
-    }
-    _inspectorContextDetailStack.hidden = !_contextDetailExpanded || contextBreakdown.count == 0;
-    [self updateUsageDisplays];
-
-    NSArray<NSDictionary *> *changedFiles = [self existingChangedFilesFromFiles:session.changedFiles ?: @[]];
-    if (![_renderedChangedFiles isEqualToArray:changedFiles]) {
-        _renderedChangedFiles = [changedFiles copy];
-        if (changedFiles.count == 0) {
-            [self showEmptyChangedFilesState];
-        } else {
-            // 路径相同的按钮永不因 added/removed 数字变化而拆除；只更新其内容。
-            // 这样 transcript 轮询恰好撞上 mouseDown/mouseUp 时，action 仍属于同一对象。
-            for (NSView *view in _changedFilesStack.arrangedSubviews.copy) {
-                if (![view isKindOfClass:PTFirstMouseButton.class]) {
-                    [_changedFilesStack removeArrangedSubview:view];
-                    [view removeFromSuperview];
-                }
-            }
-            NSMutableDictionary<NSString *, PTAnimatedButton *> *nextButtons =
-                [NSMutableDictionary dictionary];
-            NSUInteger fileIndex = 0;
-            for (NSDictionary *file in changedFiles) {
-                NSString *path = [file[@"filePath"] isKindOfClass:NSString.class]
-                    ? file[@"filePath"] : @"";
-                NSString *identity = path.length > 0 ? path : [NSString stringWithFormat:@"missing-path-%lu",
-                    (unsigned long)fileIndex];
-                PTAnimatedButton *button = _changedFileButtonsByPath[identity];
-                if (!button) {
-                    button = PTWarmButton(@"", self, @selector(revealChangedFile:));
-                    button.buttonType = NSButtonTypeMomentaryPushIn;
-                    button.alignment = NSTextAlignmentCenter;
-                    button.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
-                    button.fillColor = PTWarmChipColor();
-                    button.hoverFillColor = PTWarmBorderColor();
-                    button.cornerRadius = 8;
-                    [_changedFilesStack addArrangedSubview:button];
-                }
-                NSString *title = [NSString stringWithFormat:@"%@    +%@  −%@  ↗",
-                    file[@"displayName"] ?: @"文件", file[@"added"] ?: @0, file[@"removed"] ?: @0];
-                button.title = title;
-                button.toolTip = [NSString stringWithFormat:@"在 Finder 中显示\n%@", path];
-                button.identifier = path;
-                nextButtons[identity] = button;
-                fileIndex++;
-            }
-            for (NSString *identity in _changedFileButtonsByPath) {
-                if (nextButtons[identity]) continue;
-                PTAnimatedButton *button = _changedFileButtonsByPath[identity];
-                [_changedFilesStack removeArrangedSubview:button];
-                [button removeFromSuperview];
-            }
-            _changedFileButtonsByPath = nextButtons;
-        }
-        [self applyAdaptiveInspectorWidth];
-    }
-
-    // 任务也按值更新，使 transcript 修订只重建发生变化的检查器内容。
-    NSArray<NSDictionary *> *tasks = session.tasks ?: @[];
-    if (![_renderedTasks isEqualToArray:tasks]) {
-        _renderedTasks = [tasks copy];
-        for (NSView *view in _tasksStack.arrangedSubviews.copy) {
-            [_tasksStack removeArrangedSubview:view];
-            [view removeFromSuperview];
-        }
-        if (tasks.count == 0) {
-            NSTextField *empty = [self label:PTL(@"当前会话没有任务", @"No tasks in this conversation") size:10.5 weight:NSFontWeightRegular color:NSColor.tertiaryLabelColor];
-            [_tasksStack addArrangedSubview:empty];
-        } else {
-            for (NSDictionary *task in tasks) {
-                NSString *status = [task[@"status"] isKindOfClass:NSString.class] ? task[@"status"] : @"pending";
-                NSString *statusEmoji = @"⚪️";
-                NSColor *statusColor = NSColor.secondaryLabelColor;
-                if ([status isEqual:@"in_progress"]) {
-                    statusEmoji = @"🔵";
-                    statusColor = PTColor(0.0, 0.48, 0.99);
-                } else if ([status isEqual:@"completed"]) {
-                    statusEmoji = @"✅";
-                    statusColor = PTColor(0.20, 0.78, 0.35);
-                }
-                NSString *taskID = [task[@"id"] isKindOfClass:NSString.class] ? task[@"id"] : @"?";
-                NSString *subject = [task[@"subject"] isKindOfClass:NSString.class] ? task[@"subject"] : @"未命名任务";
-                NSString *title = [NSString stringWithFormat:@"%@ #%@ %@", statusEmoji, taskID, subject];
-                NSTextField *label = [self label:title size:10.5 weight:NSFontWeightMedium color:statusColor];
-                label.lineBreakMode = NSLineBreakByTruncatingTail;
-                [_tasksStack addArrangedSubview:label];
-                [label.widthAnchor constraintEqualToAnchor:_tasksStack.widthAnchor].active = YES;
-            }
-        }
-    }
-}
-
-- (void)toggleInspector:(id)sender {
-    (void)sender;
-    if (!_toolWorkspaceView.hidden && _toolWorkspaceWidthConstraint.constant > 0) {
-        _restoreInspectorAfterTools = YES;
-        [self setToolWorkspaceExpanded:NO animated:YES];
-        return;
-    }
-    [self setInspectorExpanded:!_inspectorExpanded animated:YES];
-}
-
-- (void)toggleSidePanel:(id)sender {
-    (void)sender;
-    if (!_toolWorkspaceView.hidden && _toolWorkspaceWidthConstraint.constant > 0) {
-        [self setToolWorkspaceExpanded:NO animated:YES];
-    } else if (_reviewToolPageOpen || _fileToolPageOpen) {
-        [self setToolWorkspaceExpanded:YES animated:YES];
-    } else {
-        [self openFileWorkspace:nil];
-    }
-}
-
-- (void)toggleContextDetail:(id)sender {
-    (void)sender;
-    _contextDetailExpanded = !_contextDetailExpanded;
-    _inspectorContextDetailStack.hidden = !_contextDetailExpanded;
-    _contextDisclosureButton.title = _contextDetailExpanded
-        ? PTL(@"详情 ⌄", @"Details ⌄") : PTL(@"详情 ›", @"Details ›");
-    if (!_contextDetailExpanded || _selectedSession.contextBreakdown.count > 0) return;
-
-    [self rebuildContextBreakdownRows:@[]];
-    _statusLabel.stringValue = PTL(@"当前暂无已记录的上下文分类 · 未向 Terminal 发送命令",
-                                   @"No recorded context categories yet · no Terminal command was sent");
-}
-
-- (void)toggleCostDetail:(id)sender {
-    (void)sender;
-    _costDetailExpanded = !_costDetailExpanded;
-    _inspectorCostDetailStack.hidden = !_costDetailExpanded;
-    _costDisclosureButton.title = _costDetailExpanded
-        ? PTL(@"详情 ⌄", @"Details ⌄") : PTL(@"详情 ›", @"Details ›");
 }
 
 - (NSArray<NSDictionary *> *)transcriptEditEventsForSession:(PTSessionInfo *)session
@@ -9260,106 +3933,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     return edits;
 }
 
-- (void)openTranscriptEditReviewForSessionID:(NSString *)sessionID
-                                    turnIndex:(NSUInteger)turnIndex {
-    if (sessionID.length == 0) return;
-    if (![_selectedSession.sessionID isEqual:sessionID]) {
-        PTSessionInfo *matchingSession = nil;
-        for (PTSessionInfo *session in _sessions) {
-            if ([session.sessionID isEqual:sessionID]) {
-                matchingSession = session;
-                break;
-            }
-        }
-        if (!matchingSession) return;
-        NSString *projectKey = PTSessionProjectKey(matchingSession);
-        [self loadCollapsedSessionProjectsIfNeeded];
-        if ([_collapsedSessionProjectPaths containsObject:projectKey]) {
-            [_collapsedSessionProjectPaths removeObject:projectKey];
-            [self persistCollapsedSessionProjects];
-            [self rebuildSessionSidebarRows];
-            [_sessionTable reloadData];
-        }
-        NSInteger matchingRow = [self sidebarRowForSessionID:sessionID];
-        if (matchingRow == NSNotFound) return;
-        [_sessionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:matchingRow]
-                     byExtendingSelection:NO];
-        _selectedSession = matchingSession;
-        [self showSelectedSession];
-    }
-
-    NSArray<NSDictionary *> *events = [self transcriptEditEventsForSession:_selectedSession
-                                                                  turnIndex:turnIndex];
-    if (events.count == 0) {
-        _statusLabel.stringValue = PTL(@"这个回合没有可审阅的 Edit / Write 记录", @"This turn has no recorded Edit / Write changes to review");
-        return;
-    }
-
-    [_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-    [self showTranscriptEditReviewWithEvents:events];
-    _statusLabel.stringValue = PTL(@"正在显示本轮已记录的本地修改 · 未执行 git diff", @"Showing recorded local changes for this turn · git diff was not run");
-}
-
-- (void)revealChangedFile:(NSButton *)sender {
-    NSString *path = [sender.identifier isKindOfClass:NSString.class] ? sender.identifier : @"";
-    BOOL directory = NO;
-    BOOL exists = path.length > 0 &&
-        [path hasPrefix:@"/"] &&
-        [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&directory];
-    if (!exists || directory) {
-        [_changedFilesStack removeArrangedSubview:sender];
-        [sender removeFromSuperview];
-        NSMutableDictionary<NSString *, PTAnimatedButton *> *buttons =
-            [_changedFileButtonsByPath mutableCopy] ?: [NSMutableDictionary dictionary];
-        [buttons removeObjectForKey:path];
-        _changedFileButtonsByPath = buttons;
-        _renderedChangedFiles = [self existingChangedFilesFromFiles:_renderedChangedFiles ?: @[]];
-        if (_changedFileButtonsByPath.count == 0) [self showEmptyChangedFilesState];
-        return;
-    }
-    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
-    _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"已在 Finder 中显示 %@", @"Revealed %@ in Finder"), path.lastPathComponent];
-}
-
-- (void)updateContextAndModelForSession:(PTSessionInfo *)session {
-    if (!session) return;
-    NSString *liveModel = [self bridgeForSessionID:session.sessionID].currentModel;
-    if (liveModel.length) session.model = liveModel;
-    NSString *liveEffort = [self bridgeForSessionID:session.sessionID].currentEffort;
-    if (liveEffort.length) session.effort = liveEffort;
-    NSNumber *liveContext = [self bridgeForSessionID:session.sessionID].contextTokens;
-    if (liveContext) session.contextUsed = liveContext.unsignedIntegerValue;
-
-    NSUInteger window = session.contextWindow;
-    NSUInteger used = session.contextUsed;
-    if (used > 0 && window > 0) {
-        double ratio = MIN(1.0, (double)used / (double)window);
-        _contextBar.doubleValue = ratio;
-        _contextLabel.stringValue = [NSString stringWithFormat:@"ctx %.0f%% · %@/%@",
-            ratio * 100.0, PTCompactTokenCount(used), PTCompactTokenCount(window)];
-        _contextBar.toolTip = [NSString stringWithFormat:@"最近一次调用占用 %lu / %lu tokens",
-            (unsigned long)used, (unsigned long)window];
-    } else {
-        _contextBar.doubleValue = 0;
-        _contextLabel.stringValue = @"ctx —";
-        _contextBar.toolTip = @"该会话尚无 usage 数据";
-    }
-
-    NSInteger selectedIndex = 0;
-    for (NSInteger index = 1; index < _modelPicker.numberOfItems; index++) {
-        if ([[_modelPicker itemAtIndex:index].representedObject isEqual:session.model]) {
-            selectedIndex = index;
-            break;
-        }
-    }
-    [_modelPicker selectItemAtIndex:selectedIndex];
-    _modelPicker.itemArray.firstObject.title = session.model.length
-        ? [NSString stringWithFormat:PTL(@"当前 · %@", @"Current · %@"), session.model]
-        : PTL(@"当前模型", @"Current model");
-    [self updateComposerConfigurationButtons];
-}
-
 - (void)connectStoreAndBridge {
     _store = [[PTSessionStore alloc] init];
     __weak typeof(self) weakSelf = self;
@@ -9369,13 +3942,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _store.globalModelChanged = ^(NSString *model) {
         PTAppDelegate *self = weakSelf;
         if (!self) return;
-        if (self->_bridge.currentModel.length) return;
-        if (self->_selectedSession && self->_bridge.running &&
-            [self->_bridge.sessionID isEqual:self->_selectedSession.sessionID]) {
-            self->_selectedSession.model = model;
-            [self updateContextAndModelForSession:self->_selectedSession];
-            self->_statusLabel.stringValue = [NSString stringWithFormat:PTL(@"检测到模型切换：%@", @"Model switch detected: %@"), model];
-        }
+        self->_selectedComposerModelID = [model copy];
+        [self pushFrontendWindowState];
     };
     _store.globalEffortChanged = ^(NSString *effort) {
         PTAppDelegate *self = weakSelf;
@@ -9397,106 +3965,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
     [self updateWorkspaceTabBar];
     [_store startWatchingGlobalSettings];
-}
-
-- (void)loadCollapsedSessionProjectsIfNeeded {
-    if (_collapsedSessionProjectPaths) return;
-    NSArray<NSString *> *stored = [NSUserDefaults.standardUserDefaults
-        stringArrayForKey:PTSessionProjectCollapsedDefaultsKey];
-    _collapsedSessionProjectPaths = [NSMutableSet setWithArray:stored ?: @[]];
-}
-
-- (void)persistCollapsedSessionProjects {
-    NSArray<NSString *> *paths = [_collapsedSessionProjectPaths.allObjects
-        sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
-    [NSUserDefaults.standardUserDefaults setObject:paths
-                                            forKey:PTSessionProjectCollapsedDefaultsKey];
-}
-
-- (void)rebuildSessionSidebarRows {
-    [self loadCollapsedSessionProjectsIfNeeded];
-    NSMutableOrderedSet<NSString *> *projectOrder = [NSMutableOrderedSet orderedSet];
-    NSMutableDictionary<NSString *, NSMutableArray<PTSessionInfo *> *> *grouped =
-        [NSMutableDictionary dictionary];
-    for (PTSessionInfo *session in _sessions ?: @[]) {
-        NSString *projectKey = PTSessionProjectKey(session);
-        NSMutableArray<PTSessionInfo *> *projectSessions = grouped[projectKey];
-        if (!projectSessions) {
-            projectSessions = [NSMutableArray array];
-            grouped[projectKey] = projectSessions;
-            [projectOrder addObject:projectKey];
-        }
-        [projectSessions addObject:session];
-    }
-
-    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
-    for (NSString *projectKey in projectOrder) {
-        NSArray<PTSessionInfo *> *projectSessions = grouped[projectKey];
-        BOOL collapsed = [_collapsedSessionProjectPaths containsObject:projectKey];
-        [rows addObject:@{
-            @"kind": @"project",
-            @"projectKey": projectKey,
-            @"title": PTSessionProjectTitle(projectKey),
-            @"sessionCount": @(projectSessions.count),
-            @"collapsed": @(collapsed)
-        }];
-        if (collapsed) continue;
-        for (PTSessionInfo *session in projectSessions) {
-            [rows addObject:@{
-                @"kind": @"session",
-                @"projectKey": projectKey,
-                @"session": session
-            }];
-        }
-    }
-    _sessionSidebarRows = rows;
-}
-
-- (PTSessionInfo *)sessionForSidebarRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_sessionSidebarRows.count) return nil;
-    NSDictionary *item = _sessionSidebarRows[row];
-    return [item[@"kind"] isEqual:@"session"] ? item[@"session"] : nil;
-}
-
-- (NSInteger)sidebarRowForSessionID:(NSString *)sessionID {
-    if (sessionID.length == 0) return NSNotFound;
-    for (NSInteger row = 0; row < (NSInteger)_sessionSidebarRows.count; row++) {
-        PTSessionInfo *session = [self sessionForSidebarRow:row];
-        if ([session.sessionID isEqual:sessionID]) return row;
-    }
-    return NSNotFound;
-}
-
-- (void)toggleSessionProject:(NSButton *)sender {
-    NSString *projectKey = [sender.identifier isKindOfClass:NSString.class]
-        ? sender.identifier : @"";
-    if (projectKey.length == 0) return;
-    [self loadCollapsedSessionProjectsIfNeeded];
-    if ([_collapsedSessionProjectPaths containsObject:projectKey]) {
-        [_collapsedSessionProjectPaths removeObject:projectKey];
-    } else {
-        [_collapsedSessionProjectPaths addObject:projectKey];
-    }
-    [self persistCollapsedSessionProjects];
-    NSString *selectedID = _activeWorkspaceTab.sessionID.length
-        ? _activeWorkspaceTab.sessionID : _selectedSession.sessionID;
-    [self rebuildSessionSidebarRows];
-    [_sessionTable reloadData];
-    NSInteger selectedRow = [self sidebarRowForSessionID:selectedID];
-    if (selectedRow == NSNotFound) {
-        [_sessionTable deselectAll:nil];
-    } else {
-        [_sessionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:selectedRow]
-                     byExtendingSelection:NO];
-    }
-    for (NSInteger row = 0; row < (NSInteger)_sessionSidebarRows.count; row++) {
-        NSDictionary *item = _sessionSidebarRows[row];
-        if ([item[@"kind"] isEqual:@"project"] &&
-            [item[@"projectKey"] isEqual:projectKey]) {
-            [_sessionTable scrollRowToVisible:row];
-            break;
-        }
-    }
 }
 
 - (void)applySessions:(NSArray<PTSessionInfo *> *)sessions {
@@ -9531,11 +3999,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     if ([_sessionListSignature isEqual:signature] && !manualRefresh) return;
     _sessionListSignature = signature;
 
-    _applyingSessions = YES;
     NSString *selectedID = _selectedSession.sessionID;
     _sessions = sessions;
-    [self rebuildSessionSidebarRows];
-    [_sessionTable reloadData];
 
     PTSessionInfo *nextSelectedSession = nil;
     if (selectedID.length) {
@@ -9554,12 +4019,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     if (nextSelectedSession) {
         _selectedSession = nextSelectedSession;
         _activeWorkspaceTab.sessionID = nextSelectedSession.sessionID ?: @"";
-        NSInteger selectedRow = [self sidebarRowForSessionID:_selectedSession.sessionID];
-        if (selectedRow == NSNotFound) {
-            [_sessionTable deselectAll:nil];
-        } else {
-        [_sessionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:selectedRow] byExtendingSelection:NO];
-        }
         if (manualRefresh && [_manualRefreshSessionID isEqual:_selectedSession.sessionID]) {
             _renderedSessionID = nil;
             _renderedModifiedAt = nil;
@@ -9579,14 +4038,14 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     }
     [self refreshFloatingConversation];
     [self updateFloatingControls];
-    [self updateWorkspaceTabBar];
     _manualRefreshSessionID = nil;
     if (!_bridge.running) {
-        _statusLabel.stringValue = [NSString stringWithFormat:PTL(@"已发现 %lu 个本地会话", @"Found %lu local conversations"), (unsigned long)sessions.count];
+        _statusText = [NSString stringWithFormat:PTL(@"已发现 %lu 个本地会话", @"Found %lu local conversations"), (unsigned long)sessions.count];
     }
-    _applyingSessions = NO;
-    [self updateHomeProjects];
     [self finishHomeSessionIfAvailable];
+    [self pushFrontendSessions];
+    [self pushFrontendWindowState];
+    [self pushFrontendWorkspace];
 }
 
 - (void)syncFullSessionIDs {
@@ -9595,7 +4054,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     for (PTWorkspaceTab *tab in _workspaceTabs) {
         if (tab.sessionID.length) [sessionIDs addObject:tab.sessionID];
     }
-    if (_floatingPanel.visible && _floatingSessionID.length)
+    if (_lobeFloatingPanel.visible && _floatingSessionID.length)
         [sessionIDs addObject:_floatingSessionID];
     if ([sessionIDs isEqualToSet:_store.fullSessionIDs]) return;
     _store.fullSessionIDs = sessionIDs;
@@ -9617,19 +4076,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
                 [self finishClaudeUsageWithPayload:nil error:self->_bridge.lastSendError];
         }];
     }
-    [self updateContextAndModelForSession:_selectedSession];
-    _conversationTitle.stringValue = _selectedSession.title ?: PTL(@"未命名会话", @"Untitled conversation");
-    NSString *folder = _selectedSession.cwd.lastPathComponent.length ? _selectedSession.cwd.lastPathComponent : _selectedSession.cwd;
-    NSString *model = _selectedSession.model.length ? _selectedSession.model : @"Claude";
-    _conversationDetail.stringValue = [NSString stringWithFormat:PTL(@"%@ · %@ · %lu 轮对话", @"%@ · %@ · %lu turns"),
-        folder.length ? folder : PTL(@"未知目录", @"Unknown directory"), model,
-        (unsigned long)PTSessionTurnCount(_selectedSession)];
-    _connectButton.enabled = YES;
-    [self updateInspectorForSession:_selectedSession];
-    [self refreshAgentStateAndControls];
+    [self rememberGitDirectoriesForSession:_selectedSession];
     [self renderSession:_selectedSession];
     [self updateFloatingControls];
-    [self updateWorkspaceTabBar];
+    [self pushFrontendGitState];
 }
 
 - (void)watchSelectedSessionTranscript {
@@ -9672,9 +4122,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 // JSONL 只追加新消息时走 DOM 增量追加，保留老师展开的 details、选区和滚动位置；
 // 切换会话、消息数减少或同数量内容修订时使用当前完整快照。
 - (void)renderSession:(PTSessionInfo *)session {
-    if (!_webReady || !session) return;
+    if (!session) return;
+    BOOL viewReady = _lobeMainBridge.frontendReady;
+    if (!viewReady) return;
     PTClaudeBridge *streamBridge = [self bridgeForSessionID:session.sessionID];
-    [streamBridge reconcileStreamWithMessages:session.assistantMessages];
     if (_renderInFlight) {
         if (!_pendingRenderSession ||
             ![_pendingRenderSession.sessionID isEqual:session.sessionID] ||
@@ -9692,6 +4143,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         session.modifiedAt,
         messageCount
     )) return;
+    [streamBridge reconcileStreamWithMessages:session.assistantMessages];
+
 
     NSArray<NSDictionary *> *messages = session.assistantMessages ?: @[];
     BOOL canAppend = [_renderedSessionID isEqual:session.sessionID] &&
@@ -9725,31 +4178,25 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     payload[@"questionUpdates"] = PTQuestionUpdates(session.assistantMessages);
     if (!canAppend && !canPatch) payload[@"messages"] = session.assistantMessages ?: @[];
 
-    NSDictionary *arguments = canAppend
-        ? @{@"metadata": payload, @"messages": [messages subarrayWithRange:
-            NSMakeRange(_renderedMessageCount, messageCount - _renderedMessageCount)]}
-        : canPatch ? @{@"metadata": payload, @"updates": updates,
-            @"messages": [messages subarrayWithRange:NSMakeRange(_renderedMessageCount, messageCount - _renderedMessageCount)]}
-        : @{@"metadata": payload};
-    NSString *script = canAppend
-        ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.appendClaudeMessages(metadata, messages); return 1;"
-        : canPatch ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.updateClaudeMessages(metadata, updates); if (messages.length) await window.appendClaudeMessages(metadata, messages); return 1;"
-        : @"await window.setClaudeSession(metadata); return 1;";
+    NSArray<NSDictionary *> *deltaMessages = (canAppend || canPatch)
+        ? [messages subarrayWithRange:NSMakeRange(_renderedMessageCount, messageCount - _renderedMessageCount)]
+        : @[];
 
     NSString *targetSessionID = [session.sessionID copy];
     NSDate *targetModifiedAt = session.modifiedAt;
+    PTFrontendBridge *frontend = _lobeMainBridge;
+    NSUInteger frontendGeneration = frontend.frontendGeneration;
     _renderInFlight = YES;
     __weak typeof(self) weakSelf = self;
-    [_conversationView callAsyncJavaScript:script arguments:arguments
-        inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
+    void (^finishMainRender)(BOOL, NSError *) = ^(BOOL ok, NSError *error) {
         PTAppDelegate *self = weakSelf;
-        if (!self) return;
+        if (!self || frontend.frontendGeneration != frontendGeneration) return;
         self->_renderInFlight = NO;
-        BOOL appendRejected = (canAppend || canPatch) && [result isKindOfClass:NSNumber.class] &&
-            ![(NSNumber *)result boolValue];
-        if (error || appendRejected) {
-            self->_statusLabel.stringValue = PTL(@"显示更新失败", @"Display update failed");
-        } else {
+        BOOL stillCurrent = [self->_selectedSession.sessionID isEqual:targetSessionID];
+        if (stillCurrent && (error || !ok)) {
+            self->_statusText = PTL(@"显示更新失败", @"Display update failed");
+            [self pushFrontendWindowState];
+        } else if (stillCurrent) {
             self->_renderedSessionID = targetSessionID;
             self->_renderedMessageCount = messageCount;
             self->_renderedMessages = [renderSnapshot copy];
@@ -9760,116 +4207,15 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         PTSessionInfo *pending = self->_pendingRenderSession;
         self->_pendingRenderSession = nil;
         if (pending) [self renderSession:pending];
-    }];
-}
+    };
 
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    (void)tableView;
-    return _sessionSidebarRows.count;
-}
-
-- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
-    (void)tableColumn;
-    NSDictionary *item = row >= 0 && row < (NSInteger)_sessionSidebarRows.count
-        ? _sessionSidebarRows[row] : nil;
-    if ([item[@"kind"] isEqual:@"project"]) {
-        PTSessionProjectCellView *cell = [tableView
-            makeViewWithIdentifier:@"PTSessionProjectCell" owner:self];
-        if (!cell) {
-            cell = [[PTSessionProjectCellView alloc] initWithFrame:NSMakeRect(0, 0, 260, 42)];
-            cell.identifier = @"PTSessionProjectCell";
-        }
-        [cell configureWithProjectKey:item[@"projectKey"]
-                                title:item[@"title"]
-                         sessionCount:[item[@"sessionCount"] unsignedIntegerValue]
-                            collapsed:[item[@"collapsed"] boolValue]
-                               target:self
-                               action:@selector(toggleSessionProject:)];
-        return cell;
+    if (canAppend) {
+        [_lobeMainBridge deliverClaudeAppend:payload messages:deltaMessages completion:finishMainRender];
+    } else if (canPatch) {
+        [_lobeMainBridge deliverClaudePatch:payload updates:updates messages:deltaMessages completion:finishMainRender];
+    } else {
+        [_lobeMainBridge deliverClaudeSession:payload completion:finishMainRender];
     }
-
-    PTSessionCellView *cell = [tableView makeViewWithIdentifier:@"PTSessionCell" owner:self];
-    if (!cell) {
-        cell = [[PTSessionCellView alloc] initWithFrame:NSMakeRect(0, 0, 260, 62)];
-        cell.identifier = @"PTSessionCell";
-    }
-    PTSessionInfo *session = item[@"session"];
-    [cell configure:session];
-    return cell;
-}
-
-- (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
-    (void)tableView;
-    if (row < 0 || row >= (NSInteger)_sessionSidebarRows.count) return 66.0;
-    return [_sessionSidebarRows[row][@"kind"] isEqual:@"project"] ? 42.0 : 66.0;
-}
-
-- (BOOL)tableView:(NSTableView *)tableView shouldSelectRow:(NSInteger)row {
-    (void)tableView;
-    return [self sessionForSidebarRow:row] != nil;
-}
-
-- (NSTableRowView *)tableView:(NSTableView *)tableView rowViewForRow:(NSInteger)row {
-    PTSessionRowView *rowView = [tableView makeViewWithIdentifier:@"PTSessionRow" owner:self];
-    if (!rowView) {
-        rowView = [[PTSessionRowView alloc] initWithFrame:NSZeroRect];
-        rowView.identifier = @"PTSessionRow";
-    }
-    return rowView;
-}
-
-// 右键菜单只对 clickedRow 生效，不改选中项——老师可能只想看看某个会话的文件在哪，
-// 不希望右键顺手把正在同步的会话切走。行号会被 1.5 秒一次的 applySessions 打乱，
-// 所以路径在菜单弹出时就固化进 representedObject，回调时不再按行号回查。
-- (void)menuNeedsUpdate:(NSMenu *)menu {
-    if (menu != _sessionTable.menu) return;
-    [menu removeAllItems];
-    NSInteger row = _sessionTable.clickedRow;
-    PTSessionInfo *session = [self sessionForSidebarRow:row];
-    if (!session) return;
-
-    [self populateSessionContextMenu:menu forSession:session];
-}
-
-- (void)populateSessionContextMenu:(NSMenu *)menu forSession:(PTSessionInfo *)session {
-    NSString *path = session.filePath ?: @"";
-    BOOL exists = path.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:path];
-
-    NSMenuItem *rename = [menu addItemWithTitle:PTL(@"重命名", @"Rename") action:@selector(renameSessionFromMenu:) keyEquivalent:@""];
-    rename.target = self;
-    rename.representedObject = session;
-    [menu addItem:NSMenuItem.separatorItem];
-
-    NSMenuItem *reveal = [menu addItemWithTitle:PTL(@"在 Finder 中显示", @"Reveal in Finder")
-                                         action:@selector(revealSessionTranscript:)
-                                  keyEquivalent:@""];
-    reveal.target = self;
-    reveal.representedObject = path;
-    reveal.enabled = exists;
-    reveal.toolTip = exists ? path : PTL(@"transcript 文件已不存在", @"Transcript file no longer exists");
-
-    NSMenuItem *copyPath = [menu addItemWithTitle:PTL(@"拷贝 transcript 路径", @"Copy transcript path")
-                                           action:@selector(copySessionTranscriptPath:)
-                                    keyEquivalent:@""];
-    copyPath.target = self;
-    copyPath.representedObject = path;
-    copyPath.enabled = path.length > 0;
-
-    [menu addItem:[NSMenuItem separatorItem]];
-    NSString *projectPath = session.cwd.stringByStandardizingPath ?: @"";
-    BOOL isDirectory = NO;
-    BOOL projectExists = projectPath.length > 0 &&
-        [NSFileManager.defaultManager fileExistsAtPath:projectPath isDirectory:&isDirectory] &&
-        isDirectory;
-    NSMenuItem *openProject = [menu addItemWithTitle:PTL(@"打开项目文件夹", @"Open project folder")
-                                               action:@selector(openSessionProjectFolder:)
-                                        keyEquivalent:@""];
-    openProject.target = self;
-    openProject.representedObject = projectPath;
-    openProject.enabled = projectExists;
-    openProject.toolTip = projectExists
-        ? projectPath
-        : PTL(@"session 的项目文件夹已不存在", @"The session project folder no longer exists");
 }
 
 - (void)renameSession:(PTSessionInfo *)session toTitle:(NSString *)title {
@@ -9887,7 +4233,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 - (void)sendClaudeRenameTitle:(NSString *)title usingBridge:(PTClaudeBridge *)bridge {
     NSString *command = [@"/rename " stringByAppendingString:title];
     BOOL sent = [bridge sendMessage:command];
-    _statusLabel.stringValue = sent
+    _statusText = sent
         ? PTL(@"已向 Claude 发送重命名指令", @"Rename command sent to Claude")
         : PTL(@"本地名称已保存，Terminal 未接受重命名指令", @"Local name saved; Terminal did not accept the rename command");
 }
@@ -9908,7 +4254,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     PTClaudeBridge *connection = [self newRenameBridge];
     _renameConnections[sessionID] = connection;
     _pendingRenameTitles[sessionID] = title;
-    _statusLabel.stringValue = PTL(@"正在接入 Claude 并同步名称…", @"Connecting to Claude to sync the name…");
+    _statusText = PTL(@"正在接入 Claude 并同步名称…", @"Connecting to Claude to sync the name…");
     __weak typeof(self) weakSelf = self;
     __weak PTClaudeBridge *weakConnection = connection;
     connection.statusChanged = ^(NSString *status) {
@@ -9936,234 +4282,14 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             [self sendClaudeRenameTitle:pendingTitle usingBridge:bridge];
         } else {
             [self->_renameConnections removeObjectForKey:sessionID];
-            self->_statusLabel.stringValue = [NSString stringWithFormat:PTL(@"本地名称已保存，Claude 名称同步失败：%@", @"Local name saved; Claude name sync failed: %@"), status ?: @""];
+            self->_statusText = [NSString stringWithFormat:PTL(@"本地名称已保存，Claude 名称同步失败：%@", @"Local name saved; Claude name sync failed: %@"), status ?: @""];
         }
     };
     [connection connectToSession:session];
 }
 
-- (void)renameSessionFromMenu:(NSMenuItem *)sender {
-    PTSessionInfo *session = sender.representedObject;
-    NSAlert *alert = [NSAlert new];
-    alert.messageText = PTL(@"重命名会话", @"Rename conversation");
-    [alert addButtonWithTitle:PTL(@"保存", @"Save")];
-    [alert addButtonWithTitle:PTL(@"取消", @"Cancel")];
-    NSTextField *name = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 320, 28)];
-    name.stringValue = session.title ?: @"";
-    alert.accessoryView = name;
-    [alert.window setInitialFirstResponder:name];
-    [alert beginSheetModalForWindow:_window completionHandler:^(NSModalResponse response) {
-        if (response == NSAlertFirstButtonReturn) [self renameSession:session toTitle:name.stringValue];
-    }];
-}
-
-- (void)revealSessionTranscript:(NSMenuItem *)sender {
-    NSString *path = [sender.representedObject isKindOfClass:NSString.class]
-        ? sender.representedObject : nil;
-    if (path.length == 0) return;
-    if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
-        _statusLabel.stringValue = PTL(@"transcript 文件已不存在", @"Transcript file no longer exists");
-        return;
-    }
-    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
-}
-
-- (void)copySessionTranscriptPath:(NSMenuItem *)sender {
-    NSString *path = [sender.representedObject isKindOfClass:NSString.class]
-        ? sender.representedObject : nil;
-    if (path.length == 0) return;
-    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-    [pasteboard clearContents];
-    [pasteboard setString:path forType:NSPasteboardTypeString];
-    _statusLabel.stringValue = PTL(@"已拷贝 transcript 路径", @"Transcript path copied");
-}
-
-- (void)openSessionProjectFolder:(NSMenuItem *)sender {
-    NSString *path = [sender.representedObject isKindOfClass:NSString.class]
-        ? [sender.representedObject stringByStandardizingPath] : nil;
-    BOOL isDirectory = NO;
-    if (path.length == 0 ||
-        ![NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory] ||
-        !isDirectory) {
-        _statusLabel.stringValue = PTL(@"session 的项目文件夹已不存在",
-                                       @"The session project folder no longer exists");
-        return;
-    }
-    [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:path isDirectory:YES]];
-}
-
-// 三个地方（bridge 状态变化 / 切换选中会话 / 点击接入按钮）都会想改按钮文案，
-// 各写各的会互相打脸（比如点了"正在同步…"之后 bridge 的回调又把它覆盖成别的状态）。
-// 统一到这一个方法里、按同一套优先级算，其它地方只管调用它。
-- (void)updateConnectButtonTitle {
-    if (_connecting) {
-        _connectButton.title = PTL(@"正在同步…", @"Syncing…");
-        return;
-    }
-    BOOL sameConnection = _bridge.running && [_bridge.sessionID isEqual:_selectedSession.sessionID];
-    _connectButton.title = sameConnection
-        ? PTL(@"已同步", @"Synced") : PTL(@"连接 Claude", @"Sync");
-    [self refreshAgentStateAndControls];
-}
-
-- (void)tableViewSelectionDidChange:(NSNotification *)notification {
-    (void)notification;
-    NSInteger row = _sessionTable.selectedRow;
-    PTSessionInfo *session = [self sessionForSidebarRow:row];
-    if (!session) return;
-    if (_homeVisible && !_applyingSessions) [self hideHome:nil];
-    BOOL changed = ![_selectedSession.sessionID isEqual:session.sessionID];
-    _selectedSession = session;
-    _activeWorkspaceTab.sessionID = session.sessionID ?: @"";
-    [self showSelectedSession];
-    [self updateConnectButtonTitle];
-    [self updateWorkspaceTabBar];
-    if (changed && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        _conversationView.alphaValue = 0.62;
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.18;
-            self->_conversationView.animator.alphaValue = 1.0;
-        } completionHandler:nil];
-    }
-}
-
-- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
-    NSString *languageScript = [NSString stringWithFormat:
-        @"window.setPrettyTermLanguage && window.setPrettyTermLanguage('%@'); null;",
-        PTInterfaceLanguageCode()];
-    [webView evaluateJavaScript:languageScript completionHandler:nil];
-    if (webView == _filePreviewWebView) {
-        _filePreviewWebReady = YES;
-        [self renderActiveFilePreview];
-        return;
-    }
-    if (webView == _floatingConversationView) {
-        _floatingWebReady = YES;
-        [self refreshFloatingConversation];
-        return;
-    }
-    _webReady = YES;
-    if (_selectedSession) [self renderSession:_selectedSession];
-}
-
-- (void)userContentController:(WKUserContentController *)userContentController
-      didReceiveScriptMessage:(WKScriptMessage *)message {
-    (void)userContentController;
-    if (![message.body isKindOfClass:NSDictionary.class]) return;
-    NSDictionary *body = message.body;
-    if ([message.name isEqualToString:@"openTranscriptFile"]) {
-        NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class]
-            ? body[@"sessionId"] : @"";
-        NSString *path = [body[@"filePath"] isKindOfClass:NSString.class]
-            ? body[@"filePath"] : @"";
-        PTSessionInfo *session = [self sessionWithID:sessionID];
-        if (!path.isAbsolutePath) path = [session.cwd stringByAppendingPathComponent:path];
-        [self openPreviewFileURL:[NSURL fileURLWithPath:path.stringByStandardizingPath]];
-        [_window makeKeyAndOrderFront:nil];
-        [NSApp activateIgnoringOtherApps:YES];
-        return;
-    }
-    if ([message.name isEqualToString:@"openTranscriptEditReview"]) {
-        NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class]
-            ? body[@"sessionId"] : @"";
-        NSNumber *turnIndexValue = [body[@"turnIndex"] isKindOfClass:NSNumber.class]
-            ? body[@"turnIndex"] : nil;
-        NSString *expectedSessionID = message.webView == _conversationView
-            ? _selectedSession.sessionID
-            : (message.webView == _floatingConversationView ? _floatingSessionID : nil);
-        if (sessionID.length > 0 && turnIndexValue && [sessionID isEqual:expectedSessionID]) {
-            [self openTranscriptEditReviewForSessionID:sessionID
-                                             turnIndex:turnIndexValue.unsignedIntegerValue];
-        }
-        return;
-    }
-    if ([message.name isEqualToString:@"copyAssistantOutput"]) {
-        NSString *text = [body[@"text"] isKindOfClass:NSString.class] ? body[@"text"] : @"";
-        NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class]
-            ? body[@"sessionId"] : @"";
-        NSString *expectedSessionID = message.webView == _conversationView
-            ? _selectedSession.sessionID
-            : (message.webView == _floatingConversationView ? _floatingSessionID : nil);
-        if (text.length == 0 || sessionID.length == 0 ||
-            ![sessionID isEqual:expectedSessionID]) return;
-        NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-        [pasteboard clearContents];
-        [pasteboard setString:text forType:NSPasteboardTypeString];
-        NSString *status = [body[@"kind"] isEqual:@"code"]
-            ? PTL(@"已复制代码", @"Code copied")
-            : PTL(@"已复制 Claude 输出", @"Claude output copied");
-        if (message.webView == _conversationView) {
-            _statusLabel.stringValue = status;
-        } else {
-            _floatingComposerLabel.stringValue = status;
-        }
-        return;
-    }
-    if ([message.name isEqualToString:@"answerQuestion"]) {
-        NSString *text = [body[@"text"] isKindOfClass:NSString.class] ? body[@"text"] : @"";
-        NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class] ? body[@"sessionId"] : @"";
-        NSString *expectedSessionID = message.webView == _conversationView
-            ? _selectedSession.sessionID
-            : (message.webView == _floatingConversationView ? _floatingSessionID : nil);
-        if (text.length == 0 || sessionID.length == 0 || ![sessionID isEqual:expectedSessionID]) return;
-        NSString *toolUseID = body[@"toolUseId"];
-        NSDictionary *answers = [body[@"answers"] isKindOfClass:NSDictionary.class] ? body[@"answers"] : nil;
-        for (NSString *requestID in _protocolQuestions.allKeys) {
-            NSDictionary *request = _protocolQuestions[requestID];
-            if ([request[@"sessionID"] isEqual:sessionID] && [request[@"toolUseId"] isEqual:toolUseID]) {
-                [self writeQuestionResponseForRequestID:requestID answers:answers ?: @{}];
-                return;
-            }
-        }
-        // 复用普通聊天发送的同一路径与 sendInFlight 互斥，跟老师手打消息走同一通道。
-        [self sendOutgoingMessage:text
-                         imagePNGs:@[]
-                      forSessionID:sessionID
-                           success:nil
-                  failureResponder:nil];
-        return;
-    }
-    if (![message.name isEqualToString:@"quoteSelection"]) return;
-    NSString *text = [body[@"text"] isKindOfClass:NSString.class] ? body[@"text"] : nil;
-    NSString *sessionID = [body[@"sessionId"] isKindOfClass:NSString.class] ? body[@"sessionId"] : nil;
-    NSString *quote = PTMarkdownQuote(text);
-    PTComposerTextView *composer = nil;
-    NSTextField *status = nil;
-    NSString *expectedSessionID = nil;
-
-    if (message.webView == _conversationView) {
-        composer = _composerTextView;
-        status = _statusLabel;
-        expectedSessionID = _selectedSession.sessionID;
-    } else if (message.webView == _floatingConversationView) {
-        composer = _floatingComposerTextView;
-        status = _floatingComposerLabel;
-        expectedSessionID = _floatingSessionID;
-    } else {
-        return;
-    }
-
-    BOOL correctConversation = quote.length > 0 && sessionID.length > 0 &&
-        [sessionID isEqual:expectedSessionID];
-    if (!correctConversation) {
-        status.stringValue = @"引用目标与当前对话不一致";
-        return;
-    }
-
-    [composer.window makeFirstResponder:composer];
-    [composer insertText:quote replacementRange:composer.selectedRange];
-    status.stringValue = @"已引用 Claude 选中内容";
-}
-
 - (void)refreshSessions:(id)sender {
-    if (sender == _refreshButton) [self refreshClaudeUsage:nil];
-    if (sender == _refreshButton && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        _refreshButton.alphaValue = 0.35;
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.24;
-            self->_refreshButton.animator.alphaValue = 1.0;
-        } completionHandler:nil];
-    }
+    (void)sender;
     [_store refresh];
 }
 
@@ -10176,7 +4302,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     _activeWorkspaceTab.connecting = YES;
     _activeWorkspaceTab.sessionID = requestedSessionID ?: @"";
     _agentState.sendInFlight = NO;
-    [self updateConnectButtonTitle];
     [_bridge connectToSession:_selectedSession];
     [self updateWorkspaceTabBar];
     __weak typeof(self) weakSelf = self;
@@ -10187,7 +4312,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             NSString *status = @"JSONL 会话文件不存在或无法读取";
             requestedWorkspaceTab.status = status;
             if (self->_activeWorkspaceTab == requestedWorkspaceTab) {
-                self->_statusLabel.stringValue = status;
+                self->_statusText = status;
             }
             return;
         }
@@ -10207,10 +4332,9 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             (unsigned long)session.assistantMessages.count];
         requestedWorkspaceTab.status = status;
         if (self->_activeWorkspaceTab == requestedWorkspaceTab) {
-            self->_statusLabel.stringValue = status;
+            self->_statusText = status;
         }
     }];
-    [_window makeFirstResponder:_composerTextView];
 }
 
 - (BOOL)interruptClaudeOutputForSessionID:(NSString *)sessionID {
@@ -10221,28 +4345,44 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     return YES;
 }
 
-- (void)stopSelectedClaudeOutput:(id)sender {
-    (void)sender;
-    NSString *sessionID = _selectedSession.sessionID;
-    if ([self interruptClaudeOutputForSessionID:sessionID]) {
-        _statusLabel.stringValue = PTL(@"已向 Claude Code 发送中断请求",
-                                        @"Interrupt request sent to Claude Code");
-    } else {
-        _statusLabel.stringValue = PTL(@"当前会话没有可用的 Claude 后台连接",
-                                        @"No Claude background connection is available for this conversation");
+- (BOOL)submitOutgoingMessage:(NSString *)message
+                    imagePNGs:(NSArray<NSData *> *)imagePNGs
+                 forSessionID:(NSString *)sessionID
+                   completion:(void (^)(NSString *error))completion {
+    NSString *outgoing = PTMessageForClaudeAttachments(message, imagePNGs.count);
+    if (!outgoing.length) {
+        completion(PTL(@"消息为空", @"Empty message"));
+        return NO;
     }
-}
+    BOOL configuration = !imagePNGs.count && [self isConfigurationCommand:outgoing];
+    if (!configuration && _agentState.sendInFlight) {
+        completion(PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…"));
+        return NO;
+    }
 
-- (void)stopFloatingClaudeOutput:(id)sender {
-    (void)sender;
-    NSString *sessionID = _floatingSessionID;
-    if ([self interruptClaudeOutputForSessionID:sessionID]) {
-        _floatingComposerLabel.stringValue = PTL(@"已向 Claude Code 发送中断请求",
-                                                  @"Interrupt request sent to Claude Code");
-    } else {
-        _floatingComposerLabel.stringValue = PTL(@"当前会话没有可用的 Claude 后台连接",
-                                                  @"No Claude background connection is available for this conversation");
+    PTClaudeBridge *target = [self bridgeForSessionID:sessionID];
+    if (!target) {
+        PTClaudeBridge *attempted = nil;
+        for (PTWorkspaceTab *tab in _workspaceTabs) {
+            if ([tab.sessionID isEqual:sessionID]) { attempted = tab.bridge; break; }
+        }
+        [self prepareBridgeForSessionID:sessionID completion:^(PTClaudeBridge *connected) {
+            if (connected) {
+                [self submitOutgoingMessage:message imagePNGs:imagePNGs
+                               forSessionID:sessionID completion:completion];
+            } else {
+                completion(attempted.lastSendError ?: PTL(@"无法连接 Claude Code 会话", @"Could not connect to the Claude Code conversation"));
+            }
+        }];
+        return YES;
     }
+
+    if (!configuration) _agentState.sendInFlight = YES;
+    [target submitMessage:outgoing withImagePNGs:imagePNGs ?: @[] completion:^(BOOL sent) {
+        if (!configuration) self->_agentState.sendInFlight = NO;
+        completion(sent ? nil : (target.lastSendError ?: PTL(@"Claude 未接受消息", @"Claude did not accept the message")));
+    }];
+    return YES;
 }
 
 - (BOOL)sendOutgoingMessage:(NSString *)message
@@ -10250,135 +4390,24 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
                forSessionID:(NSString *)sessionID
                     success:(dispatch_block_t)success
            failureResponder:(NSResponder *)failureResponder {
-    NSString *outgoingMessage = PTMessageForClaudeAttachments(message, imagePNGs.count);
-    if (outgoingMessage.length == 0) return NO;
-    PTClaudeBridge *targetBridge = [self bridgeForSessionID:sessionID];
-    BOOL configuration = !imagePNGs.count && [self isConfigurationCommand:outgoingMessage];
-    if (!configuration && _agentState.sendInFlight) {
-        if ([sessionID isEqual:_floatingSessionID]) {
-            _floatingComposerLabel.stringValue = PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…");
-        } else {
-            _statusLabel.stringValue = PTL(@"正在提交到 Claude Code…", @"Submitting to Claude Code…");
-        }
-        return NO;
-    }
-    if (!targetBridge) {
-        [self prepareBridgeForSessionID:sessionID completion:^(PTClaudeBridge *bridge) {
-            if (bridge) [self sendOutgoingMessage:message imagePNGs:imagePNGs forSessionID:sessionID
-                success:success failureResponder:failureResponder];
-        }];
-        return YES;
-    }
-
-    if (!configuration) _agentState.sendInFlight = YES;
-    [self refreshAgentStateAndControls];
-    [targetBridge submitMessage:outgoingMessage withImagePNGs:imagePNGs ?: @[] completion:^(BOOL sent) {
-        if (sent) {
+    return [self submitOutgoingMessage:message imagePNGs:imagePNGs forSessionID:sessionID completion:^(NSString *error) {
+        if (!error) {
             if (success) success();
-        } else {
-            NSString *status = targetBridge.lastSendError ?: PTL(@"Claude 未接受消息", @"Claude did not accept the message");
-            if ([sessionID isEqual:self->_floatingSessionID]) {
-                self->_floatingComposerLabel.stringValue = status;
-            }
-            if ([sessionID isEqual:self->_selectedSession.sessionID]) {
-                self->_statusLabel.stringValue = status;
-                if (failureResponder) [self->_window makeFirstResponder:failureResponder];
-            }
+            return;
         }
-        if (!configuration) self->_agentState.sendInFlight = NO;
-        [self refreshAgentStateAndControls];
+        if ([sessionID isEqual:self->_floatingSessionID]) self->_floatingStatusText = error;
+        if ([sessionID isEqual:self->_selectedSession.sessionID]) {
+            self->_statusText = error;
+            if (failureResponder) [self->_window makeFirstResponder:failureResponder];
+        }
+        [self pushFrontendWindowState];
     }];
-    return YES;
-}
-
-- (void)sendMessage:(id)sender {
-    (void)sender;
-    NSString *message = _composerTextView.string;
-    NSArray<NSData *> *imagePNGs = [self pendingImagePNGsForClaude];
-    NSArray<NSString *> *files = [self pendingFilesForClaude];
-    if (!imagePNGs.count && !files.count && [self handleLocalComposerCommand:message composer:_composerTextView]) return;
-    NSString *outgoing = PTMessageByAppendingClaudeAttachMarkers(message, files);
-    NSString *sessionID = [_selectedSession.sessionID copy];
-    PTWorkspaceTab *tab = _activeWorkspaceTab;
-    NSArray *images = [tab.pendingImages copy];
-    [self sendOutgoingMessage:outgoing imagePNGs:imagePNGs
-                 forSessionID:sessionID success:^{
-        if (![self isConfigurationCommand:outgoing]) [self beginAwaitingClaudeReplyForSessionID:sessionID];
-        if (self->_activeWorkspaceTab == tab) {
-            [self->_composerTextView clearAfterSuccessfulSubmissionMatchingText:message];
-        } else if ([tab.draft isEqual:message]) {
-            tab.draft = @"";
-        }
-        [tab.pendingImages removeObjectsInArray:images];
-        [tab.pendingFiles removeObjectsInArray:files];
-        for (NSDictionary *image in images) {
-            if (![image[@"temporary"] boolValue]) continue;
-            [NSFileManager.defaultManager removeItemAtPath:image[@"path"] error:nil];
-            [self->_temporaryImagePaths removeObject:image[@"path"]];
-        }
-        if (self->_activeWorkspaceTab == tab) [self updateImagePreviews];
-    } failureResponder:_composerTextView];
-}
-
-- (void)sendFloatingMessage:(id)sender {
-    (void)sender;
-    NSString *message = _floatingComposerTextView.string;
-    NSArray<NSData *> *imagePNGs = [self floatingPendingImagePNGsForClaude];
-    NSArray<NSString *> *files = [self floatingPendingFilesForClaude];
-    if (!imagePNGs.count && !files.count && [self handleLocalComposerCommand:message composer:_floatingComposerTextView]) return;
-    NSString *outgoing = PTMessageByAppendingClaudeAttachMarkers(message, files);
-    NSString *sessionID = [_floatingSessionID copy];
-    NSMutableArray *pendingImages = _floatingPendingImages;
-    NSMutableArray *pendingFiles = _floatingPendingFiles;
-    NSArray *images = [pendingImages copy];
-    [self sendOutgoingMessage:outgoing imagePNGs:imagePNGs
-                 forSessionID:sessionID success:^{
-        if (![self isConfigurationCommand:outgoing]) [self beginAwaitingClaudeReplyForSessionID:sessionID];
-        if ([self->_floatingSessionID isEqual:sessionID]) {
-            [self->_floatingComposerTextView clearAfterSuccessfulSubmissionMatchingText:message];
-        }
-        [pendingImages removeObjectsInArray:images];
-        [pendingFiles removeObjectsInArray:files];
-        for (NSDictionary *image in images) {
-            if ([image[@"temporary"] boolValue])
-                [NSFileManager.defaultManager removeItemAtPath:image[@"path"] error:nil];
-        }
-        if ([self->_floatingSessionID isEqual:sessionID]) [self updateFloatingImagePreviews];
-    } failureResponder:_floatingComposerTextView];
-}
-
-- (void)compactConversation:(id)sender {
-    (void)sender;
-    NSString *sessionID = [_selectedSession.sessionID copy];
-    [self sendOutgoingMessage:@"/compact"
-                    imagePNGs:@[]
-                 forSessionID:sessionID
-                      success:^{
-        [self beginAwaitingClaudeReplyForSessionID:sessionID];
-        self->_statusLabel.stringValue = PTL(@"已向 Claude Code 发送 /compact", @"Sent /compact to Claude Code");
-    } failureResponder:nil];
 }
 
 - (BOOL)isConfigurationCommand:(NSString *)text {
     NSString *command = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     return [command hasPrefix:@"/model "] || [command hasPrefix:@"/effort "] || [command hasPrefix:@"/mode "] ||
         [@[@"/plan", @"/auto", @"/bypass", @"/remote-control"] containsObject:command];
-}
-
-- (BOOL)handleLocalComposerCommand:(NSString *)text composer:(PTComposerTextView *)composer {
-    NSString *command = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (![@[@"/config", @"/model", @"/effort", @"/mode", @"/permissions", @"/help", @"/commands"] containsObject:command]) return NO;
-    [composer clearAfterSuccessfulSubmissionMatchingText:text];
-    if ([@[@"/help", @"/commands"] containsObject:command]) {
-        [composer insertText:@"/" replacementRange:composer.selectedRange];
-        [self showClaudeCommands:composer];
-        return YES;
-    }
-    [self showComposerOptions:composer == _floatingComposerTextView ? _floatingEffortButton : _composerEffortButton];
-    if ([command isEqual:@"/config"]) [self showComposerAdvancedPage:nil];
-    else if ([command isEqual:@"/model"]) [self showComposerModelPage:nil];
-    else if ([@[@"/mode", @"/permissions"] containsObject:command]) [self showComposerModePage:nil];
-    return YES;
 }
 
 - (void)presentClaudeToolRequest:(NSString *)requestID request:(NSDictionary *)request bridge:(PTClaudeBridge *)bridge {
@@ -10414,21 +4443,6 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             ? @{@"behavior": @"allow", @"updatedInput": input}
             : @{@"behavior": @"deny", @"message": @"User declined this action."}];
     }];
-}
-
-- (void)enableRemoteControl:(id)sender {
-    (void)sender;
-    [self sendOutgoingMessage:@"/remote-control"
-                    imagePNGs:@[]
-                 forSessionID:_selectedSession.sessionID
-                      success:^{
-        self->_statusLabel.stringValue = PTL(@"已向 Claude Code 发送 /remote-control", @"Sent /remote-control to Claude Code");
-    } failureResponder:nil];
-}
-
-- (void)changeModel:(id)sender {
-    _configurationSessionID = _selectedSession.sessionID;
-    [self changeComposerToModel:_modelPicker.selectedItem.representedObject];
 }
 
 #pragma mark - ask_via_prettyterm MCP 桥（独立弹窗，不经过 transcript）
@@ -10516,7 +4530,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     mark.surfaceStyle = PTAppearanceSurfaceStyleChip;
     mark.wantsLayer = YES;
     mark.layer.cornerRadius = 13;
-    NSTextField *markLabel = [self label:@"✦" size:17 weight:NSFontWeightBold color:PTWarmAccentColor()];
+    NSTextField *markLabel = [self label:@"✦" size:17 weight:NSFontWeightBold color:PTThemeColor(PTThemeRoleAccent)];
     markLabel.alignment = NSTextAlignmentCenter;
     [mark addSubview:markLabel];
     [header addSubview:mark];
@@ -10532,11 +4546,8 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     closeButton.translatesAutoresizingMaskIntoConstraints = NO;
     closeButton.title = @"×";
     closeButton.font = [NSFont systemFontOfSize:18 weight:NSFontWeightMedium];
-    closeButton.fillColor = NSColor.clearColor;
-    closeButton.hoverFillColor = PTWarmChipColor();
-    closeButton.pressedFillColor = PTWarmBorderColor();
-    closeButton.strokeColor = NSColor.clearColor;
-    closeButton.cornerRadius = 15;
+    [closeButton applyTone:PTButtonToneQuiet];
+    closeButton.cornerRadius = PTRadiusDefault;
     closeButton.target = self;
     closeButton.action = @selector(closeQuestionPanel:);
     closeButton.toolTip = PTL(@"关闭", @"Close");
@@ -10565,18 +4576,10 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
 
     _questionPanelStatusLabel = [self label:@"" size:11 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
 
-    PTAnimatedButton *submitButton = [[PTAnimatedButton alloc] initWithFrame:NSZeroRect];
-    submitButton.translatesAutoresizingMaskIntoConstraints = NO;
-    submitButton.title = PTL(@"提交回答   ↗", @"Submit answers   ↗");
+    PTAnimatedButton *submitButton = PTButtonWithTone(PTL(@"提交回答   ↗", @"Submit answers   ↗"),
+        PTButtonTonePrimary, self, @selector(submitQuestionPanel:));
     submitButton.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
-    submitButton.contentTintColor = NSColor.whiteColor;
-    submitButton.fillColor = PTWarmAccentColor();
-    submitButton.hoverFillColor = PTWarmDynamicColor(0.720, 0.326, 0.120, 0.965, 0.620, 0.370);
-    submitButton.pressedFillColor = PTWarmDynamicColor(0.535, 0.205, 0.060, 0.740, 0.350, 0.165);
-    submitButton.strokeColor = PTWarmAccentColor();
-    submitButton.cornerRadius = 21;
-    submitButton.target = self;
-    submitButton.action = @selector(submitQuestionPanel:);
+    submitButton.cornerRadius = PTRadiusDefault;
     submitButton.keyEquivalent = @"\r";
     [submitButton.widthAnchor constraintGreaterThanOrEqualToConstant:132].active = YES;
     [submitButton.heightAnchor constraintEqualToConstant:42].active = YES;
@@ -10667,7 +4670,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     metaRow.alignment = NSLayoutAttributeCenterY;
     metaRow.spacing = 8;
     if (header.length > 0) {
-        NSTextField *headerLabel = [self label:header size:10 weight:NSFontWeightBold color:PTWarmAccentColor()];
+        NSTextField *headerLabel = [self label:header size:10 weight:NSFontWeightBold color:PTThemeColor(PTThemeRoleMuted)];
         headerLabel.alignment = NSTextAlignmentCenter;
         PTAppearanceSurfaceView *headerChip = [[PTAppearanceSurfaceView alloc] initWithFrame:NSZeroRect];
         headerChip.translatesAutoresizingMaskIntoConstraints = NO;
@@ -10723,7 +4726,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
     inputSurface.wantsLayer = YES;
     inputSurface.layer.cornerRadius = 14;
     inputSurface.layer.borderWidth = 0.7;
-    NSTextField *plus = [self label:@"＋" size:15 weight:NSFontWeightMedium color:PTWarmAccentColor()];
+    NSTextField *plus = [self label:@"＋" size:15 weight:NSFontWeightMedium color:PTThemeColor(PTThemeRoleMuted)];
     NSTextField *customLabel = [self label:PTL(@"补充说明", @"Add a note")
         size:11.5 weight:NSFontWeightSemibold color:NSColor.secondaryLabelColor];
     [inputSurface addSubview:plus];
@@ -10883,6 +4886,1600 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         [self presentNextQuestionRequestIfIdle];
     }];
 }
+
+#pragma mark - LobeHub Frontend Host
+
+static NSString *PTLobeFileLanguageForExtension(NSString *ext) {
+    NSString *lower = ext.lowercaseString;
+    if (lower.length == 0) return @"text";
+    NSDictionary<NSString *, NSString *> *map = @{
+        @"m": @"objective-c", @"mm": @"objective-c", @"h": @"c", @"hpp": @"cpp",
+        @"c": @"c", @"cpp": @"cpp", @"cc": @"cpp", @"ts": @"typescript",
+        @"tsx": @"tsx", @"js": @"javascript", @"jsx": @"jsx", @"mjs": @"javascript",
+        @"py": @"python", @"swift": @"swift", @"json": @"json", @"jsonl": @"json",
+        @"yml": @"yaml", @"yaml": @"yaml", @"md": @"markdown", @"markdown": @"markdown",
+        @"sh": @"bash", @"zsh": @"bash", @"bash": @"bash", @"css": @"css",
+        @"scss": @"scss", @"html": @"html", @"xml": @"xml", @"sql": @"sql",
+        @"rs": @"rust", @"go": @"go", @"rb": @"ruby", @"java": @"java",
+        @"kt": @"kotlin", @"toml": @"toml", @"tex": @"latex"
+    };
+    return map[lower] ?: lower;
+}
+
+static NSArray<NSDictionary *> *PTLobeSerializedFileTreeChildren(NSArray<NSDictionary *> *children) {
+    NSMutableArray<NSDictionary *> *serialized = [NSMutableArray arrayWithCapacity:children.count];
+    for (NSDictionary *item in children ?: @[]) {
+        NSURL *url = [item[@"url"] isKindOfClass:NSURL.class] ? item[@"url"] : nil;
+        NSString *path = url.path ?: ([item[@"path"] isKindOfClass:NSString.class] ? item[@"path"] : @"");
+        if (path.length == 0) continue;
+        NSString *name = [item[@"name"] isKindOfClass:NSString.class] ? item[@"name"] : path.lastPathComponent;
+        BOOL isDirectory = item[@"directory"] ? [item[@"directory"] boolValue] : [item[@"isDirectory"] boolValue];
+        [serialized addObject:@{
+            @"name": name ?: @"",
+            @"path": path,
+            @"isDirectory": @(isDirectory)
+        }];
+    }
+    return serialized;
+}
+
+static NSDictionary * _Nullable PTLobeSerializedFilePreviewPayload(NSDictionary * _Nullable raw, NSURL *url) {
+    if (!raw) return nil;
+    NSString *resolvedPath = [raw[@"path"] isKindOfClass:NSString.class] ? raw[@"path"] : (url.path ?: @"");
+    NSString *name = [raw[@"title"] isKindOfClass:NSString.class]
+        ? raw[@"title"]
+        : ([raw[@"name"] isKindOfClass:NSString.class] ? raw[@"name"] : resolvedPath.lastPathComponent);
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    out[@"kind"] = [raw[@"kind"] isKindOfClass:NSString.class] ? raw[@"kind"] : @"source";
+    out[@"path"] = resolvedPath ?: @"";
+    out[@"name"] = name ?: @"";
+    out[@"language"] = PTLobeFileLanguageForExtension(url.pathExtension ?: resolvedPath.pathExtension);
+    if ([raw[@"text"] isKindOfClass:NSString.class]) out[@"content"] = raw[@"text"];
+    if ([raw[@"content"] isKindOfClass:NSString.class]) out[@"content"] = raw[@"content"];
+    if ([raw[@"dataURL"] isKindOfClass:NSString.class]) out[@"dataUrl"] = raw[@"dataURL"];
+    if ([raw[@"dataUrl"] isKindOfClass:NSString.class]) out[@"dataUrl"] = raw[@"dataUrl"];
+    if ([raw[@"html"] isKindOfClass:NSString.class]) out[@"html"] = raw[@"html"];
+    return [out copy];
+}
+
+static NSArray<NSDictionary *> *PTLobeSanitizeTurnEdits(NSArray<NSDictionary *> *events) {
+    NSMutableArray<NSDictionary *> *clean = [NSMutableArray arrayWithCapacity:events.count];
+    for (NSDictionary *ev in events ?: @[]) {
+        [clean addObject:@{
+            @"filePath": [ev[@"filePath"] isKindOfClass:NSString.class] ? ev[@"filePath"] : @"",
+            @"oldText": [ev[@"oldText"] isKindOfClass:NSString.class] ? ev[@"oldText"] : @"",
+            @"newText": [ev[@"newText"] isKindOfClass:NSString.class] ? ev[@"newText"] : @"",
+            @"toolName": [ev[@"toolName"] isKindOfClass:NSString.class] ? ev[@"toolName"] : @""
+        }];
+    }
+    return clean;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary<NSKeyValueChangeKey,id> *)change
+                       context:(void *)context {
+    if (context == (__bridge void *)self && [keyPath isEqualToString:@"effectiveAppearance"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self syncLobeFrontendAppearanceAndLanguage];
+        });
+        return;
+    }
+    [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+}
+
+- (NSString *)resolvedLobeAppearance {
+    return PTFrontendBridgeAppearanceString(NSApp.appearance ?: _window.effectiveAppearance ?: NSApp.effectiveAppearance);
+}
+
+- (void)attachMainFrontend {
+    NSString *appearance = [self resolvedLobeAppearance];
+    NSString *language = PTInterfaceLanguageCode();
+    if (!_lobeMainWebView) {
+        _lobeMainBridge = [[PTFrontendBridge alloc] initWithSurface:@"main" delegate:self];
+        WKWebViewConfiguration *mainConfig = [[WKWebViewConfiguration alloc] init];
+        [_lobeMainBridge configureWebViewConfiguration:mainConfig
+                                     initialAppearance:appearance
+                                       initialLanguage:language];
+        _lobeMainWebView = [[PTBridgeDropWebView alloc] initWithFrame:NSZeroRect configuration:mainConfig];
+        _lobeMainWebView.translatesAutoresizingMaskIntoConstraints = NO;
+        if (@available(macOS 12.0, *)) _lobeMainWebView.underPageBackgroundColor = NSColor.clearColor;
+        __weak typeof(self) weakSelf = self;
+        _lobeMainWebView.fileDropHandler = ^BOOL(NSArray<NSURL *> *urls) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return NO;
+            BOOL added = [strongSelf addComposerAttachmentURLs:urls floating:NO];
+            [strongSelf pushFrontendWorkspace];
+            return added;
+        };
+        [_lobeMainBridge attachWebView:_lobeMainWebView];
+        NSView *windowContent = _window.contentView;
+        [windowContent addSubview:_lobeMainWebView];
+        [NSLayoutConstraint activateConstraints:@[
+            [_lobeMainWebView.topAnchor constraintEqualToAnchor:windowContent.topAnchor],
+            [_lobeMainWebView.leadingAnchor constraintEqualToAnchor:windowContent.leadingAnchor],
+            [_lobeMainWebView.trailingAnchor constraintEqualToAnchor:windowContent.trailingAnchor],
+            [_lobeMainWebView.bottomAnchor constraintEqualToAnchor:windowContent.bottomAnchor]
+        ]];
+        [_lobeMainBridge loadBundledFrontendFromResourceURL:nil error:nil];
+    }
+}
+
+- (void)positionLobeFloatingPanelNearMainWindow {
+    if (!_lobeFloatingPanel) return;
+    NSScreen *screen = _window.screen ?: NSScreen.mainScreen;
+    NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1440, 900);
+    NSRect mainFrame = _window.frame;
+    NSRect panelFrame = _lobeFloatingPanel.frame;
+    panelFrame.origin.x = MIN(NSMaxX(mainFrame) - panelFrame.size.width - 22.0,
+                              NSMaxX(visible) - panelFrame.size.width - 12.0);
+    panelFrame.origin.x = MAX(panelFrame.origin.x, NSMinX(visible) + 12.0);
+    panelFrame.origin.y = MIN(NSMaxY(mainFrame) - panelFrame.size.height - 22.0,
+                              NSMaxY(visible) - panelFrame.size.height - 12.0);
+    panelFrame.origin.y = MAX(panelFrame.origin.y, NSMinY(visible) + 12.0);
+    [_lobeFloatingPanel setFrame:panelFrame display:NO];
+}
+
+- (void)buildLobeFloatingPanelIfNeeded {
+    if (_lobeFloatingPanel) return;
+    NSString *appearance = [self resolvedLobeAppearance];
+    NSString *language = PTInterfaceLanguageCode();
+    NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+        NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView |
+        NSWindowStyleMaskNonactivatingPanel;
+    _lobeFloatingPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 500.0, 660.0)
+                                                    styleMask:style
+                                                      backing:NSBackingStoreBuffered
+                                                        defer:NO];
+    _lobeFloatingPanel.title = PTL(@"PrettyTerm 悬浮对话", @"PrettyTerm Floating Conversation");
+    _lobeFloatingPanel.titleVisibility = NSWindowTitleHidden;
+    _lobeFloatingPanel.titlebarAppearsTransparent = YES;
+    _lobeFloatingPanel.floatingPanel = YES;
+    _lobeFloatingPanel.level = NSFloatingWindowLevel;
+    _lobeFloatingPanel.hidesOnDeactivate = NO;
+    _lobeFloatingPanel.becomesKeyOnlyIfNeeded = NO;
+    _lobeFloatingPanel.releasedWhenClosed = NO;
+    _lobeFloatingPanel.minSize = NSMakeSize(380.0, 420.0);
+    _lobeFloatingPanel.backgroundColor = PTThemeColor(PTThemeRoleCanvas);
+    _lobeFloatingPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorFullScreenAuxiliary;
+    _lobeFloatingPanel.delegate = self;
+    [_lobeFloatingPanel standardWindowButton:NSWindowCloseButton].hidden = YES;
+    [_lobeFloatingPanel standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
+    [_lobeFloatingPanel standardWindowButton:NSWindowZoomButton].hidden = YES;
+
+    _lobeFloatingBridge = [[PTFrontendBridge alloc] initWithSurface:@"floating" delegate:self];
+    WKWebViewConfiguration *floatConfig = [[WKWebViewConfiguration alloc] init];
+    [_lobeFloatingBridge configureWebViewConfiguration:floatConfig
+                                     initialAppearance:appearance
+                                       initialLanguage:language];
+    _lobeFloatingWebView = [[PTBridgeDropWebView alloc] initWithFrame:NSZeroRect configuration:floatConfig];
+    _lobeFloatingWebView.translatesAutoresizingMaskIntoConstraints = NO;
+    if (@available(macOS 12.0, *)) _lobeFloatingWebView.underPageBackgroundColor = NSColor.clearColor;
+    __weak typeof(self) weakSelf = self;
+    _lobeFloatingWebView.fileDropHandler = ^BOOL(NSArray<NSURL *> *urls) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return NO;
+        BOOL added = [strongSelf addComposerAttachmentURLs:urls floating:YES];
+        [strongSelf pushFrontendWorkspace];
+        return added;
+    };
+    [_lobeFloatingBridge attachWebView:_lobeFloatingWebView];
+    NSView *panelContent = _lobeFloatingPanel.contentView;
+    [panelContent addSubview:_lobeFloatingWebView];
+    [NSLayoutConstraint activateConstraints:@[
+        [_lobeFloatingWebView.topAnchor constraintEqualToAnchor:panelContent.topAnchor],
+        [_lobeFloatingWebView.leadingAnchor constraintEqualToAnchor:panelContent.leadingAnchor],
+        [_lobeFloatingWebView.trailingAnchor constraintEqualToAnchor:panelContent.trailingAnchor],
+        [_lobeFloatingWebView.bottomAnchor constraintEqualToAnchor:panelContent.bottomAnchor]
+    ]];
+    [_lobeFloatingBridge loadBundledFrontendFromResourceURL:nil error:nil];
+}
+
+- (NSDictionary *)frontendWindowStateSnapshotForSurface:(NSString *)surface {
+    BOOL isFloating = [surface isEqual:@"floating"];
+    NSString *targetSessionID = isFloating ? (_floatingSessionID ?: @"") : (_selectedSession.sessionID ?: @"");
+    PTClaudeBridge *bridge = targetSessionID.length > 0 ? [self bridgeForSessionID:targetSessionID] : nil;
+
+    NSMutableArray *models = [NSMutableArray array];
+    for (NSArray<NSString *> *entry in [self composerModelEntries]) {
+        if (entry.count < 3) continue;
+        [models addObject:@{
+            @"label": entry[0],
+            @"shortLabel": entry[1],
+            @"id": entry[2]
+        }];
+    }
+    NSArray *permissionModes = @[
+        @{ @"id": @"plan", @"label": @"Plan", @"wireMode": @"plan" },
+        @{ @"id": @"auto", @"label": @"Auto", @"wireMode": @"auto" },
+        @{ @"id": @"bypass", @"label": @"Bypass", @"wireMode": @"bypassPermissions" },
+        @{ @"id": @"default", @"label": @"Default", @"wireMode": @"default" },
+        @{ @"id": @"acceptEdits", @"label": @"Accept edits", @"wireMode": @"acceptEdits" }
+    ];
+    NSString *selectedModel = [self composerModelForSessionID:targetSessionID] ?: @"";
+    NSString *selectedEffort = [self composerEffortForSessionID:targetSessionID] ?: _selectedComposerEffort ?: @"";
+    NSString *selectedPermissionMode = bridge.permissionMode ?: @"bypassPermissions";
+
+    NSString *shortVersion = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.0";
+    NSString *bundleVersion = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"8";
+    NSString *defaultCwd = _homeProjectPath.length > 0
+        ? _homeProjectPath
+        : (_selectedSession.cwd.length > 0 ? _selectedSession.cwd : NSHomeDirectory());
+    NSString *hostName = NSHost.currentHost.localizedName ?: NSProcessInfo.processInfo.hostName ?: @"Mac";
+
+    return @{
+        @"appearance": [self resolvedLobeAppearance],
+        @"language": PTInterfaceLanguageCode(),
+        @"surface": surface ?: @"main",
+        @"version": [NSString stringWithFormat:@"%@ (%@)", shortVersion, bundleVersion],
+        @"defaultCwd": defaultCwd ?: NSHomeDirectory(),
+        @"hostName": hostName,
+        @"platformInfo": @"macOS · arm64",
+        @"statusBanner": (isFloating ? _floatingStatusText : _statusText) ?: @"",
+        @"usage": @{
+            @"available": @(_planUsageAvailable),
+            @"error": _planUsageError ?: @"",
+            @"fiveHourPercent": @(_fiveHourPercent),
+            @"fiveHourResetText": PTCountdownDescription(_fiveHourResetAt, NSDate.date) ?: @"",
+            @"sevenDayPercent": @(_sevenDayPercent),
+            @"sevenDayResetText": PTCountdownDescription(_sevenDayResetAt, NSDate.date) ?: @""
+        },
+        @"claudeSettings": @{
+            @"availableModels": models,
+            @"effortLevels": [self composerEffortLevels] ?: @[],
+            @"permissionModes": permissionModes,
+            @"sessionId": targetSessionID,
+            @"selectedModel": selectedModel,
+            @"selectedEffort": selectedEffort,
+            @"selectedPermissionMode": selectedPermissionMode
+        }
+    };
+}
+
+- (NSArray<NSDictionary *> *)frontendSerializedImages:(NSArray<NSDictionary *> *)images {
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray arrayWithCapacity:images.count];
+    for (NSDictionary *item in images ?: @[]) {
+        NSString *path = [item[@"path"] isKindOfClass:NSString.class] ? item[@"path"] : @"";
+        NSString *dataURL = item[@"thumbnail"] ?: @"";
+        [out addObject:@{
+            @"id": path,
+            @"path": path,
+            @"name": path.lastPathComponent ?: @"image.png",
+            @"temporary": @([item[@"temporary"] boolValue]),
+            @"dataUrl": dataURL
+        }];
+    }
+    return out;
+}
+
+- (NSDictionary *)frontendWorkspaceSnapshotForSurface:(NSString *)surface {
+    BOOL isFloating = [surface isEqual:@"floating"];
+    NSMutableArray<NSDictionary *> *tabItems = [NSMutableArray arrayWithCapacity:isFloating ? 0 : _workspaceTabs.count];
+    for (PTWorkspaceTab *tab in (isFloating ? @[] : _workspaceTabs)) {
+        PTSessionInfo *session = tab.sessionID.length > 0 ? [self sessionWithID:tab.sessionID] : nil;
+        BOOL responding = tab.bridge.responding ||
+            (tab.sessionID.length > 0 && _awaitingClaudeBaselineBySessionID[tab.sessionID] != nil);
+        [tabItems addObject:@{
+            @"id": tab.identifier ?: @"",
+            @"sessionId": tab.sessionID ?: @"",
+            @"title": session.title.length > 0 ? session.title : PTL(@"新标签", @"New tab"),
+            @"cwd": session.cwd ?: @"",
+            @"status": tab.status ?: @"",
+            @"connecting": @(tab.connecting),
+            @"running": @(tab.bridge.running),
+            @"responding": @(responding),
+            @"activeToolPageKind": tab.activeToolPageKind ?: @"",
+            @"fileTreeRootPath": tab.fileTreeRootPath ?: @"",
+            @"fileToolPageOpen": @(tab.fileToolPageOpen),
+            @"reviewToolPageOpen": @(tab.reviewToolPageOpen),
+            @"panelExpanded": @(tab.panelExpanded),
+            @"overviewExpanded": @(tab.overviewExpanded)
+        }];
+    }
+    return @{
+        @"activeTabId": isFloating ? @"" : (_activeWorkspaceTab.identifier ?: @""),
+        @"selectedSessionId": _selectedSession.sessionID ?: @"",
+        @"floatingSessionId": _floatingSessionID ?: @"",
+        @"floatingVisible": @(_lobeFloatingPanel.visible),
+        @"tabs": tabItems
+    };
+}
+
+- (NSDictionary *)frontendComposerSnapshotForSurface:(NSString *)surface {
+    BOOL floating = [surface isEqual:@"floating"];
+    PTWorkspaceTab *tab = _activeWorkspaceTab;
+    return @{
+        @"id": floating ? (_floatingSessionID ?: @"") : (tab.identifier ?: @""),
+        @"sessionId": floating ? (_floatingSessionID ?: @"") : (tab.sessionID ?: @""),
+        @"draft": floating ? (_floatingDraft ?: @"") : (tab.draft ?: @""),
+        @"pendingImages": [self frontendSerializedImages:floating ? _floatingPendingImages : tab.pendingImages],
+        @"pendingFiles": [(floating ? _floatingPendingFiles : tab.pendingFiles) copy] ?: @[]
+    };
+}
+
+- (NSArray<NSDictionary *> *)frontendSessionsSnapshot {
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray arrayWithCapacity:_sessions.count];
+    for (PTSessionInfo *session in _sessions ?: @[]) {
+        PTClaudeBridge *bridge = [self bridgeForSessionID:session.sessionID];
+        BOOL running = bridge != nil && bridge.running;
+        BOOL awaiting = _awaitingClaudeBaselineBySessionID[session.sessionID] != nil;
+        BOOL responding = (bridge != nil && bridge.responding) || awaiting;
+        long long modifiedMs = session.modifiedAt
+            ? (long long)llround(session.modifiedAt.timeIntervalSince1970 * 1000.0)
+            : 0;
+        [out addObject:@{
+            @"sessionId": session.sessionID ?: @"",
+            @"title": session.title ?: PTL(@"未命名会话", @"Untitled conversation"),
+            @"cwd": session.cwd ?: @"",
+            @"filePath": session.filePath ?: @"",
+            @"model": session.model ?: @"",
+            @"effort": session.effort ?: @"",
+            @"modifiedAtMs": @(modifiedMs),
+            @"projectKey": PTSessionProjectKey(session) ?: @"",
+            @"projectTitle": PTSessionProjectTitle(PTSessionProjectKey(session)) ?: @"",
+            @"turnCount": @(PTSessionTurnCount(session)),
+            @"connected": @(running),
+            @"running": @(running),
+            @"responding": @(responding),
+            @"awaitingReply": @(awaiting),
+            @"accessedDirectories": session.accessedDirectories ?: @[],
+            @"changedFiles": session.changedFiles ?: @[],
+            @"tasks": session.tasks ?: @[],
+            @"contextUsed": @(session.contextUsed),
+            @"contextWindow": @(session.contextWindow),
+            @"contextBreakdown": session.contextBreakdown ?: @[],
+            @"apiCostAvailable": @(session.apiCostAvailable),
+            @"apiEquivalentCostUSD": @(session.apiEquivalentCostUSD),
+            @"modelUsageBreakdown": session.modelUsageBreakdown ?: @{},
+            @"codeLinesAdded": @(session.codeLinesAdded),
+            @"codeLinesRemoved": @(session.codeLinesRemoved)
+        }];
+    }
+    return out;
+}
+
+- (NSDictionary *)frontendCurrentGitStateSnapshot {
+    NSMutableDictionary *snapshot = [(_gitReviewShowsTranscriptEdits ? _turnReviewSnapshot : _lobeGitStateSnapshot) mutableCopy] ?: [NSMutableDictionary dictionary];
+    if (!snapshot[@"reviewMode"]) snapshot[@"reviewMode"] = _gitReviewShowsTranscriptEdits ? @"turn" : @"git";
+    snapshot[@"directories"] = [_gitDirectoryPaths copy] ?: @[];
+    snapshot[@"observedDirectory"] = _gitObservedDirectory ?: @"";
+    if (!snapshot[@"files"]) snapshot[@"files"] = @[];
+    snapshot[@"actionInFlight"] = @(_gitActionInFlight);
+    return [snapshot copy];
+}
+
+- (void)pushFrontendWindowState {
+    [_lobeMainBridge pushWindowState:[self frontendWindowStateSnapshotForSurface:@"main"]];
+    if (_lobeFloatingBridge) {
+        [_lobeFloatingBridge pushWindowState:[self frontendWindowStateSnapshotForSurface:@"floating"]];
+    }
+}
+
+- (void)pushFrontendComposer {
+    if (_lobeMainBridge.frontendReady) {
+        [_lobeMainBridge pushStateMethod:@"setPrettyTermComposer"
+                                payload:[self frontendComposerSnapshotForSurface:@"main"]];
+    }
+    if (_lobeFloatingBridge.frontendReady && _lobeFloatingPanel.visible) {
+        [_lobeFloatingBridge pushStateMethod:@"setPrettyTermComposer"
+                                    payload:[self frontendComposerSnapshotForSurface:@"floating"]];
+    }
+}
+
+- (void)pushFrontendWorkspaceState {
+    if (_lobeMainBridge.frontendReady) {
+        [_lobeMainBridge pushStateMethod:@"setPrettyTermWorkspace"
+                                payload:[self frontendWorkspaceSnapshotForSurface:@"main"]];
+        [self pushFrontendClaudeTasksTo:_lobeMainBridge sessionID:_selectedSession.sessionID];
+    }
+    if (_lobeFloatingBridge.frontendReady && _lobeFloatingPanel.visible) {
+        [_lobeFloatingBridge pushStateMethod:@"setPrettyTermWorkspace"
+                                    payload:[self frontendWorkspaceSnapshotForSurface:@"floating"]];
+        [self pushFrontendClaudeTasksTo:_lobeFloatingBridge sessionID:_floatingSessionID];
+    }
+}
+
+- (void)pushFrontendClaudeTasksTo:(PTFrontendBridge *)frontend sessionID:(NSString *)sessionID {
+    if (!frontend.frontendReady) return;
+    NSDictionary *tasks = [self bridgeForSessionID:sessionID].tasksPayload;
+    [frontend pushStateMethod:@"setPrettyTermClaudeTasks"
+                       payload:tasks ?: @{@"sessionId": sessionID ?: @"", @"generation": @"",
+                                          @"foreground": @[], @"background": @[]}];
+}
+
+- (void)pushFrontendWorkspace {
+    [self pushFrontendWorkspaceState];
+    [self pushFrontendComposer];
+}
+
+- (void)pushFrontendSessions {
+    NSArray *sessions = [self frontendSessionsSnapshot];
+    [_lobeMainBridge pushStateMethod:@"setPrettyTermSessions" payload:sessions];
+    if (_lobeFloatingBridge.frontendReady && _lobeFloatingPanel.visible) {
+        for (NSDictionary *session in sessions) {
+            if (![session[@"sessionId"] isEqual:_floatingSessionID]) continue;
+            [_lobeFloatingBridge pushStateMethod:@"setPrettyTermSessions" payload:@[session]];
+            break;
+        }
+    }
+}
+
+- (void)pushFrontendGitState {
+    [_lobeMainBridge pushStateMethod:@"setPrettyTermGitState"
+                             payload:[self frontendCurrentGitStateSnapshot]];
+}
+
+- (void)performGitCommit:(BOOL)commit
+                   push:(BOOL)push
+        includeUnstaged:(BOOL)includeUnstaged
+              directory:(NSString *)directory
+                message:(NSString *)message {
+    if (directory.length == 0 || _gitActionInFlight) {
+        return;
+    }
+    if (commit && message.length == 0) {
+        NSMutableDictionary *nextGit = [_lobeGitStateSnapshot mutableCopy] ?: [NSMutableDictionary dictionary];
+        nextGit[@"actionStatus"] = PTL(@"提交信息为空", @"Commit message is empty");
+        _lobeGitStateSnapshot = [nextGit copy];
+        [self pushFrontendGitState];
+        return;
+    }
+    _gitActionInFlight = YES;
+    NSMutableDictionary *busyGit = [_lobeGitStateSnapshot mutableCopy] ?: [NSMutableDictionary dictionary];
+    busyGit[@"actionInFlight"] = @YES;
+    busyGit[@"actionStatus"] = commit ? PTL(@"正在提交…", @"Committing…") : PTL(@"正在推送…", @"Pushing…");
+    _lobeGitStateSnapshot = [busyGit copy];
+    [self pushFrontendGitState];
+    NSString *dirCopy = [directory copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int status = 0;
+        NSString *root = [PTRunGit(dirCopy, @[@"rev-parse", @"--show-toplevel"], &status)
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSMutableArray<NSString *> *outputs = [NSMutableArray array];
+        if (status != 0 && root.length) [outputs addObject:root];
+        if (status == 0 && commit && includeUnstaged) {
+            NSString *out = PTRunGit(root, @[@"add", @"-A", @"--", @"."], &status);
+            if (out.length) [outputs addObject:out];
+        }
+        if (status == 0 && commit) {
+            NSString *out = PTRunGit(root, @[@"commit", @"-m", message], &status);
+            if (out.length) [outputs addObject:out];
+        }
+        if (status == 0 && push) {
+            NSString *out = PTRunGit(root, @[@"push"], &status);
+            if (out.length) [outputs addObject:out];
+        }
+        NSString *combined = [[outputs componentsJoinedByString:@"\n"]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *success = commit && push
+            ? PTL(@"提交并推送完成", @"Commit and push completed")
+            : (commit ? PTL(@"提交完成", @"Commit completed") : PTL(@"推送完成", @"Push completed"));
+        NSString *result = status == 0 ? success : (combined.length ? combined : PTL(@"Git 操作失败", @"Git operation failed"));
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_gitActionInFlight = NO;
+            NSMutableDictionary *doneGit = [self->_lobeGitStateSnapshot mutableCopy] ?: [NSMutableDictionary dictionary];
+            doneGit[@"actionInFlight"] = @NO;
+            doneGit[@"actionStatus"] = result;
+            self->_lobeGitStateSnapshot = [doneGit copy];
+            self->_statusText = result;
+            [self pushFrontendGitState];
+            [self pushFrontendWindowState];
+            if (!self->_gitReviewShowsTranscriptEdits && [dirCopy isEqual:self->_gitObservedDirectory]) {
+                [self pushFrontendGitDiffForDirectory:dirCopy];
+            }
+        });
+    });
+}
+
+- (void)pushFrontendGitDiffForDirectory:(NSString *)directory {
+    _gitReviewShowsTranscriptEdits = NO;
+    if (!directory.length) {
+        _gitReviewQueuedDirectory = nil;
+        _gitDiffGeneration++;
+        _lobeGitStateSnapshot = @{
+            @"reviewMode": @"git", @"files": @[], @"loading": @NO,
+            @"error": PTL(@"尚未选择 Git 观察目录。", @"No Git observation directory is selected.")
+        };
+        [self pushFrontendGitState];
+        return;
+    }
+    if (_gitReviewInFlightDirectory) {
+        _gitReviewQueuedDirectory = [directory copy];
+        if (![_gitReviewInFlightDirectory isEqual:directory]) _gitDiffGeneration++;
+        return;
+    }
+    _gitReviewInFlightDirectory = [directory copy];
+    NSMutableDictionary *loading = [_lobeGitStateSnapshot mutableCopy] ?: [NSMutableDictionary dictionary];
+    if (![loading[@"observedDirectory"] isEqual:directory]) [loading removeAllObjects];
+    loading[@"reviewMode"] = @"git";
+    loading[@"observedDirectory"] = directory;
+    loading[@"loading"] = @YES;
+    _lobeGitStateSnapshot = loading;
+    [self pushFrontendGitState];
+    NSUInteger generation = ++_gitDiffGeneration;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary<NSString *, NSString *> *snapshot = PTGitReviewSnapshotForDirectory(directory);
+        NSArray<NSDictionary *> *files = PTGitReviewStructuredFiles(snapshot ?: @{});
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_gitReviewInFlightDirectory = nil;
+            if (generation == self->_gitDiffGeneration && [directory isEqual:self->_gitObservedDirectory]) {
+                NSMutableDictionary *next = [self->_lobeGitStateSnapshot mutableCopy];
+                next[@"observedDirectory"] = directory;
+                next[@"branch"] = snapshot[@"branch"] ?: @"";
+                next[@"error"] = snapshot[@"error"] ?: @"";
+                next[@"files"] = files ?: @[];
+                next[@"loading"] = @NO;
+                self->_lobeGitStateSnapshot = next;
+                if (!self->_gitReviewShowsTranscriptEdits) [self pushFrontendGitState];
+            }
+            NSString *queued = self->_gitReviewQueuedDirectory;
+            self->_gitReviewQueuedDirectory = nil;
+            if (!self->_gitReviewShowsTranscriptEdits && [queued isEqual:self->_gitObservedDirectory]) {
+                [self pushFrontendGitDiffForDirectory:queued];
+            }
+        });
+    });
+}
+
+- (void)pushFrontendDirectoryListingForPath:(NSString *)path root:(NSString *)root tabID:(NSString *)tabID {
+    if (!path.length || !tabID.length) return;
+    if (!_directoryReadTargets) _directoryReadTargets = [NSMutableDictionary dictionary];
+    NSDictionary *target = @{@"rootPath": root ?: @"", @"tabId": tabID};
+    NSMutableArray *targets = _directoryReadTargets[path];
+    if (targets) {
+        if (![targets containsObject:target]) [targets addObject:target];
+        return;
+    }
+    _directoryReadTargets[path] = [NSMutableArray arrayWithObject:target];
+    NSURL *url = [NSURL fileURLWithPath:path isDirectory:YES];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        NSArray *children = PTLobeSerializedFileTreeChildren(PTFileTreeChildren(url, &error) ?: @[]);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSArray *receivers = [self->_directoryReadTargets[path] copy];
+            [self->_directoryReadTargets removeObjectForKey:path];
+            for (NSDictionary *receiver in receivers) {
+                NSMutableDictionary *payload = [receiver mutableCopy];
+                payload[@"path"] = path;
+                payload[@"children"] = children;
+                payload[@"error"] = error.localizedDescription ?: @"";
+                [self->_lobeMainBridge pushStateMethod:@"setPrettyTermFileTree" payload:payload];
+            }
+        });
+    });
+}
+
+- (void)pushFrontendFilePreviewForPath:(NSString *)path sessionID:(NSString *)sessionID tabID:(NSString *)tabID {
+    if (!path.length || !tabID.length) return;
+    NSURL *url = [NSURL fileURLWithPath:path];
+    NSDictionary *request = @{
+        @"path": path, @"sessionId": sessionID ?: @"", @"tabId": tabID,
+        @"requestId": NSUUID.UUID.UUIDString
+    };
+    NSMutableDictionary *loading = [request mutableCopy];
+    loading[@"loading"] = @YES;
+    [_lobeMainBridge pushStateMethod:@"setPrettyTermFilePreview" payload:loading];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        NSDictionary *raw = PTFilePreviewPayloadForURL(url, &error);
+        NSDictionary *preview = PTLobeSerializedFilePreviewPayload(raw, url);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSMutableDictionary *result = [request mutableCopy];
+            result[@"payload"] = preview ?: NSNull.null;
+            result[@"error"] = error.localizedDescription ?: @"";
+            [self->_lobeMainBridge pushStateMethod:@"setPrettyTermFilePreview" payload:result];
+        });
+    });
+}
+
+- (void)publishTerminalOutput:(NSString *)text reset:(BOOL)reset {
+    if (!_terminalDrawerVisible) return;
+    NSDictionary *payload = @{
+        @"runId": _terminalRunID ?: @"",
+        @"sequence": @(++_terminalSequence),
+        @"tabId": _lobeTerminalTabID ?: @"",
+        @"cwd": _lobeTerminalCwd ?: NSHomeDirectory(),
+        @"command": _lobeTerminalCommand ?: @"",
+        @"running": @(_lobeTerminalRunning),
+        @"exitCode": _lobeTerminalExitCode ?: NSNull.null,
+        @"output": text ?: @"",
+        @"reset": @(reset)
+    };
+    [_lobeMainBridge pushStateMethod:@"setPrettyTermTerminalOutput" payload:payload];
+}
+
+- (void)syncLobeFrontendAppearanceAndLanguage {
+    [self pushFrontendWindowState];
+    if (_lobeFloatingPanel) {
+        _lobeFloatingPanel.backgroundColor = PTThemeColor(PTThemeRoleCanvas);
+    }
+}
+
+- (void)frontendBridge:(PTFrontendBridge *)bridge didRequestLanguage:(NSString *)languageCode {
+    (void)bridge;
+    NSString *normalized = PTFrontendBridgeNormalizeLanguage(languageCode);
+    [NSUserDefaults.standardUserDefaults setObject:normalized forKey:PTInterfaceLanguageDefaultsKey];
+    [NSUserDefaults.standardUserDefaults synchronize];
+    [self syncLobeFrontendAppearanceAndLanguage];
+}
+
+- (void)frontendBridge:(PTFrontendBridge *)bridge
+       didInvokeAction:(NSString *)action
+               payload:(NSDictionary *)payload
+                 reply:(PTFrontendActionReply)reply {
+    if ([action isEqual:@"ping"]) {
+        reply(@{ @"pong": @YES, @"surface": bridge.surface ?: @"main" }, nil);
+        return;
+    }
+
+    if ([action isEqual:@"windowDrag"]) {
+        NSString *surface = [payload[@"surface"] isKindOfClass:NSString.class] ? payload[@"surface"] : bridge.surface;
+        NSWindow *targetWindow = [surface isEqual:@"floating"] ? _lobeFloatingPanel : _window;
+        NSEvent *ev = NSApp.currentEvent;
+        if (targetWindow && ev && ev.window == targetWindow &&
+            (ev.type == NSEventTypeLeftMouseDown || ev.type == NSEventTypeLeftMouseDragged)) {
+            [targetWindow performWindowDragWithEvent:ev];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"setLanguage"]) {
+        NSString *lang = [payload[@"language"] isKindOfClass:NSString.class] ? payload[@"language"] : @"zh-Hans";
+        [self frontendBridge:bridge didRequestLanguage:lang];
+        reply(@{ @"language": PTInterfaceLanguageCode() }, nil);
+        return;
+    }
+
+    if ([action isEqual:@"refreshSessions"]) {
+        [self refreshClaudeUsage:nil];
+        [_store refresh];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"selectSession"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        PTSessionInfo *target = [self sessionWithID:sessionID];
+        if (!target) {
+            reply(nil, @"Session not found");
+            return;
+        }
+        if ([payload[@"newTab"] boolValue]) {
+            PTWorkspaceTab *tab = [self createWorkspaceTab];
+            tab.sessionID = target.sessionID ?: @"";
+            [self activateWorkspaceTab:tab animated:NO];
+        } else if (!_activeWorkspaceTab) {
+            PTWorkspaceTab *tab = [self createWorkspaceTab];
+            tab.sessionID = target.sessionID ?: @"";
+            [self activateWorkspaceTab:tab animated:NO];
+        }
+            _selectedSession = target;
+        _activeWorkspaceTab.sessionID = target.sessionID ?: @"";
+        [self showSelectedSession];
+        [self updateWorkspaceTabBar];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"newTab"]) {
+        PTWorkspaceTab *tab = [self createWorkspaceTab];
+        [self activateWorkspaceTab:tab animated:NO];
+        reply(@{ @"tabId": tab.identifier ?: @"" }, nil);
+        return;
+    }
+
+    if ([action isEqual:@"selectTab"]) {
+        NSString *tabId = [payload[@"tabId"] isKindOfClass:NSString.class] ? payload[@"tabId"] : @"";
+        for (PTWorkspaceTab *tab in _workspaceTabs) {
+            if ([tab.identifier isEqual:tabId]) {
+                [self activateWorkspaceTab:tab animated:NO];
+                break;
+            }
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"closeTab"]) {
+        NSString *tabId = [payload[@"tabId"] isKindOfClass:NSString.class] ? payload[@"tabId"] : @"";
+        [self closeWorkspaceTabWithID:tabId];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"reorderTabs"]) {
+        NSArray<NSString *> *orderedIDs = [payload[@"tabIds"] isKindOfClass:NSArray.class] ? payload[@"tabIds"] : @[];
+        if (orderedIDs.count > 0 && _workspaceTabs.count > 1) {
+            NSMutableDictionary<NSString *, PTWorkspaceTab *> *byId = [NSMutableDictionary dictionary];
+            for (PTWorkspaceTab *tab in _workspaceTabs) byId[tab.identifier ?: @""] = tab;
+            NSMutableArray<PTWorkspaceTab *> *reordered = [NSMutableArray arrayWithCapacity:_workspaceTabs.count];
+            for (id item in orderedIDs) {
+                if (![item isKindOfClass:NSString.class]) continue;
+                PTWorkspaceTab *tab = byId[item];
+                if (tab && ![reordered containsObject:tab]) [reordered addObject:tab];
+            }
+            for (PTWorkspaceTab *tab in _workspaceTabs) {
+                if (![reordered containsObject:tab]) [reordered addObject:tab];
+            }
+            _workspaceTabs = reordered;
+            [self updateWorkspaceTabBar];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"chooseFolderForNewChat"]) {
+        NSOpenPanel *panel = NSOpenPanel.openPanel;
+        panel.canChooseFiles = NO;
+        panel.canChooseDirectories = YES;
+        panel.allowsMultipleSelection = NO;
+        [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK && panel.URL.path.length > 0) {
+                self->_homeProjectPath = [panel.URL.path copy];
+                reply(@{ @"path": panel.URL.path }, nil);
+            } else {
+                reply(@{}, nil);
+            }
+        }];
+        return;
+    }
+
+    if ([action isEqual:@"startNewConversation"]) {
+        NSString *rawCwd = [payload[@"cwd"] isKindOfClass:NSString.class] ? payload[@"cwd"] : @"";
+        NSString *cwd = rawCwd.length > 0
+            ? rawCwd.stringByExpandingTildeInPath.stringByStandardizingPath
+            : @"";
+        NSString *prompt = [payload[@"prompt"] isKindOfClass:NSString.class] ? payload[@"prompt"] : @"";
+        BOOL isDir = NO;
+        if (cwd.length == 0 || ![NSFileManager.defaultManager fileExistsAtPath:cwd isDirectory:&isDir] || !isDir) {
+            reply(nil, PTL(@"请选择存在的项目目录", @"Please select an existing project folder"));
+            return;
+        }
+        if (_homeStartingBridge) {
+            reply(nil, PTL(@"正在创建会话，请稍候…", @"Starting conversation, please wait…"));
+            return;
+        }
+        _homeProjectPath = [cwd copy];
+        __weak typeof(self) weakSelf = self;
+        if (prompt.length == 0) {
+            _homeBlankSessionDirectory = [cwd copy];
+            _homeStartingBridge = [self newHomeBridge];
+            _homeStartingBridge.statusChanged = ^(NSString *status) { [weakSelf homeLaunchStatusChanged:status]; };
+            [_homeStartingBridge startNewSessionInDirectory:_homeBlankSessionDirectory];
+        } else {
+            PTSessionInfo *session = [PTSessionInfo new];
+            session.sessionID = NSUUID.UUID.UUIDString.lowercaseString;
+            session.cwd = cwd;
+            _homeStartingSessionID = session.sessionID;
+            _homeStartingBridge = [self newHomeBridge];
+            _homeStartingBridge.statusChanged = ^(NSString *status) { [weakSelf homeLaunchStatusChanged:status]; };
+            [_homeStartingBridge startNewSession:session prompt:prompt];
+        }
+        [self pushFrontendWindowState];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"renameSession"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        NSString *title = [payload[@"title"] isKindOfClass:NSString.class] ? payload[@"title"] : @"";
+        PTSessionInfo *session = [self sessionWithID:sessionID];
+        if (!session) {
+            reply(nil, @"Session not found");
+            return;
+        }
+        [self renameSession:session toTitle:title];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"revealSessionTranscript"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        PTSessionInfo *session = [self sessionWithID:sessionID];
+        if (session.filePath.length && [NSFileManager.defaultManager fileExistsAtPath:session.filePath]) {
+            [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:session.filePath]]];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"openProjectFolder"]) {
+        NSString *rawPath = [payload[@"path"] isKindOfClass:NSString.class] ? payload[@"path"] : @"";
+        NSString *path = rawPath.length > 0 ? rawPath.stringByStandardizingPath : @"";
+        if (path.length == 0 && [payload[@"sessionId"] isKindOfClass:NSString.class]) {
+            path = [self sessionWithID:payload[@"sessionId"]].cwd.stringByStandardizingPath ?: @"";
+        }
+        BOOL isDir = NO;
+        if (path.length && [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir] && isDir) {
+            [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:path isDirectory:YES]];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"openProjectsRoot"]) {
+        NSString *projectsRoot = [NSHomeDirectory() stringByAppendingPathComponent:@".claude/projects"];
+        BOOL isDir = NO;
+        if ([NSFileManager.defaultManager fileExistsAtPath:projectsRoot isDirectory:&isDir] && isDir) {
+            [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:projectsRoot isDirectory:YES]];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"revealInFinder"]) {
+        NSString *path = [payload[@"path"] isKindOfClass:NSString.class] ? payload[@"path"] : @"";
+        if (path.length && [NSFileManager.defaultManager fileExistsAtPath:path]) {
+            [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"openTerminalApp"]) {
+        NSString *cwd = [payload[@"cwd"] isKindOfClass:NSString.class] ? payload[@"cwd"] : _selectedSession.cwd;
+        NSURL *termURL = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:@"com.apple.Terminal"];
+        BOOL isDir = NO;
+        if (termURL && cwd.length && [NSFileManager.defaultManager fileExistsAtPath:cwd isDirectory:&isDir] && isDir) {
+            NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
+            [NSWorkspace.sharedWorkspace openURLs:@[[NSURL fileURLWithPath:cwd isDirectory:YES]]
+                             withApplicationAtURL:termURL
+                                    configuration:config
+                                completionHandler:nil];
+        } else if (termURL) {
+            [NSWorkspace.sharedWorkspace openURL:termURL];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"copyText"]) {
+        NSString *text = [payload[@"text"] isKindOfClass:NSString.class] ? payload[@"text"] : @"";
+        NSString *label = [payload[@"label"] isKindOfClass:NSString.class] ? payload[@"label"] : PTL(@"已拷贝", @"Copied");
+        if (text.length) {
+            NSPasteboard *pb = NSPasteboard.generalPasteboard;
+            [pb clearContents];
+            [pb setString:text forType:NSPasteboardTypeString];
+            _statusText = label;
+            [self pushFrontendWindowState];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"toggleFloatingWindow"]) {
+        if ([bridge.surface isEqual:@"floating"]) [_lobeFloatingPanel close];
+        else [self toggleFloatingConversation:nil];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"updateDraft"]) {
+        NSString *draft = [payload[@"draft"] isKindOfClass:NSString.class] ? payload[@"draft"] : @"";
+        NSString *tabId = [payload[@"tabId"] isKindOfClass:NSString.class] ? payload[@"tabId"] : @"";
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        if ([bridge.surface isEqual:@"floating"]) {
+            if ([sessionID isEqual:_floatingSessionID]) {
+                _floatingDraft = [draft copy];
+                _floatingDraftRevision++;
+            }
+        } else {
+            for (PTWorkspaceTab *tab in _workspaceTabs) {
+                if (![tab.identifier isEqual:tabId] || ![(tab.sessionID ?: @"") isEqual:sessionID]) continue;
+                tab.draft = [draft copy];
+                tab.draftRevision++;
+                break;
+            }
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"savePanelState"]) {
+        NSString *tabId = [payload[@"tabId"] isKindOfClass:NSString.class] ? payload[@"tabId"] : @"";
+        PTWorkspaceTab *target = _activeWorkspaceTab;
+        if (tabId.length) {
+            for (PTWorkspaceTab *tab in _workspaceTabs) {
+                if ([tab.identifier isEqual:tabId]) { target = tab; break; }
+            }
+        }
+        if (target) {
+            if ([payload[@"activeToolPageKind"] isKindOfClass:NSString.class]) {
+                target.activeToolPageKind = payload[@"activeToolPageKind"];
+            }
+            if (payload[@"overviewExpanded"] != nil) {
+                target.overviewExpanded = [payload[@"overviewExpanded"] boolValue];
+            }
+            if (payload[@"panelExpanded"] != nil) {
+                target.panelExpanded = [payload[@"panelExpanded"] boolValue];
+            }
+            target.fileToolPageOpen = [target.activeToolPageKind isEqual:@"file"];
+            target.reviewToolPageOpen = [target.activeToolPageKind isEqual:@"review"];
+        }
+        [self pushFrontendWorkspace];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"pickAttachments"]) {
+        BOOL isFloating = [bridge.surface isEqual:@"floating"] || [payload[@"surface"] isEqual:@"floating"];
+        NSWindow *hostWin = isFloating && _lobeFloatingPanel ? _lobeFloatingPanel : _window;
+        NSOpenPanel *panel = NSOpenPanel.openPanel;
+        panel.canChooseFiles = YES;
+        panel.canChooseDirectories = YES;
+        panel.allowsMultipleSelection = YES;
+        [panel beginSheetModalForWindow:hostWin completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK && panel.URLs.count > 0) {
+                [self addComposerAttachmentURLs:panel.URLs floating:isFloating];
+                [self pushFrontendWorkspace];
+            }
+            reply(@{}, nil);
+        }];
+        return;
+    }
+
+    if ([action isEqual:@"pasteClipboardImage"]) {
+        BOOL isFloating = [bridge.surface isEqual:@"floating"] || [payload[@"surface"] isEqual:@"floating"];
+        BOOL pasted = isFloating
+            ? [self handleFloatingImagePasteboard:NSPasteboard.generalPasteboard]
+            : [self handleImagePasteboard:NSPasteboard.generalPasteboard];
+        [self pushFrontendWorkspace];
+        reply(@{ @"pasted": @(pasted) }, nil);
+        return;
+    }
+
+    if ([action isEqual:@"removeAttachment"]) {
+        BOOL isFloating = [bridge.surface isEqual:@"floating"] || [payload[@"surface"] isEqual:@"floating"];
+        NSString *kind = [payload[@"kind"] isKindOfClass:NSString.class] ? payload[@"kind"] : @"file";
+        NSString *path = [payload[@"path"] isKindOfClass:NSString.class] ? payload[@"path"] : @"";
+        if ([kind isEqual:@"image"]) {
+            NSMutableArray<NSDictionary *> *list = isFloating ? _floatingPendingImages : _pendingImages;
+            NSIndexSet *matches = [list indexesOfObjectsPassingTest:^BOOL(NSDictionary *item, NSUInteger idx, BOOL *stop) {
+                (void)idx; (void)stop;
+                return [item[@"path"] isEqual:path];
+            }];
+            for (NSDictionary *item in [list objectsAtIndexes:matches]) {
+                if ([item[@"temporary"] boolValue] && [item[@"path"] isKindOfClass:NSString.class]) {
+                    [NSFileManager.defaultManager removeItemAtPath:item[@"path"] error:nil];
+                    [_temporaryImagePaths removeObject:item[@"path"]];
+                }
+            }
+            [list removeObjectsAtIndexes:matches];
+        } else {
+            NSMutableArray<NSString *> *list = isFloating ? _floatingPendingFiles : _pendingFiles;
+            [list removeObject:path];
+        }
+        [self pushFrontendWorkspace];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"querySlashCommands"]) {
+        NSString *query = [payload[@"query"] isKindOfClass:NSString.class] ? payload[@"query"] : @"";
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"]
+            : _selectedSession.sessionID;
+        PTClaudeBridge *sessionBridge = [self bridgeForSessionID:sessionID];
+        NSArray *items = [self commandSuggestions:sessionBridge query:query] ?: @[];
+        [bridge pushStateMethod:@"setPrettyTermCommandResults" payload:@{
+            @"items": items,
+            @"query": query
+        }];
+        if (!sessionBridge && sessionID.length > 0) {
+            [self prepareBridgeForSessionID:sessionID completion:^(PTClaudeBridge *connected) {
+                if (!connected) return;
+                NSArray *nextItems = [self commandSuggestions:connected query:query] ?: @[];
+                [bridge pushStateMethod:@"setPrettyTermCommandResults" payload:@{
+                    @"items": nextItems,
+                    @"query": query
+                }];
+            }];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"submitMessage"]) {
+        BOOL floating = [bridge.surface isEqual:@"floating"];
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        NSString *rawText = [payload[@"text"] isKindOfClass:NSString.class] ? payload[@"text"] : @"";
+        PTWorkspaceTab *tab = nil;
+        if (!floating) {
+            for (PTWorkspaceTab *candidate in _workspaceTabs) {
+                if ([candidate.identifier isEqual:payload[@"tabId"]] && [candidate.sessionID isEqual:sessionID]) {
+                    tab = candidate;
+                    break;
+                }
+            }
+        }
+        if (!sessionID.length || (floating ? ![_floatingSessionID isEqual:sessionID] : !tab)) {
+            reply(nil, PTL(@"会话已切换", @"The conversation has changed"));
+            return;
+        }
+        NSMutableArray *pendingImages = floating ? _floatingPendingImages : tab.pendingImages;
+        NSMutableArray *pendingFiles = floating ? _floatingPendingFiles : tab.pendingFiles;
+        NSArray *images = [pendingImages copy];
+        NSArray *files = [pendingFiles copy];
+        NSMutableArray<NSData *> *pngs = [NSMutableArray arrayWithCapacity:images.count];
+        for (NSDictionary *image in images) {
+            if ([image[@"pngData"] length]) [pngs addObject:image[@"pngData"]];
+        }
+        NSUInteger draftRevision = floating ? _floatingDraftRevision : tab.draftRevision;
+        NSString *outgoing = PTMessageByAppendingClaudeAttachMarkers(rawText, files);
+        [self submitOutgoingMessage:outgoing imagePNGs:pngs forSessionID:sessionID completion:^(NSString *error) {
+            if (error) {
+                if (floating && [self->_floatingSessionID isEqual:sessionID]) self->_floatingStatusText = error;
+                if (!floating && [self->_selectedSession.sessionID isEqual:sessionID]) self->_statusText = error;
+                [self pushFrontendWindowState];
+                reply(nil, error);
+                return;
+            }
+            if (pngs.count || ![self isConfigurationCommand:outgoing]) [self beginAwaitingClaudeReplyForSessionID:sessionID];
+            BOOL clearDraft = floating
+                ? [self->_floatingSessionID isEqual:sessionID] && self->_floatingDraftRevision == draftRevision
+                : [tab.sessionID isEqual:sessionID] && tab.draftRevision == draftRevision;
+            if (clearDraft) {
+                if (floating) self->_floatingDraft = @"";
+                else tab.draft = @"";
+            }
+            for (NSString *file in files) {
+                NSUInteger index = [pendingFiles indexOfObjectIdenticalTo:file];
+                if (index != NSNotFound) [pendingFiles removeObjectAtIndex:index];
+            }
+            for (NSDictionary *image in images) {
+                NSUInteger index = [pendingImages indexOfObjectIdenticalTo:image];
+                if (index == NSNotFound) continue;
+                [pendingImages removeObjectAtIndex:index];
+                NSString *path = image[@"path"];
+                if (![image[@"temporary"] boolValue] || !path.length) continue;
+                [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+                [self->_temporaryImagePaths removeObject:path];
+            }
+            [self pushFrontendComposer];
+            reply(@{ @"accepted": @YES, @"clearedDraft": @(clearDraft) }, nil);
+        }];
+        return;
+    }
+
+    if ([action isEqual:@"interruptOutput"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        BOOL ok = [self interruptClaudeOutputForSessionID:sessionID];
+        reply(@{ @"interrupted": @(ok) }, nil);
+        return;
+    }
+
+    if ([action isEqual:@"backgroundClaudeTask"] || [action isEqual:@"readClaudeTaskOutput"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        PTClaudeBridge *target = [self bridgeForSessionID:sessionID];
+        if (!target) {
+            reply(nil, PTL(@"Claude 会话未连接", @"Claude session is disconnected"));
+            return;
+        }
+        BOOL background = [action isEqual:@"backgroundClaudeTask"];
+        NSString *key = background ? @"toolUseId" : @"taskId";
+        NSString *identifier = [payload[key] isKindOfClass:NSString.class] ? payload[key] : @"";
+        if (!identifier.length) {
+            reply(nil, PTL(@"缺少任务标识", @"Missing task identifier"));
+            return;
+        }
+        if (background) [target backgroundTaskForToolUseID:identifier completion:reply];
+        else [target readTaskOutput:identifier completion:reply];
+        return;
+    }
+
+    if ([action isEqual:@"connectClaude"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        if ([bridge.surface isEqual:@"floating"]) {
+            [self prepareBridgeForSessionID:sessionID completion:^(PTClaudeBridge *connected) {
+                [self pushFrontendSessions];
+                [self pushFrontendWindowState];
+                reply(connected ? @{} : nil, connected ? nil : PTL(@"无法连接 Claude Code 会话", @"Could not connect to the Claude Code conversation"));
+            }];
+            return;
+        }
+        PTSessionInfo *target = sessionID.length ? [self sessionWithID:sessionID] : _selectedSession;
+        if (target && ![_selectedSession.sessionID isEqual:target.sessionID]) {
+            _selectedSession = target;
+            _activeWorkspaceTab.sessionID = target.sessionID ?: @"";
+        }
+        if (_selectedSession) [self connectSelectedSession:nil];
+        [self pushFrontendWorkspace];
+        [self pushFrontendSessions];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"disconnectClaude"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        PTClaudeBridge *targetBridge = [self bridgeForSessionID:sessionID];
+        [targetBridge stop];
+        if (sessionID.length) [self finishAwaitingClaudeReplyForSessionID:sessionID];
+        [self refreshAgentStateAndControls];
+        [self updateWorkspaceTabBar];
+        [self pushFrontendSessions];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"forceResyncSession"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        PTSessionInfo *target = [self sessionWithID:sessionID];
+        if (target.filePath.length) {
+            __weak typeof(self) weakSelf = self;
+            [_store refreshForcingPath:target.filePath completion:^(PTSessionInfo *session) {
+                PTAppDelegate *self = weakSelf;
+                if (!self || !session) return;
+                NSMutableArray<PTSessionInfo *> *updated = [self->_sessions mutableCopy] ?: [NSMutableArray array];
+                NSUInteger idx = [updated indexOfObjectPassingTest:^BOOL(PTSessionInfo *c, NSUInteger i, BOOL *s) {
+                    (void)i; (void)s;
+                    return [c.sessionID isEqual:session.sessionID];
+                }];
+                if (idx == NSNotFound) [updated addObject:session];
+                else updated[idx] = session;
+                self->_manualRefreshSessionID = [session.sessionID copy];
+                [self applySessions:updated];
+            }];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"sendCompact"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        if (sessionID.length) {
+            [self sendOutgoingMessage:@"/compact" imagePNGs:@[] forSessionID:sessionID success:^{
+                self->_statusText = PTL(@"已向 Claude Code 发送 /compact", @"Sent /compact to Claude Code");
+                [self pushFrontendWindowState];
+            } failureResponder:nil];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"toggleRemoteControl"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        if (sessionID.length) {
+            [self sendOutgoingMessage:@"/remote-control" imagePNGs:@[] forSessionID:sessionID success:^{
+                self->_statusText = PTL(@"已向 Claude Code 发送 /remote-control", @"Sent /remote-control to Claude Code");
+                [self pushFrontendWindowState];
+            } failureResponder:nil];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"setModel"]) {
+        NSString *model = [payload[@"model"] isKindOfClass:NSString.class] ? payload[@"model"] : @"";
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        if (!model.length || !sessionID.length) {
+            reply(nil, PTL(@"请选择会话和模型", @"Select a conversation and a model"));
+            return;
+        }
+        [self submitOutgoingMessage:[NSString stringWithFormat:@"/model %@", model]
+                           imagePNGs:@[]
+                        forSessionID:sessionID
+                          completion:^(NSString *error) {
+            if (error) { reply(nil, error); return; }
+            NSString *confirmedModel = [self composerModelForSessionID:sessionID];
+            [self showConfigurationStatus:[NSString stringWithFormat:PTL(@"当前模型：%@", @"Current model: %@"),
+                [self composerModelShortTitle:confirmedModel]] forSessionID:sessionID];
+            [self pushFrontendWindowState];
+            reply(@{@"model": confirmedModel ?: @""}, nil);
+        }];
+        return;
+    }
+
+    if ([action isEqual:@"setEffort"]) {
+        NSString *effort = [payload[@"effort"] isKindOfClass:NSString.class] ? payload[@"effort"] : @"";
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        if (effort.length && sessionID.length) {
+            _selectedComposerEffort = [effort copy];
+            [self sendOutgoingMessage:[NSString stringWithFormat:@"/effort %@", effort]
+                            imagePNGs:@[]
+                         forSessionID:sessionID
+                              success:^{
+                [self updateComposerConfigurationButtons];
+            } failureResponder:nil];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"setPermissionMode"]) {
+        NSString *mode = [payload[@"mode"] isKindOfClass:NSString.class] ? payload[@"mode"] : @"";
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        if (mode.length && sessionID.length) {
+            [self sendOutgoingMessage:[NSString stringWithFormat:@"/mode %@", mode]
+                            imagePNGs:@[]
+                         forSessionID:sessionID
+                              success:^{
+                [self pushFrontendWindowState];
+            } failureResponder:nil];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"answerQuestion"]) {
+        NSString *text = [payload[@"text"] isKindOfClass:NSString.class] ? payload[@"text"] : @"";
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class] ? payload[@"sessionId"] : @"";
+        NSString *toolUseID = [payload[@"toolUseId"] isKindOfClass:NSString.class] ? payload[@"toolUseId"] : @"";
+        NSDictionary *answers = [payload[@"answers"] isKindOfClass:NSDictionary.class] ? payload[@"answers"] : nil;
+        if (text.length && sessionID.length) {
+            BOOL handledProtocol = NO;
+            for (NSString *requestID in _protocolQuestions.allKeys) {
+                NSDictionary *request = _protocolQuestions[requestID];
+                if ([request[@"sessionID"] isEqual:sessionID] && [request[@"toolUseId"] isEqual:toolUseID]) {
+                    [self writeQuestionResponseForRequestID:requestID answers:answers ?: @{}];
+                    handledProtocol = YES;
+                    break;
+                }
+            }
+            if (!handledProtocol) {
+                [self sendOutgoingMessage:text imagePNGs:@[] forSessionID:sessionID success:nil failureResponder:nil];
+            }
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"openTranscriptFile"] || [action isEqual:@"previewFile"]) {
+        BOOL fromTranscript = [action isEqual:@"openTranscriptFile"];
+        BOOL floating = [bridge.surface isEqual:@"floating"];
+        id rawPath = payload[fromTranscript ? @"filePath" : @"path"];
+        NSString *path = [rawPath isKindOfClass:NSString.class] ? rawPath : @"";
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        PTSessionInfo *session = [self sessionWithID:sessionID];
+        if (path.length && !path.isAbsolutePath && session.cwd.length) {
+            path = [session.cwd stringByAppendingPathComponent:path];
+        }
+        PTWorkspaceTab *tab = nil;
+        for (PTWorkspaceTab *candidate in _workspaceTabs) {
+            if (![(candidate.sessionID ?: @"") isEqual:sessionID ?: @""]) continue;
+            if (floating || [candidate.identifier isEqual:payload[@"tabId"]]) { tab = candidate; break; }
+        }
+        if (floating && fromTranscript && session && [_floatingSessionID isEqual:sessionID]) {
+            if (!tab) {
+                tab = [self createWorkspaceTab];
+                tab.sessionID = sessionID;
+            }
+            [self activateWorkspaceTab:tab animated:NO];
+            [_window makeKeyAndOrderFront:nil];
+        }
+        if (!tab || !path.length) {
+            reply(nil, PTL(@"预览的会话或文件已切换", @"The preview conversation or file has changed"));
+            return;
+        }
+        if (fromTranscript && tab) {
+            tab.panelExpanded = YES;
+            tab.activeToolPageKind = @"file";
+            tab.fileToolPageOpen = YES;
+            [self pushFrontendWorkspace];
+        }
+        [self pushFrontendFilePreviewForPath:path.stringByStandardizingPath
+                                  sessionID:tab.sessionID tabID:tab.identifier];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"openTranscriptEditReview"]) {
+        NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+            ? payload[@"sessionId"] : _selectedSession.sessionID;
+        NSUInteger turnIndex = [payload[@"turnIndex"] unsignedIntegerValue];
+        PTSessionInfo *session = [self sessionWithID:sessionID] ?: _selectedSession;
+        NSArray<NSDictionary *> *events = PTLobeSanitizeTurnEdits([self transcriptEditEventsForSession:session turnIndex:turnIndex]);
+        _gitReviewShowsTranscriptEdits = YES;
+        if (_activeWorkspaceTab) {
+            _activeWorkspaceTab.panelExpanded = YES;
+            _activeWorkspaceTab.activeToolPageKind = @"review";
+            _activeWorkspaceTab.reviewToolPageOpen = YES;
+
+
+
+            [self pushFrontendWorkspace];
+        }
+        _turnReviewSnapshot = @{
+            @"reviewMode": @"turn",
+            @"turnIndex": @(turnIndex),
+            @"directories": [_gitDirectoryPaths copy] ?: @[],
+            @"observedDirectory": _gitObservedDirectory ?: @"",
+            @"editEvents": events ?: @[],
+            @"loading": @NO,
+            @"actionInFlight": @NO
+        };
+        [self pushFrontendGitState];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"chooseFileTreeRoot"]) {
+        PTWorkspaceTab *tab = _activeWorkspaceTab;
+        NSOpenPanel *panel = NSOpenPanel.openPanel;
+        panel.canChooseFiles = NO;
+        panel.canChooseDirectories = YES;
+        panel.allowsMultipleSelection = NO;
+        [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK && panel.URL) {
+                tab.fileTreeRootPath = panel.URL.path ?: @"";
+                [self pushFrontendWorkspace];
+            }
+            reply(@{}, nil);
+        }];
+        return;
+    }
+
+    if ([action isEqual:@"listDirectory"]) {
+        NSString *path = [payload[@"path"] isKindOfClass:NSString.class] ? payload[@"path"] : @"";
+        NSString *root = [payload[@"rootPath"] isKindOfClass:NSString.class] ? payload[@"rootPath"] : @"";
+        NSString *tabID = [payload[@"tabId"] isKindOfClass:NSString.class] ? payload[@"tabId"] : @"";
+        [self pushFrontendDirectoryListingForPath:path root:root tabID:tabID];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"refreshGitReview"]) {
+        NSString *mode = [payload[@"mode"] isKindOfClass:NSString.class] ? payload[@"mode"] : @"git";
+        if ([mode isEqual:@"turn"]) {
+            NSString *sessionID = [payload[@"sessionId"] isKindOfClass:NSString.class]
+                ? payload[@"sessionId"] : _selectedSession.sessionID;
+            NSUInteger turnIndex = [payload[@"turnIndex"] unsignedIntegerValue];
+            PTSessionInfo *session = [self sessionWithID:sessionID] ?: _selectedSession;
+            NSArray<NSDictionary *> *events = PTLobeSanitizeTurnEdits([self transcriptEditEventsForSession:session turnIndex:turnIndex]);
+            _gitReviewShowsTranscriptEdits = YES;
+            _turnReviewSnapshot = @{
+                @"reviewMode": @"turn",
+                @"turnIndex": @(turnIndex),
+                @"directories": [_gitDirectoryPaths copy] ?: @[],
+                @"observedDirectory": _gitObservedDirectory ?: @"",
+                @"editEvents": events ?: @[],
+                @"loading": @NO,
+                @"actionInFlight": @(_gitActionInFlight)
+            };
+            [self pushFrontendGitState];
+        } else {
+            NSString *dir = [payload[@"directory"] isKindOfClass:NSString.class] && [payload[@"directory"] length] > 0
+                ? payload[@"directory"]
+                : (_gitObservedDirectory.length > 0 ? _gitObservedDirectory : _selectedSession.cwd);
+            if (dir.length > 0) _gitObservedDirectory = [dir copy];
+            [self pushFrontendGitDiffForDirectory:dir ?: @""];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"setReviewVisible"]) {
+        NSString *tabID = payload[@"tabId"];
+        if ([payload[@"visible"] boolValue]) {
+            PTWorkspaceTab *tab = _activeWorkspaceTab;
+            if ([tab.identifier isEqual:tabID] && tab.panelExpanded && [tab.activeToolPageKind isEqual:@"review"] &&
+                ![_gitVisibleTabID isEqual:tabID]) {
+                _gitVisibleTabID = [tabID copy];
+                if (!_gitReviewShowsTranscriptEdits) {
+                    NSString *dir = _gitObservedDirectory.length ? _gitObservedDirectory : _selectedSession.cwd;
+                    if (dir.length) _gitObservedDirectory = [dir copy];
+                    if (![_gitReviewInFlightDirectory isEqual:dir]) [self pushFrontendGitDiffForDirectory:dir];
+                }
+            }
+        } else if ([_gitVisibleTabID isEqual:tabID]) {
+            _gitVisibleTabID = nil;
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"selectGitDirectory"]) {
+        NSString *dir = [payload[@"directory"] isKindOfClass:NSString.class] ? payload[@"directory"] : @"";
+        if (dir.length) {
+            _gitObservedDirectory = [dir copy];
+            _gitDirectoryManuallySelected = YES;
+            [self selectObservedGitDirectory:dir];
+            [self pushFrontendGitDiffForDirectory:dir];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"chooseGitDirectory"]) {
+        NSOpenPanel *panel = NSOpenPanel.openPanel;
+        panel.canChooseFiles = NO;
+        panel.canChooseDirectories = YES;
+        panel.allowsMultipleSelection = NO;
+        [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse result) {
+            if (result == NSModalResponseOK && panel.URL.path.length > 0) {
+                NSString *path = panel.URL.path.stringByStandardizingPath;
+                if (!self->_gitDirectoryPaths) self->_gitDirectoryPaths = [NSMutableArray array];
+                [self->_suppressedGitDirectoryPaths removeObject:path];
+                [NSUserDefaults.standardUserDefaults setObject:
+                    [self->_suppressedGitDirectoryPaths.allObjects sortedArrayUsingSelector:@selector(compare:)]
+                    forKey:@"PTGitSuppressedDirectories"];
+                if (![self->_gitDirectoryPaths containsObject:path]) {
+                    [self->_gitDirectoryPaths insertObject:path atIndex:0];
+                }
+                self->_gitObservedDirectory = [path copy];
+                self->_gitDirectoryManuallySelected = YES;
+                [NSUserDefaults.standardUserDefaults setObject:self->_gitDirectoryPaths forKey:@"PTGitObservedDirectories"];
+                [self selectObservedGitDirectory:path];
+                [self pushFrontendGitDiffForDirectory:path];
+            }
+            reply(@{}, nil);
+        }];
+        return;
+    }
+
+    if ([action isEqual:@"removeGitDirectory"]) {
+        NSString *dir = [payload[@"directory"] isKindOfClass:NSString.class] ? payload[@"directory"] : _gitObservedDirectory;
+        NSUInteger removedIndex = dir.length ? [_gitDirectoryPaths indexOfObject:dir] : NSNotFound;
+        if (removedIndex != NSNotFound) {
+            if (!_suppressedGitDirectoryPaths) _suppressedGitDirectoryPaths = [NSMutableSet set];
+            [_suppressedGitDirectoryPaths addObject:dir];
+            [NSUserDefaults.standardUserDefaults setObject:
+                [_suppressedGitDirectoryPaths.allObjects sortedArrayUsingSelector:@selector(compare:)]
+                forKey:@"PTGitSuppressedDirectories"];
+            [_gitDirectoryPaths removeObjectAtIndex:removedIndex];
+            [NSUserDefaults.standardUserDefaults setObject:_gitDirectoryPaths forKey:@"PTGitObservedDirectories"];
+            NSString *nextDir = _gitDirectoryPaths.count > 0
+                ? _gitDirectoryPaths[MIN(removedIndex, _gitDirectoryPaths.count - 1)]
+                : @"";
+            _gitObservedDirectory = nextDir.length ? [nextDir copy] : nil;
+            _gitDirectoryManuallySelected = nextDir.length > 0;
+            [self selectObservedGitDirectory:nextDir];
+            [self pushFrontendGitDiffForDirectory:nextDir];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"gitCommitAndPush"]) {
+        BOOL commit = [payload[@"commit"] boolValue];
+        BOOL push = [payload[@"push"] boolValue];
+        BOOL includeUnstaged = payload[@"includeUnstaged"] ? [payload[@"includeUnstaged"] boolValue] : YES;
+        NSString *directory = [payload[@"directory"] isKindOfClass:NSString.class] && [payload[@"directory"] length] > 0
+            ? payload[@"directory"] : _gitObservedDirectory;
+        NSString *message = [payload[@"message"] isKindOfClass:NSString.class]
+            ? [payload[@"message"] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+            : @"";
+        [self performGitCommit:commit push:push includeUnstaged:includeUnstaged directory:directory message:message];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"setTerminalVisible"]) {
+        _terminalDrawerVisible = [payload[@"visible"] boolValue];
+        if (_terminalDrawerVisible) [self publishTerminalOutput:[_lobeTerminalOutput copy] reset:YES];
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"runTerminalCommand"]) {
+        NSString *cmd = [payload[@"command"] isKindOfClass:NSString.class] ? payload[@"command"] : @"";
+        NSString *cwd = [payload[@"cwd"] isKindOfClass:NSString.class] && [payload[@"cwd"] length] > 0
+            ? payload[@"cwd"] : (_selectedSession.cwd ?: NSHomeDirectory());
+        NSString *tabId = [payload[@"tabId"] isKindOfClass:NSString.class] ? payload[@"tabId"] : @"";
+        if (cmd.length == 0) {
+            reply(@{}, nil);
+            return;
+        }
+        if (_lobeTerminalTask.running) [_lobeTerminalTask terminate];
+        if (!_lobeTerminalOutput) _lobeTerminalOutput = [NSMutableString string];
+        NSString *prompt = [NSString stringWithFormat:@"\n$ %@\n", cmd];
+        [_lobeTerminalOutput appendString:prompt];
+        _terminalRunID = NSUUID.UUID.UUIDString;
+        _terminalSequence = 0;
+        _lobeTerminalCommand = [cmd copy];
+        _lobeTerminalCwd = [cwd copy];
+        _lobeTerminalTabID = [tabId copy];
+        _lobeTerminalRunning = YES;
+        _lobeTerminalExitCode = nil;
+        [self publishTerminalOutput:prompt reset:NO];
+
+        NSTask *task = [[NSTask alloc] init];
+        task.executableURL = [NSURL fileURLWithPath:@"/bin/zsh"];
+        task.arguments = @[@"-lc", cmd];
+        BOOL isDir = NO;
+        if (cwd.length && [NSFileManager.defaultManager fileExistsAtPath:cwd isDirectory:&isDir] && isDir) {
+            task.currentDirectoryURL = [NSURL fileURLWithPath:cwd isDirectory:YES];
+        }
+        NSPipe *pipe = [NSPipe pipe];
+        task.standardOutput = pipe;
+        task.standardError = pipe;
+        _lobeTerminalTask = task;
+
+        NSFileHandle *readHandle = pipe.fileHandleForReading;
+        __weak typeof(self) weakSelf = self;
+        readHandle.readabilityHandler = ^(NSFileHandle *handle) {
+            NSData *chunk = handle.availableData;
+            if (chunk.length == 0) {
+                handle.readabilityHandler = nil;
+                return;
+            }
+            NSString *text = [[NSString alloc] initWithData:chunk encoding:NSUTF8StringEncoding]
+                ?: [[NSString alloc] initWithData:chunk encoding:NSISOLatin1StringEncoding] ?: @"";
+            if (text.length == 0) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) s = weakSelf;
+                if (!s || s->_lobeTerminalTask != task) return;
+                [s->_lobeTerminalOutput appendString:text];
+                [s publishTerminalOutput:text reset:NO];
+            });
+        };
+        task.terminationHandler = ^(NSTask *finished) {
+            readHandle.readabilityHandler = nil;
+            NSData *remaining = [readHandle readDataToEndOfFile];
+            NSString *tail = remaining.length > 0
+                ? ([[NSString alloc] initWithData:remaining encoding:NSUTF8StringEncoding] ?: @"")
+                : @"";
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) s = weakSelf;
+                if (!s || s->_lobeTerminalTask != finished) return;
+                if (tail.length > 0) [s->_lobeTerminalOutput appendString:tail];
+                s->_lobeTerminalRunning = NO;
+                s->_lobeTerminalExitCode = @(finished.terminationStatus);
+                [s publishTerminalOutput:tail reset:NO];
+            });
+        };
+        NSError *launchErr = nil;
+        if (![task launchAndReturnError:&launchErr]) {
+            readHandle.readabilityHandler = nil;
+            _lobeTerminalRunning = NO;
+            _lobeTerminalExitCode = @1;
+            NSString *failure = [NSString stringWithFormat:@"Launch failed: %@\n", launchErr.localizedDescription ?: @"unknown error"];
+            [_lobeTerminalOutput appendString:failure];
+            [self publishTerminalOutput:failure reset:NO];
+        }
+        reply(@{}, nil);
+        return;
+    }
+
+    if ([action isEqual:@"clearTerminalOutput"]) {
+        _lobeTerminalOutput = [NSMutableString string];
+        _lobeTerminalRunning = NO;
+        _lobeTerminalExitCode = nil;
+        [self publishTerminalOutput:@"" reset:YES];
+        reply(@{}, nil);
+        return;
+    }
+
+    reply(@{}, nil);
+}
+
+- (void)frontendBridgeDidFinishLoad:(PTFrontendBridge *)bridge {
+    [bridge pushWindowState:[self frontendWindowStateSnapshotForSurface:bridge.surface]];
+    [bridge pushStateMethod:@"setPrettyTermWorkspace" payload:[self frontendWorkspaceSnapshotForSurface:bridge.surface]];
+    [bridge pushStateMethod:@"setPrettyTermComposer" payload:[self frontendComposerSnapshotForSurface:bridge.surface]];
+    [self pushFrontendClaudeTasksTo:bridge
+                         sessionID:bridge == _lobeFloatingBridge ? _floatingSessionID : _selectedSession.sessionID];
+    [self pushFrontendSessions];
+    if (bridge == _lobeMainBridge) {
+        [self pushFrontendGitState];
+        _gitVisibleTabID = nil;
+        _terminalDrawerVisible = NO;
+        _renderInFlight = NO;
+        _pendingRenderSession = nil;
+        _renderedSessionID = nil;
+        _renderedModifiedAt = nil;
+        _renderedMessageCount = 0;
+        _renderedMessages = nil;
+        if (_selectedSession) [self renderSession:_selectedSession];
+    } else if (bridge == _lobeFloatingBridge) {
+        _floatingRenderInFlight = NO;
+        _floatingRenderedSessionID = nil;
+        _floatingRenderedModifiedAt = nil;
+        _floatingRenderedMessageCount = 0;
+        _floatingRenderedMessages = nil;
+        [self refreshFloatingConversation];
+    }
+}
+
 @end
 
 int main(void) {

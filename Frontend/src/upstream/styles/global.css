@@ -1,0 +1,86 @@
+/* Upstream: lobehub/lobehub@00167e7b0f014e640194be732dd251931d663874 (src/styles/global.css)
+ * Adapted with Safari 16.0 media syntax (`min-device-width: 576px`), local bundled display font,
+ * and WKWebView background fallbacks while keeping upstream color-mix rules for Safari 16.2+. */
+
+@font-face {
+  font-family: 'PrettyTermDisplay';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../../assets/PrettyTermDisplay.woff2') format('woff2');
+}
+
+html,
+body,
+#root {
+  position: relative;
+  overscroll-behavior: none;
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  min-height: 100%;
+  max-height: 100%;
+  background-color: var(--lobe-color-bg-layout);
+  color: var(--lobe-color-text);
+}
+
+@media (min-device-width: 576px) {
+  html,
+  body,
+  #root {
+    overflow: hidden;
+    overscroll-behavior: auto;
+  }
+}
+
+body {
+  will-change: opacity;
+  isolation: isolate;
+}
+
+* {
+  scrollbar-color: var(--lobe-color-fill) transparent;
+  scrollbar-width: thin;
+}
+
+* ::-webkit-scrollbar {
+  width: 0.75em;
+  height: 0.75em;
+}
+
+* ::-webkit-scrollbar-thumb {
+  border-radius: 10px;
+}
+
+* :hover::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  background-color: var(--lobe-color-text);
+  background-clip: content-box;
+}
+
+* ::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+html[data-font-antialiasing='off'] * {
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+}
+
+.lobe-drag-region button {
+  -webkit-app-region: no-drag;
+}
+
+.lobe-context-trigger[data-popup-open]:not([data-no-highlight]),
+.lobe-dropdown-menu-trigger[data-popup-open]:not([data-no-highlight]) {
+  background: var(--lobe-color-fill-tertiary);
+}
+
+@keyframes pt-spin-kf {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.pt-spin {
+  animation: pt-spin-kf 1s linear infinite;
+}

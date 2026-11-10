@@ -7,14 +7,14 @@
 @property(nonatomic, strong) PTSessionInfo *target;
 @property(nonatomic) BOOL ready;
 @property(nonatomic) BOOL rejectSend;
-@property(nonatomic, strong) NSMutableArray<NSString *> *commands;
+@property(nonatomic, strong) NSMutableArray<NSString *> *sentCommands;
 @end
 @implementation PTRenameBridgeProbe
-- (instancetype)init { if ((self = [super init])) _commands = [NSMutableArray array]; return self; }
+- (instancetype)init { if ((self = [super init])) _sentCommands = [NSMutableArray array]; return self; }
 - (BOOL)running { return self.ready; }
 - (NSString *)sessionID { return self.target.sessionID; }
 - (void)connectToSession:(PTSessionInfo *)session { self.target = session; }
-- (BOOL)sendMessage:(NSString *)message { [self.commands addObject:message]; return !self.rejectSend; }
+- (BOOL)sendMessage:(NSString *)message { [self.sentCommands addObject:message]; return !self.rejectSend; }
 @end
 
 @interface PTRenameDelegateProbe : PTAppDelegate
@@ -42,8 +42,6 @@ int main(void) {
         for (NSString *key in @[@"pendingImages", @"pendingFiles", @"floatingPendingImages", @"floatingPendingFiles"])
             [app setValue:[NSMutableArray array] forKey:key];
         [app setValue:[NSMutableSet set] forKey:@"temporaryImagePaths"];
-        [app buildWindow];
-        NSTextField *status = [app valueForKey:@"statusLabel"];
         PTSessionInfo *target = [PTSessionInfo new];
         target.sessionID = [@"rename-command-test-" stringByAppendingString:NSUUID.UUID.UUIDString];
         target.cwd = @"/expected/project";
@@ -74,10 +72,10 @@ int main(void) {
 
         NSString *name = @"老师  的 \"new\" 标题";
         [app renameSession:target toTitle:name];
-        CheckRename([connected.commands isEqual:@[@"/rename 老师  的 \"new\" 标题"]],
+        CheckRename([connected.sentCommands isEqual:@[@"/rename 老师  的 \"new\" 标题"]],
             @"rename must send the slash command and the exact user's title to the matching connected Claude session");
         CheckRename(app.connectionCount == 0, @"an existing connection must not launch another Terminal");
-        CheckRename(otherBridge.commands.count == 0 && [app valueForKey:@"selectedSession"] == other,
+        CheckRename(otherBridge.sentCommands.count == 0 && [app valueForKey:@"selectedSession"] == other,
             @"right-click rename must leave the active different conversation untouched");
         CheckRename([target.title isEqual:name], @"Claude sync must preserve local rename");
 
@@ -86,28 +84,30 @@ int main(void) {
         [app renameSession:target toTitle:@"离线名称"];
         CheckRename(app.connectionCount == 1 && app.connection.target == target,
             @"offline rename must connect or resume the requested session with its cwd");
-        CheckRename(app.connection.commands.count == 0, @"rename must wait until that connection completes");
+        CheckRename(app.connection.sentCommands.count == 0, @"rename must wait until that connection completes");
         [app renameSession:target toTitle:@"最新名称"];
         CheckRename(app.connectionCount == 1, @"another title during connection must reuse the pending connection");
         PTRenameBridgeProbe *pending = app.connection;
         pending.ready = YES;
         pending.statusChanged(@"connected");
-        CheckRename([pending.commands isEqual:@[@"/rename 最新名称"]], @"the final requested title must be submitted once after resume");
+        CheckRename([pending.sentCommands isEqual:@[@"/rename 最新名称"]], @"the final requested title must be submitted once after resume");
         CheckRename([[app valueForKey:@"workspaceTabs"] count] == tabsBefore,
             @"renaming must not create or switch workspace tabs");
-        CheckRename(otherBridge.commands.count == 0 && [app valueForKey:@"selectedSession"] == other,
+        CheckRename(otherBridge.sentCommands.count == 0 && [app valueForKey:@"selectedSession"] == other,
             @"resuming a rename target must not rename or switch to the active conversation");
+        CheckRename(pending.turnCompleted != nil, @"headless rename bridge must wait for turn completion before disconnecting");
+        pending.turnCompleted();
 
         [app renameSession:target toTitle:@"连接失败也保留本地名"];
         app.connection.statusChanged(@"test connection failure");
-        CheckRename([target.title isEqual:@"连接失败也保留本地名"] && [status.stringValue containsString:@"test connection failure"],
+        CheckRename([target.title isEqual:@"连接失败也保留本地名"] && [[app valueForKey:@"statusText"] containsString:@"test connection failure"],
             @"connection failure must retain the local title and report the actual sync failure");
-        CheckRename(app.connection.commands.count == 0, @"failed connection must not submit a rename elsewhere");
+        CheckRename(app.connection.sentCommands.count == 0, @"failed connection must not submit a rename elsewhere");
 
         connected.ready = YES;
         connected.rejectSend = YES;
         [app renameSession:target toTitle:@"发送失败"];
-        CheckRename([target.title isEqual:@"发送失败"] && [status.stringValue containsString:@"未接受"],
+        CheckRename([target.title isEqual:@"发送失败"] && [[app valueForKey:@"statusText"] containsString:@"未接受"],
             @"a rejected command must not be reported as a successful Claude rename");
         NSMutableDictionary *titles = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"PTSessionTitleOverrides"] mutableCopy];
         [titles removeObjectForKey:target.sessionID];

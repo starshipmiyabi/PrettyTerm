@@ -7,53 +7,115 @@ static void Check(BOOL ok, NSString *message) {
     if (!ok) { NSLog(@"FAIL: %@", message); exit(1); }
 }
 
-@interface PTClaudeBridge (NewSessionTest)
-- (void)startNewSession:(PTSessionInfo *)session prompt:(NSString *)prompt;
-- (void)startNewSessionInDirectory:(NSString *)directory;
+static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while (!condition() && [deadline timeIntervalSinceNow] > 0) {
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode
+                               beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+    return condition();
+}
+
+@interface PTClaudeBridge (LaunchTestAccess)
+- (BOOL)writeFrame:(NSDictionary *)frame completion:(void (^)(BOOL))completion;
+- (NSString *)releaseInteractiveSession:(NSString *)sessionID;
+- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume;
+- (void)consumeFrame:(NSDictionary *)frame;
+- (void)finishProcessIfEnded;
+- (void)reportError:(NSString *)message;
+- (void)completePendingSends:(BOOL)accepted;
 @end
 
-// Only the external Terminal/process boundary is replaced. The production
-// connection selection, command construction and asynchronous binding run intact.
+// Only the external process / pipe boundary is replaced. Production session
+// selection, deduplication, initialize handshake, and error routing run intact.
 @interface PTLaunchProbe : PTClaudeBridge
-@property(nonatomic, copy) NSArray *existingTTYs;
-@property(nonatomic, copy) NSString *existingSessionID;
-@property(nonatomic, copy) NSString *launchCommand;
-@property(nonatomic, strong) NSMutableArray<NSString *> *shellCommands;
+@property(nonatomic, copy) NSString *releaseError;
 @property(nonatomic, copy) NSString *launchError;
-@property(nonatomic, copy) NSString *scanError;
+@property(nonatomic, copy) NSString *initializeError;
+@property(nonatomic, copy) NSString *stderrFailure;
+@property(nonatomic) BOOL deferInitialize;
+@property(nonatomic, copy) NSString *lastDirectory;
+@property(nonatomic) BOOL lastResume;
+@property(nonatomic) NSUInteger releases;
 @property(nonatomic) NSUInteger launches;
-@property(nonatomic) NSUInteger polls;
-@property(nonatomic) BOOL exited;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *writtenFrames;
 @end
+
 @implementation PTLaunchProbe
-- (NSArray *)allTerminalTTYsWithError:(NSString **)error {
-    if (error) *error = self.scanError;
-    return self.existingTTYs ?: @[];
+- (instancetype)init {
+    if ((self = [super init])) {
+        _writtenFrames = [NSMutableArray array];
+    }
+    return self;
 }
-- (pid_t)claudePIDForTTY:(NSString *)tty {
-    if ([tty isEqual:@"/dev/ttys-new"]) return ++self.polls >= 3 && !self.exited ? 222 : 0;
-    return [tty isEqual:@"/dev/ttys-existing"] ? 111 : 0;
+
+- (NSString *)releaseInteractiveSession:(NSString *)sessionID {
+    (void)sessionID;
+    self.releases++;
+    return self.releaseError;
 }
-- (NSString *)cwdForPID:(pid_t)pid { return @"/expected/project"; }
-- (NSDictionary *)sessionMetadataForPID:(pid_t)pid {
-    return @{ @"pid": @(pid), @"sessionId": pid == 222 ? @"target-session" : self.existingSessionID ?: @"" };
-}
-- (NSString *)launchTerminalCommand:(NSString *)command error:(NSString **)error {
-    self.launches++;
-    self.launchCommand = command;
-    self.shellCommands = [NSMutableArray arrayWithObject:command];
-    if (error) *error = self.launchError;
-    return self.launchError ? nil : @"/dev/ttys-new";
-}
-- (BOOL)sendShellCommand:(NSString *)command toTTY:(NSString *)tty error:(NSString **)error {
-    Check([tty isEqual:@"/dev/ttys-new"], @"Claude must be submitted to the same shell that received cd");
-    [self.shellCommands addObject:command];
+
+- (BOOL)writeFrame:(NSDictionary *)frame completion:(void (^)(BOOL))completion {
+    [self.writtenFrames addObject:frame];
+    if (completion) completion(YES);
     return YES;
 }
-- (NSDictionary *)terminalStateForTTY:(NSString *)tty error:(NSString **)error {
-    return @{ @"busy": @(!self.exited), @"contents": @"claude: startup failed" };
+
+- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume {
+    self.launches++;
+    self.lastDirectory = cwd;
+    self.lastResume = resume;
+    if (self.launchError.length) {
+        [self reportError:self.launchError];
+        [self setValue:nil forKey:@"connectingSessionID"];
+        [self completePendingSends:NO];
+        return;
+    }
+    if (self.stderrFailure.length) {
+        [self setValue:self.stderrFailure forKey:@"stderrText"];
+        [self setValue:@YES forKey:@"stdoutEnded"];
+        [self setValue:@YES forKey:@"processEnded"];
+        [self setValue:@1 forKey:@"exitStatus"];
+        [self finishProcessIfEnded];
+        return;
+    }
+    NSString *initID = [NSString stringWithFormat:@"probe-init-%lu", (unsigned long)self.launches];
+    [self setValue:initID forKey:@"initializeID"];
+    NSDictionary *responseFrame = self.initializeError.length
+        ? @{
+            @"type": @"control_response",
+            @"response": @{
+                @"subtype": @"error",
+                @"request_id": initID,
+                @"error": self.initializeError
+            }
+        }
+        : @{
+            @"type": @"control_response",
+            @"response": @{
+                @"subtype": @"success",
+                @"request_id": initID,
+                @"response": @{ @"commands": @[] }
+            }
+        };
+    if (self.deferInitialize) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf consumeFrame:responseFrame];
+        });
+    } else {
+        [self consumeFrame:responseFrame];
+    }
 }
 @end
+
+static NSArray<NSDictionary *> *UserFrames(PTLaunchProbe *bridge) {
+    NSMutableArray *users = [NSMutableArray array];
+    for (NSDictionary *frame in bridge.writtenFrames) {
+        if ([frame[@"type"] isEqual:@"user"]) [users addObject:frame];
+    }
+    return users;
+}
 
 static NSString *Connect(PTLaunchProbe *bridge, PTSessionInfo *session, BOOL twice) {
     __block NSString *status = nil;
@@ -69,7 +131,7 @@ int main(int argc, const char *argv[]) {
         (void)NSApplication.sharedApplication;
         if (argc == 3 && strcmp(argv[1], "--live") == 0) {
             // Explicit opt-in: a fresh synthetic transcript, never a user's
-            // conversation, exercises the real Terminal, shell wrapper and CLI.
+            // conversation, exercises the real headless Claude CLI.
             NSString *cwd = [NSString stringWithUTF8String:argv[2]];
             NSString *sessionID = NSUUID.UUID.UUIDString.lowercaseString;
             NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:
@@ -100,76 +162,81 @@ int main(int argc, const char *argv[]) {
             __block NSString *status = nil;
             bridge.statusChanged = ^(NSString *value) { status = value; NSLog(@"LIVE: %@", value); };
             [bridge connectToSession:session];
-            PTRunLoopUntil(30, ^BOOL { return status != nil; });
+            PTRunLoopUntil(30, ^BOOL { return bridge.running || (status != nil && ![status containsString:@"已连接"]); });
             if (!bridge.running) NSLog(@"LIVE fixture retained at %@", path);
-            Check(bridge.running, [NSString stringWithFormat:@"live resume must bind: %@", status]);
-            pid_t pid = [[bridge valueForKey:@"terminalPID"] intValue];
-            Check([[bridge sessionMetadataForPID:pid][@"sessionId"] isEqual:sessionID], @"live metadata must identify the fixture");
-            NSString *tty = [bridge valueForKey:@"terminalTTY"];
-            NSString *screen = [bridge terminalStateForTTY:tty error:nil][@"contents"];
-            NSLog(@"LIVE bound %@ pid %d; transcript visible=%@", tty, pid, [screen containsString:@"Fixture ready"] ? @"YES" : @"NO");
-            // This PID was created above for this synthetic fixture only. Keep
-            // the Terminal window and its shell available after the test exits.
-            kill(pid, SIGTERM);
+            Check(bridge.running && [bridge.sessionID isEqual:sessionID],
+                [NSString stringWithFormat:@"live resume must bind: %@", status]);
             [bridge stop];
             [NSFileManager.defaultManager removeItemAtPath:path error:nil];
             NSLog(@"PTClaudeLaunchTests live passed");
             return 0;
         }
+
         PTSessionInfo *session = [PTSessionInfo new];
         session.sessionID = @"target-session";
         session.cwd = @"/expected/project";
+
         PTLaunchProbe *blank = [PTLaunchProbe new];
         __block NSString *blankStatus = nil;
         blank.statusChanged = ^(NSString *status) { blankStatus = status; };
-        if ([blank respondsToSelector:@selector(startNewSessionInDirectory:)])
-            [blank startNewSessionInDirectory:session.cwd];
+        Check([blank respondsToSelector:@selector(startNewSessionInDirectory:)], @"blank launch selector must exist");
+        [blank startNewSessionInDirectory:session.cwd];
         PTRunLoopUntil(1, ^BOOL { return blankStatus != nil; });
-        Check(blank.running && [blank.sessionID isEqual:@"target-session"],
-            @"blank launch must adopt the session ID created by Claude");
-        Check([blank.shellCommands isEqual:@[@"cd -- '/expected/project'", @"Claude --yolo"]],
-            @"blank launch must issue only two separate ordered shell commands, without resume, session ID or prompt");
+        Check(blank.running && blank.sessionID.length > 0,
+            @"blank launch must assign a session ID and enter running state");
+        Check(blank.launches == 1 && !blank.lastResume && [blank.lastDirectory isEqual:@"/expected/project"],
+            @"blank launch must start a new headless session without --resume");
+        Check(blank.releases == 0 && UserFrames(blank).count == 0,
+            @"blank launch must not release an existing session or send a prompt");
+
         PTLaunchProbe *newConversation = [PTLaunchProbe new];
-        Check([newConversation respondsToSelector:@selector(startNewSession:prompt:)], @"new conversations need a launch path distinct from resume");
+        Check([newConversation respondsToSelector:@selector(startNewSession:prompt:)],
+            @"new conversations need a launch path distinct from resume");
         __block NSString *newStatus = nil;
         newConversation.statusChanged = ^(NSString *status) { newStatus = status; };
         [newConversation startNewSession:session prompt:@"first line\nsecond 'quoted' line"];
         PTRunLoopUntil(3, ^BOOL { return newStatus != nil; });
-        Check(newConversation.running, @"a new conversation must bind to its new session ID");
-        Check([newConversation.shellCommands isEqual:@[@"cd -- '/expected/project'",
-            @"Claude --yolo --session-id 'target-session' -- 'first line\nsecond '\\''quoted'\\'' line'"]],
-            @"new conversation must send cd separately and retain the whole first prompt as one argument");
-        for (NSArray *ttys in @[@[], @[@"/dev/ttys-idle"], @[@"/dev/ttys-existing"]]) {
-            PTLaunchProbe *bridge = [PTLaunchProbe new];
-            bridge.existingTTYs = ttys;
-            bridge.existingSessionID = @"other-session";
-            NSString *status = Connect(bridge, session, YES);
-            Check(bridge.running && [bridge.sessionID isEqual:session.sessionID],
-                [NSString stringWithFormat:@"missing session must launch and bind automatically (%@): %@", ttys, status]);
-            Check(bridge.launches == 1, @"repeated sync must use the same launch");
-            Check([[bridge valueForKey:@"terminalTTY"] isEqual:@"/dev/ttys-new"], @"must bind the newly launched tab");
-            Check([bridge.shellCommands isEqual:@[@"cd -- '/expected/project'", @"Claude --yolo --resume 'target-session'"]],
-                @"submit cd to the shell first, then submit Claude separately in that shell");
-        }
-        for (NSString *liveID in @[@"target-session", @""]) {
-            PTLaunchProbe *bridge = [PTLaunchProbe new];
-            bridge.existingTTYs = @[@"/dev/ttys-existing"];
-            bridge.existingSessionID = liveID;
-            Connect(bridge, session, NO);
-            Check(bridge.running && bridge.launches == 0, @"existing exact and legacy connections must stay unchanged");
-        }
+        Check(newConversation.running && [newConversation.sessionID isEqual:@"target-session"],
+            @"a new conversation must bind to its new session ID");
+        Check(!newConversation.lastResume && newConversation.releases == 0,
+            @"new conversation must launch with --session-id rather than --resume");
+        NSArray<NSDictionary *> *submitted = UserFrames(newConversation);
+        Check(submitted.count == 1 &&
+              [submitted.firstObject[@"session_id"] isEqual:@"target-session"] &&
+              [submitted.firstObject[@"message"][@"content"] isEqual:@"first line\nsecond 'quoted' line"],
+            @"new conversation must emit one stream-json user frame retaining the exact multiline quoted prompt");
+
+        PTLaunchProbe *bridge = [PTLaunchProbe new];
+        bridge.deferInitialize = YES;
+        NSString *status = Connect(bridge, session, YES);
+        Check(bridge.running && [bridge.sessionID isEqual:session.sessionID],
+            [NSString stringWithFormat:@"resume must bind cleanly: %@", status]);
+        Check(bridge.launches == 1 && bridge.lastResume && bridge.releases == 1,
+            @"repeated connect while connecting must deduplicate into one resume launch");
+        [bridge connectToSession:session];
+        PTRunLoopUntil(0.1, ^BOOL { return NO; });
+        Check(bridge.launches == 1, @"connecting again while already running on the same session must be a no-op");
+
         PTLaunchProbe *denied = [PTLaunchProbe new];
-        denied.scanError = @"Terminal automation error";
-        Check([Connect(denied, session, NO) isEqual:denied.scanError] && denied.launches == 0,
-            @"an actual discovery error must be reported, not mistaken for an absent session");
+        denied.releaseError = @"Session takeover failed";
+        Check([Connect(denied, session, NO) isEqual:denied.releaseError] && denied.launches == 0 && !denied.running,
+            @"a session takeover failure must be reported without launching");
+
         PTLaunchProbe *failed = [PTLaunchProbe new];
-        failed.launchError = @"Terminal launch error";
+        failed.launchError = @"Headless launch error";
         Check([Connect(failed, session, NO) isEqual:failed.launchError] && !failed.running,
             @"launch errors must reach the UI");
+
+        PTLaunchProbe *initError = [PTLaunchProbe new];
+        initError.initializeError = @"Initialize rejected";
+        Check([Connect(initError, session, NO) isEqual:initError.initializeError] && !initError.running,
+            @"initialize control errors must abort running state and report the failure");
+
         PTLaunchProbe *exited = [PTLaunchProbe new];
-        exited.exited = YES;
+        exited.stderrFailure = @"claude: startup failed";
         Check([Connect(exited, session, NO) containsString:@"startup failed"] && !exited.running,
-            @"a returned shell must report startup output and end connecting");
+            @"an exited process must report stderr output and end connecting");
+
         NSLog(@"PTClaudeLaunchTests passed");
     }
     return 0;

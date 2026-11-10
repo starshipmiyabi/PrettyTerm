@@ -5,6 +5,7 @@
     scope.PrettyTermRenderer = api;
     scope.setClaudeSession = api.setClaudeSession;
     scope.appendClaudeMessages = api.appendClaudeMessages;
+    scope.updateClaudeMessages = api.updateClaudeMessages;
     scope.__ptSessionMatches = api.sessionMatches;
     scope.setPrettyTermLanguage = api.setPrettyTermLanguage;
     scope.setClaudeWaiting = api.setClaudeWaiting;
@@ -31,6 +32,10 @@
   };
   const editStats = new WeakMap();
   const virtualBodies = new Map();
+  const virtualCandidates = new Set();
+  const pinnedVirtualBodies = new Set();
+  const messageByKey = new Map();
+  let virtualObserver = null;
   let liveRendering = false;
   let nextBodyID = 0;
   let virtualUpdateTimer = null;
@@ -41,47 +46,177 @@
     finally { liveRendering = false; }
   }
 
-  // Keep source text for every message; only the expensive rendered body has a
-  // viewport lifetime. The lightweight shell also preserves scroll reachability.
-  function contentBody(className, text, render, attributes = '') {
-    if (!liveRendering) return `<div class="${className}"${attributes}>${render()}</div>`;
+  function virtualBlock(className, render, height, attributes = '', extra = {}) {
     const id = String(++nextBodyID);
-    const columns = Math.max(1, Math.floor(((scope.innerWidth || 720) - 100) / 8));
-    const lines = String(text).split('\n').reduce((total, line) => total + Math.max(1, Math.ceil(line.length / columns)), 0);
-    const height = Math.max(24, lines * 24);
-    virtualBodies.set(id, { render, mounted: false, height });
+    virtualBodies.set(id, Object.assign({ id, render, mounted: false, height, node: null,
+      visible: false, ui: null }, extra));
     return `<div class="${className}"${attributes} data-virtual-body="${id}" style="min-height:${height}px;display:flow-root;box-sizing:border-box"></div>`;
   }
 
-  function updateVirtualBodies(mathJax) {
-    const root = rootElement();
-    if (!root) return [];
-    const added = [];
-    const margin = scope.innerHeight;
-    const selection = scope.getSelection();
-    const nodes = Array.from(root.querySelectorAll('[data-virtual-body]'));
-    // Read geometry before changing it, so removals never alternate reads and
-    // writes and force a layout for each historical message.
-    const changes = nodes.map(node => {
-      const record = virtualBodies.get(node.dataset.virtualBody);
-      const rect = node.getBoundingClientRect();
-      const closed = Boolean(node.closest('details:not([open])'));
-      const selected = record.mounted && selection && !selection.isCollapsed && selection.containsNode(node, true);
-      return { node, record, rect, wanted: selected || (!closed && rect.bottom >= -margin && rect.top <= scope.innerHeight + margin) };
+  function contentBody(className, text, render, attributes = '') {
+    if (!liveRendering) return `<div class="${className}"${attributes}>${render()}</div>`;
+    const columns = Math.max(1, Math.floor(((scope.innerWidth || 720) - 100) / 8));
+    const lines = String(text).split('\n').reduce((total, line) => total + Math.max(1, Math.ceil(line.length / columns)), 0);
+    return virtualBlock(className, render, Math.max(24, lines * 24), attributes);
+  }
+
+  function ownedElements(node, selector) {
+    return Array.from(node.querySelectorAll(selector)).filter(item => item.closest('[data-virtual-body]') === node);
+  }
+
+  function virtualChildren(node) {
+    return Array.from(node.querySelectorAll('[data-virtual-body]')).filter(child =>
+      child.parentElement.closest('[data-virtual-body]') === node);
+  }
+
+  function rememberVirtualChildren(node) {
+    return virtualChildren(node).map(child => {
+      const record = virtualBodies.get(child.dataset.virtualBody);
+      return { ui: record.mounted ? captureVirtualUI(child) : record.ui,
+        height: record.mounted ? child.getBoundingClientRect().height : record.height,
+        children: record.mounted ? rememberVirtualChildren(child) : record.children };
     });
-    for (const { node, record, rect, wanted } of changes) {
-      if (wanted === record.mounted) continue;
-      if (wanted) {
-        node.style.minHeight = '';
-        node.innerHTML = record.render();
-        record.mounted = true;
-        added.push(node);
-      } else {
-        if (rect.height) record.height = rect.height;
-        if (mathJax) mathJax.typesetClear([node]);
-        node.replaceChildren();
-        node.style.minHeight = `${record.height}px`;
-        record.mounted = false;
+  }
+
+  function restoreVirtualChildren(node, children) {
+    if (!children) return;
+    virtualChildren(node).forEach((child, index) => {
+      const saved = children[index];
+      if (!saved) return;
+      const record = virtualBodies.get(child.dataset.virtualBody);
+      record.ui = saved.ui;
+      record.children = saved.children;
+      if (saved.height > 0) { record.height = saved.height; child.style.minHeight = `${saved.height}px`; }
+    });
+  }
+
+  // Save interaction state as values, without retaining detached DOM trees.
+  function captureVirtualUI(node) {
+    return {
+      details: ownedElements(node, 'details').map(item => item.open),
+      images: ownedElements(node, '.message-image').map(item => item.getAttribute('aria-expanded')),
+      diagrams: ownedElements(node, '.diagram-block').map(item => ({
+        source: item.querySelector('pre code').textContent.trim(),
+        state: item.dataset.state,
+        view: item.dataset.view,
+        error: item.querySelector('.diagram-error').textContent,
+        zoom: Number(item.dataset.zoom) || 1,
+        scrollLeft: (diagramScrollPositions.get(item) || {}).left ?? item.querySelector('.diagram-canvas').scrollLeft,
+        scrollTop: (diagramScrollPositions.get(item) || {}).top ?? item.querySelector('.diagram-canvas').scrollTop
+      })),
+      inputs: ownedElements(node, 'input, textarea').map(item => ({ value: item.value, checked: item.checked })),
+      options: ownedElements(node, '.question-option').map(item => item.classList.contains('selected')),
+      submitted: ownedElements(node, '.question-card').map(item => item.classList.contains('submitted'))
+    };
+  }
+
+  function restoreVirtualUI(node, ui) {
+    if (!ui) return;
+    ownedElements(node, 'details').forEach((item, index) => { if (index < ui.details.length) item.open = ui.details[index]; });
+    ownedElements(node, '.message-image').forEach((item, index) => { if (index < ui.images.length) item.setAttribute('aria-expanded', ui.images[index]); });
+    ownedElements(node, '.diagram-block').forEach((item, index) => {
+      const saved = (ui.diagrams || [])[index];
+      if (!saved || item.querySelector('pre code').textContent.trim() !== saved.source) return;
+      item.dataset.zoom = saved.zoom || 1;
+      diagramScrollPositions.set(item, { left: saved.scrollLeft || 0, top: saved.scrollTop || 0 });
+      if (saved.view === 'source') item.dataset.view = 'source';
+      if (saved.state === 'ready' || saved.state === 'rendering') {
+        // Retain the user's render request even when its cached SVG was evicted.
+        item.dataset.state = 'rendering';
+      } else if (saved.state === 'error') {
+        item.dataset.state = 'error';
+        item.querySelector('.diagram-error').textContent = saved.error;
+      }
+    });
+    ownedElements(node, 'input, textarea').forEach((item, index) => {
+      if (index < ui.inputs.length) { item.value = ui.inputs[index].value; item.checked = ui.inputs[index].checked; }
+    });
+    ownedElements(node, '.question-option').forEach((item, index) => {
+      if (index < ui.options.length) { item.classList.toggle('selected', ui.options[index]); item.setAttribute('aria-pressed', String(ui.options[index])); }
+    });
+    ownedElements(node, '.question-card').forEach((item, index) => {
+      if (!ui.submitted[index] || item.classList.contains('answered')) return;
+      item.classList.add('submitted');
+      const button = item.querySelector('.question-submit');
+      if (button) { button.disabled = true; button.textContent = t('askUserSent'); }
+    });
+  }
+
+  function releaseVirtualContent(node, mathJax, includeRoot = false) {
+    if (mathJax && mathJax.typesetClear) mathJax.typesetClear([node]);
+    const nodes = Array.from(node.querySelectorAll('[data-virtual-body]'));
+    if (includeRoot && node.dataset && node.dataset.virtualBody) nodes.push(node);
+    nodes.forEach(child => {
+      const record = virtualBodies.get(child.dataset.virtualBody);
+      if (!record) return;
+      if (virtualObserver) virtualObserver.unobserve(child);
+      virtualCandidates.delete(record);
+      pinnedVirtualBodies.delete(record);
+      virtualBodies.delete(record.id);
+    });
+  }
+
+  function resetVirtualContent(root, mathJax) {
+    if (root) releaseVirtualContent(root, mathJax);
+    if (virtualObserver) virtualObserver.disconnect();
+    virtualBodies.clear();
+    virtualCandidates.clear();
+    pinnedVirtualBodies.clear();
+  }
+
+  function registerVirtualContent(root) {
+    if (!root) return;
+    const nodes = Array.from(root.querySelectorAll('[data-virtual-body]'));
+    if (root.dataset && root.dataset.virtualBody) nodes.unshift(root);
+    for (const node of nodes) {
+      const record = virtualBodies.get(node.dataset.virtualBody);
+      if (!record || record.node === node) continue;
+      record.node = node;
+      virtualCandidates.add(record);
+      if (virtualObserver) virtualObserver.observe(node);
+    }
+  }
+
+  function updateVirtualBodies(mathJax) {
+    const added = [];
+    const selection = scope.getSelection();
+    // Newly inserted shells are measured once. Subsequent scroll work is driven
+    // by intersection changes, rather than scanning the entire transcript.
+    while (virtualCandidates.size) {
+      const candidates = Array.from(virtualCandidates);
+      virtualCandidates.clear();
+      const changes = candidates.filter(record => record.node && record.node.isConnected).map(record => {
+        const node = record.node;
+        const rect = node.getBoundingClientRect();
+        const closed = Boolean(node.closest('details:not([open])'));
+        const selected = record.mounted && selection && !selection.isCollapsed && selection.containsNode(node, true);
+        const focused = record.mounted && node.contains(scope.document.activeElement);
+        const visible = !closed && rect.bottom >= -scope.innerHeight && rect.top <= scope.innerHeight * 2;
+        record.visible = visible;
+        return { record, rect, wanted: selected || focused || visible, pinned: selected || focused };
+      });
+      for (const { record, rect, wanted, pinned } of changes) {
+        const node = record.node;
+        if (!node.isConnected || !virtualBodies.has(record.id)) continue;
+        if (pinned) pinnedVirtualBodies.add(record); else pinnedVirtualBodies.delete(record);
+        if (wanted === record.mounted) continue;
+        if (wanted) {
+          node.style.minHeight = '';
+          node.innerHTML = record.render(record);
+          record.mounted = true;
+          restoreVirtualUI(node, record.ui);
+          restoreVirtualChildren(node, record.children);
+          registerVirtualContent(node);
+          added.push(node);
+        } else {
+          record.ui = captureVirtualUI(node);
+          record.children = rememberVirtualChildren(node);
+          if (rect.height) record.height = rect.height;
+          releaseVirtualContent(node, mathJax);
+          node.replaceChildren();
+          node.style.minHeight = `${record.height}px`;
+          record.mounted = false;
+        }
       }
     }
     return added;
@@ -89,24 +224,55 @@
 
   function scheduleVirtualContent() {
     if (virtualUpdateTimer !== null) return;
-    virtualUpdateTimer = scope.setTimeout(() => {
+    virtualUpdateTimer = scope.requestAnimationFrame(() => {
       virtualUpdateTimer = null;
-      typeset([]);
-    }, 0);
+      if (virtualCandidates.size) typeset([]);
+    });
   }
 
   function installVirtualContent() {
     if (!scope || !scope.document || !scope.addEventListener) return;
-    scope.addEventListener('scroll', scheduleVirtualContent, { passive: true });
-    scope.addEventListener('resize', scheduleVirtualContent);
-    scope.document.addEventListener('toggle', scheduleVirtualContent, true);
-    scope.document.addEventListener('selectionchange', scheduleVirtualContent);
+    const observe = () => {
+      if (virtualObserver) virtualObserver.disconnect();
+      virtualObserver = new scope.IntersectionObserver(entries => {
+        for (const entry of entries) {
+          const record = virtualBodies.get(entry.target.dataset.virtualBody);
+          if (record) virtualCandidates.add(record);
+        }
+        scheduleVirtualContent();
+      }, { rootMargin: `${scope.innerHeight}px 0px` });
+      for (const record of virtualBodies.values()) {
+        if (record.node && record.node.isConnected) {
+          virtualObserver.observe(record.node);
+          virtualCandidates.add(record);
+        }
+      }
+    };
+    observe();
+    scope.addEventListener('resize', () => { observe(); scheduleVirtualContent(); });
+    scope.document.addEventListener('toggle', event => {
+      registerVirtualContent(event.target);
+      event.target.querySelectorAll('[data-virtual-body]').forEach(node => {
+        const record = virtualBodies.get(node.dataset.virtualBody);
+        if (record) virtualCandidates.add(record);
+      });
+      scheduleVirtualContent();
+    }, true);
+    const releasePinned = () => {
+      for (const record of pinnedVirtualBodies) virtualCandidates.add(record);
+      scheduleVirtualContent();
+    };
+    scope.document.addEventListener('selectionchange', releasePinned);
+    scope.document.addEventListener('focusout', releasePinned);
   }
 
   const strings = {
     'zh-Hans': {
       quote: '引用选中内容', expandInput: '展开输入', lines: '行', codeChange: '代码改动',
       copyOutput: '复制', copyCode: '复制代码', copied: '已复制', code: '代码',
+      diagramShowSource: '源码', diagramShowDiagram: '图表', diagramError: '图表无法渲染，已显示源码：',
+      diagramRender: '渲染', diagramRendering: '渲染中…',
+      diagramZoom: '图表缩放', diagramZoomIn: '放大', diagramZoomOut: '缩小', diagramZoomReset: '重置缩放',
       jumpToBottom: '回到底部',
       attachedImage: '图片 {count} · 点击展开或收起',
       showMoreFiles: '再显示 {count} 个文件', editedFiles: '已编辑 {count} 个文件',
@@ -122,6 +288,9 @@
     en: {
       quote: 'Quote selection', expandInput: 'Expand input', lines: 'lines', codeChange: 'Code change',
       copyOutput: 'Copy', copyCode: 'Copy code', copied: 'Copied', code: 'Code',
+      diagramShowSource: 'Source', diagramShowDiagram: 'Diagram', diagramError: 'Diagram could not be rendered; showing source: ',
+      diagramRender: 'Render', diagramRendering: 'Rendering…',
+      diagramZoom: 'Diagram zoom', diagramZoomIn: 'Zoom in', diagramZoomOut: 'Zoom out', diagramZoomReset: 'Reset zoom',
       jumpToBottom: 'Jump to bottom',
       attachedImage: 'Image {count} · Click to expand or collapse',
       showMoreFiles: 'Show {count} more files', editedFiles: 'Edited {count} files',
@@ -342,7 +511,7 @@
     typescript: 'TypeScript', ts: 'TypeScript', tsx: 'TSX', json: 'JSON',
     objc: 'Objective-C', 'objective-c': 'Objective-C', objectivec: 'Objective-C',
     c: 'C', cpp: 'C++', 'c++': 'C++', swift: 'Swift', go: 'Go', rust: 'Rust', rs: 'Rust',
-    java: 'Java', kotlin: 'Kotlin', html: 'HTML', css: 'CSS', yaml: 'YAML', yml: 'YAML',
+    java: 'Java', kotlin: 'Kotlin', html: 'HTML', css: 'CSS', yaml: 'YAML', yml: 'YAML', mermaid: 'Mermaid',
     sql: 'SQL', latex: 'LaTeX', tex: 'LaTeX', markdown: 'Markdown', md: 'Markdown', diff: 'Diff',
     patch: 'Diff', toml: 'TOML', ini: 'INI', env: '.env', dockerfile: 'Dockerfile',
     makefile: 'Makefile', fish: 'Fish', ruby: 'Ruby', rb: 'Ruby', r: 'R', julia: 'Julia',
@@ -617,11 +786,270 @@
     return dot > 0 ? name.slice(dot + 1) : '';
   }
 
-  function renderCodeBlock(language, lines) {
+  // `closed` is false for a fence that never saw its closing line, i.e. text
+  // still being streamed. Those stay plain code so half-written diagrams are
+  // never handed to the Mermaid parser.
+  function renderCodeBlock(language, lines, closed = true) {
     const name = String(language || '').trim().split(/\s+/)[0];
     const label = CODE_LANGUAGE_NAMES[name.toLowerCase()] || name || t('code');
     const languageClass = name ? ` class="language-${escapeHTML(name)}"` : '';
-    return `<div class="code-block"><div class="code-block-header"><span class="code-block-language"><span class="code-block-icon" aria-hidden="true">&lt;/&gt;</span>${escapeHTML(label)}</span><button type="button" class="code-copy-button" title="${escapeHTML(t('copyCode'))}" aria-label="${escapeHTML(t('copyCode'))}"><span class="code-copy-icon" aria-hidden="true">⧉</span><span class="code-copy-done">✓ ${escapeHTML(t('copied'))}</span></button></div><pre><code${languageClass}>${highlightCode(name, lines.join('\n'))}</code></pre></div>`;
+    const diagram = closed && name.toLowerCase() === 'mermaid';
+    // Diagrams are compiled by hand: a block starts "idle" showing its source,
+    // the Render button moves it to "rendering", then "ready" or "error". The
+    // source <pre> stays in the DOM (copy reads it, and it is the fallback
+    // view); CSS swaps it for the rendered canvas once data-state is "ready".
+    const toggle = diagram
+      ? `<button type="button" class="diagram-render"><span class="diagram-render-idle">${escapeHTML(t('diagramRender'))}</span><span class="diagram-render-busy">${escapeHTML(t('diagramRendering'))}</span></button>` +
+        `<button type="button" class="diagram-toggle"><span class="diagram-toggle-source">${escapeHTML(t('diagramShowSource'))}</span><span class="diagram-toggle-diagram">${escapeHTML(t('diagramShowDiagram'))}</span></button>`
+      : '';
+    const canvas = diagram
+      ? '<div class="diagram-canvas" role="img" aria-label="Mermaid"></div><div class="diagram-error" role="status"></div>'
+      : '';
+    const zoom = diagram
+      ? `<span class="diagram-zoom-controls" role="group" aria-label="${escapeHTML(t('diagramZoom'))}">` +
+        `<button type="button" class="diagram-zoom-button" data-diagram-zoom="out" title="${escapeHTML(t('diagramZoomOut'))}" aria-label="${escapeHTML(t('diagramZoomOut'))}">−</button>` +
+        `<button type="button" class="diagram-zoom-button diagram-zoom-reset" data-diagram-zoom="reset" title="${escapeHTML(t('diagramZoomReset'))}" aria-label="${escapeHTML(t('diagramZoomReset'))}">100%</button>` +
+        `<button type="button" class="diagram-zoom-button" data-diagram-zoom="in" title="${escapeHTML(t('diagramZoomIn'))}" aria-label="${escapeHTML(t('diagramZoomIn'))}">+</button></span>`
+      : '';
+    return `<div class="code-block${diagram ? ' diagram-block' : ''}"${diagram ? ' data-state="idle"' : ''}><div class="code-block-header"><span class="code-block-language"><span class="code-block-icon" aria-hidden="true">&lt;/&gt;</span>${escapeHTML(label)}</span>${toggle}${zoom}<button type="button" class="code-copy-button" title="${escapeHTML(t('copyCode'))}" aria-label="${escapeHTML(t('copyCode'))}"><span class="code-copy-icon" aria-hidden="true">⧉</span><span class="code-copy-done">✓ ${escapeHTML(t('copied'))}</span></button></div>${canvas}<pre><code${languageClass}>${highlightCode(name, lines.join('\n'))}</code></pre></div>`;
+  }
+
+  // Mermaid diagrams are compiled only when the user presses Render, so the
+  // library (~5 MB) and the SVGs cost nothing until asked for. Virtual
+  // scrolling discards off-screen DOM, so finished SVG strings are cached under
+  // a size budget; a remounted block whose source is cached comes back as a
+  // chart without another click (and without loading the library again). The
+  // saved interaction state retains the render request if the cache was evicted.
+  const DIAGRAM_CACHE_MAX_ENTRIES = 50;
+  const DIAGRAM_CACHE_MAX_CHARS = 8 * 1024 * 1024;
+
+  function createDiagramCache(maxEntries = DIAGRAM_CACHE_MAX_ENTRIES, maxChars = DIAGRAM_CACHE_MAX_CHARS) {
+    const entries = new Map();
+    let chars = 0;
+    return {
+      get(key) {
+        if (!entries.has(key)) return undefined;
+        const value = entries.get(key);
+        entries.delete(key);
+        entries.set(key, value);
+        return value;
+      },
+      set(key, value) {
+        if (value.length > maxChars) return;
+        if (entries.has(key)) { chars -= entries.get(key).length; entries.delete(key); }
+        entries.set(key, value);
+        chars += value.length;
+        for (const [oldest, text] of entries) {
+          if (entries.size <= maxEntries && chars <= maxChars) break;
+          entries.delete(oldest);
+          chars -= text.length;
+        }
+      },
+      get size() { return entries.size; },
+      get chars() { return chars; }
+    };
+  }
+
+  const diagramCache = createDiagramCache();
+  let diagramQueue = Promise.resolve();
+  let mermaidLoad = null;
+  let mermaidThemeSignature = '';
+  let nextDiagramID = 0;
+  const diagramTasks = new WeakMap();
+  const diagramScrollPositions = new WeakMap();
+
+  function refreshDiagramViewport(block) {
+    const canvas = block.querySelector('.diagram-canvas');
+    const svg = canvas && canvas.querySelector && canvas.querySelector('svg');
+    if (!svg || !svg.viewBox || !canvas.clientWidth) return;
+    const box = svg.viewBox.baseVal;
+    if (!(box.width > 0 && box.height > 0)) return;
+    const style = scope.getComputedStyle(canvas);
+    const horizontalPadding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const verticalPadding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    const width = Math.min(box.width, canvas.clientWidth - horizontalPadding);
+    const height = width * box.height / box.width;
+    const zoom = Number(block.dataset.zoom) || 1;
+    // Keep the fitted viewport's height while the SVG grows inside it.
+    canvas.style.height = `${height + verticalPadding}px`;
+    svg.style.maxWidth = 'none';
+    svg.style.width = `${width * zoom}px`;
+    svg.style.height = `${height * zoom}px`;
+    block.querySelector('.diagram-zoom-reset').textContent = `${Math.round(zoom * 100)}%`;
+    const saved = diagramScrollPositions.get(block);
+    if (saved) {
+      canvas.scrollLeft = saved.left;
+      canvas.scrollTop = saved.top;
+      diagramScrollPositions.delete(block);
+    }
+  }
+
+  function zoomDiagram(block, zoom, point) {
+    if (!Number.isFinite(zoom) || zoom <= 0) return;
+    const canvas = block.querySelector('.diagram-canvas');
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const viewport = canvas.getBoundingClientRect();
+    const previous = svg.getBoundingClientRect();
+    const x = point ? point.clientX : viewport.left + canvas.clientWidth / 2;
+    const y = point ? point.clientY : viewport.top + canvas.clientHeight / 2;
+    const oldZoom = Number(block.dataset.zoom) || 1;
+    const diagramX = (x - previous.left) / oldZoom;
+    const diagramY = (y - previous.top) / oldZoom;
+    block.dataset.zoom = zoom;
+    refreshDiagramViewport(block);
+    const next = svg.getBoundingClientRect();
+    canvas.scrollLeft += next.left + diagramX * zoom - x;
+    canvas.scrollTop += next.top + diagramY * zoom - y;
+  }
+
+  function loadMermaid() {
+    if (scope.mermaid) return Promise.resolve(scope.mermaid);
+    if (mermaidLoad) return mermaidLoad;
+    mermaidLoad = new Promise((resolve, reject) => {
+      const script = scope.document.createElement('script');
+      script.src = 'mermaid.min.js';
+      script.onload = () => scope.mermaid ? resolve(scope.mermaid) : reject(new Error('Mermaid did not initialise'));
+      script.onerror = () => { script.remove(); reject(new Error('Mermaid failed to load')); };
+      scope.document.head.appendChild(script);
+    });
+    // A failed load is retried by the next diagram instead of sticking forever.
+    mermaidLoad.catch(() => { mermaidLoad = null; });
+    return mermaidLoad;
+  }
+
+  // Colours come from the page's CSS variables so diagrams follow the warm
+  // palette and its dark variant, and a system appearance change is picked up
+  // by the next render.
+  function diagramConfig() {
+    const root = scope.document.documentElement;
+    const style = typeof scope.getComputedStyle === 'function' ? scope.getComputedStyle(root) : null;
+    const read = (name, fallback) => (style && style.getPropertyValue(name).trim()) || fallback;
+    const body = scope.document.body;
+    const fontFamily = (style && body && scope.getComputedStyle(body).fontFamily) ||
+      '-apple-system, "PingFang SC", sans-serif';
+    const dark = Boolean(scope.matchMedia && scope.matchMedia('(prefers-color-scheme: dark)').matches);
+    return {
+      startOnLoad: false,
+      securityLevel: 'strict',
+      suppressErrorRendering: true,
+      theme: 'base',
+      fontFamily,
+      themeVariables: {
+        darkMode: dark,
+        background: read('--paper', '#fffaf1'),
+        primaryColor: read('--blue-soft', '#f4dfc5'),
+        primaryTextColor: read('--ink', '#30271f'),
+        primaryBorderColor: read('--blue', '#a34717'),
+        lineColor: read('--muted', '#7f6e5e'),
+        secondaryColor: read('--soft', '#efe2cf'),
+        tertiaryColor: read('--paper', '#fffaf1'),
+        noteBkgColor: read('--amber-soft', '#f7e3c8'),
+        noteTextColor: read('--ink', '#30271f'),
+        noteBorderColor: read('--amber', '#9f4c18')
+      }
+    };
+  }
+
+  function diagramKey(config, source) {
+    return `${JSON.stringify(config.themeVariables)}${config.fontFamily}\n${source}`;
+  }
+
+  // Renders are serialised: Mermaid keeps global state while it measures text.
+  function renderDiagramSVG(source) {
+    const task = diagramQueue.then(async () => {
+      const config = diagramConfig();
+      const key = diagramKey(config, source);
+      const cached = diagramCache.get(key);
+      if (cached !== undefined) return cached;
+      const mermaid = await loadMermaid();
+      const signature = JSON.stringify(config.themeVariables) + config.fontFamily;
+      if (signature !== mermaidThemeSignature) {
+        mermaid.initialize(config);
+        mermaidThemeSignature = signature;
+      }
+      const id = `pt-diagram-${++nextDiagramID}`;
+      try {
+        const { svg } = await mermaid.render(id, source);
+        diagramCache.set(key, svg);
+        return svg;
+      } finally {
+        // Mermaid parks scratch elements in <body> while measuring; a failed
+        // parse can leave them behind.
+        for (const prefix of ['d', 'i']) {
+          const scratch = scope.document.getElementById(prefix + id);
+          if (scratch) scratch.remove();
+        }
+      }
+    });
+    diagramQueue = task.catch(() => {});
+    return task;
+  }
+
+  // Apply a completed diagram against the current viewport, rather than the
+  // viewport from when compilation started. Compilation does not own the
+  // transcript update queue or delay virtual content being released.
+  function applyDiagramUpdate(block, update) {
+    if (!block.isConnected) return false;
+    const anchor = rootElement() && (captureViewportAnchor() || state.viewportAnchor);
+    update();
+    if (block.dataset.state === 'ready') refreshDiagramViewport(block);
+    if (anchor) restoreViewportAnchor();
+    return true;
+  }
+
+  // Handles the diagram blocks inside `targets` on their own compilation queue.
+  //  - "rendering" blocks (Render was pressed) are compiled;
+  //  - "idle" blocks are only restored, and only if their SVG is still cached;
+  //  - blocks inside a streaming message are skipped (the message is rebuilt on
+  //    every update) and picked up once it settles.
+  async function renderDiagrams(targets) {
+    if (!scope.document || !scope.document.documentElement) return false;
+    const actionable = '.diagram-block[data-state="idle"], .diagram-block[data-state="rendering"]';
+    const blocks = new Set();
+    for (const target of targets || []) {
+      if (!target || typeof target.querySelectorAll !== 'function') continue;
+      if (typeof target.closest === 'function' && target.closest('.streaming-block')) continue;
+      if (typeof target.matches === 'function' && target.matches(actionable)) blocks.add(target);
+      target.querySelectorAll(actionable).forEach(block => {
+        if (!block.closest('.streaming-block')) blocks.add(block);
+      });
+    }
+    const results = await Promise.all(Array.from(blocks, block => {
+      if (!block.isConnected) return false;
+      const code = block.querySelector('pre code');
+      const source = code ? code.textContent.trim() : '';
+      if (!source) return false;
+      if (block.dataset.state === 'idle') {
+        const cached = diagramCache.get(diagramKey(diagramConfig(), source));
+        if (cached === undefined) return false;
+        return applyDiagramUpdate(block, () => {
+          block.querySelector('.diagram-canvas').innerHTML = cached;
+          block.dataset.state = 'ready';
+        });
+      }
+      if (diagramTasks.has(block)) return diagramTasks.get(block);
+      const task = (async () => {
+        try {
+          const svg = await renderDiagramSVG(source);
+          return applyDiagramUpdate(block, () => {
+            block.querySelector('.diagram-canvas').innerHTML = svg;
+            block.dataset.state = 'ready';
+          });
+        } catch (error) {
+          const reason = String(error && error.message || error).split('\n')[0].slice(0, 200);
+          return applyDiagramUpdate(block, () => {
+            block.querySelector('.diagram-error').textContent = t('diagramError') + reason;
+            block.dataset.state = 'error';
+          });
+        } finally {
+          diagramTasks.delete(block);
+        }
+      })();
+      diagramTasks.set(block, task);
+      return task;
+    }));
+    return results.some(Boolean);
   }
 
   function renderMarkdown(value) {
@@ -749,7 +1177,7 @@
     }
 
     closeList();
-    if (fence) html.push(renderCodeBlock(fence.language, fence.lines));
+    if (fence) html.push(renderCodeBlock(fence.language, fence.lines, false));
     if (math) html.push(`<p>${inlineMarkup(`$$\n${math.join('\n')}`)}</p>`);
     return html.join('');
   }
@@ -836,6 +1264,9 @@
         : '';
     } else if (kind === 'notebook') {
       body = renderNotebook(text) || renderSourceLines('json', text);
+    } else if (['mmd', 'mermaid'].includes(fileLanguage(title))) {
+      // A Mermaid file is one diagram block, compiled by hand like those in chat.
+      body = `<div class="file-markdown-body">${renderCodeBlock('mermaid', text.replace(/\r\n?/g, '\n').split('\n'))}</div>`;
     } else {
       body = renderSourceLines(fileLanguage(title), text);
     }
@@ -844,7 +1275,7 @@
     if (!root) return html;
     await typeset([root], mathJax => {
       if (mathJax && typeof mathJax.typesetClear === 'function') mathJax.typesetClear([root]);
-      virtualBodies.clear();
+      resetVirtualContent(root, mathJax);
       state.viewportAnchor = null;
       root.innerHTML = html;
       scope.document.body.classList.add('file-preview-mode');
@@ -1084,9 +1515,14 @@
     return Array.from(files.values()).sort((a, b) => a.path.localeCompare(b.path));
   }
 
-  function renderTurnEditSummary(messages, session, turnIndex) {
+  function renderTurnEditSummary(messages, session, turnIndex, mounted = false) {
     const files = changedFileSummary(messages);
     if (!files.length) return '';
+    if (liveRendering && !mounted) {
+      return virtualBlock('edit-summary-slot', record =>
+        renderTurnEditSummary(record.summaryMessages, state.session, record.turnIndex, true),
+        100 + Math.min(files.length, 3) * 32, ' data-edit-summary', { summaryMessages: messages, turnIndex });
+    }
     const added = files.reduce((sum, file) => sum + file.added, 0);
     const removed = files.reduce((sum, file) => sum + file.removed, 0);
     const sessionId = String(session && (session.sessionId || session.id) || '');
@@ -1121,16 +1557,23 @@
     if (!root) return;
     dirtyTurns.forEach((index, turn) => {
       const existing = turn.querySelector(':scope > [data-edit-summary]');
-      const html = renderTurnEditSummary(state.renderedTurns[index] || [], session, index);
+      const html = renderLive(() => renderTurnEditSummary(state.renderedTurns[index] || [], session, index));
       if (!html) {
-        if (existing) existing.remove();
+        if (existing) { releaseVirtualContent(existing, scope.MathJax, true); existing.remove(); }
         return;
       }
       const template = scope.document.createElement('template');
       template.innerHTML = html;
       const replacement = template.content.firstElementChild;
-      if (existing) existing.replaceWith(replacement);
+      const previous = existing && virtualBodies.get(existing.dataset.virtualBody);
+      const record = virtualBodies.get(replacement.dataset.virtualBody);
+      if (previous) {
+        record.ui = previous.mounted ? captureVirtualUI(existing) : previous.ui;
+        record.children = previous.mounted ? rememberVirtualChildren(existing) : previous.children;
+      }
+      if (existing) { releaseVirtualContent(existing, scope.MathJax, true); existing.replaceWith(replacement); }
       else turn.appendChild(replacement);
+      registerVirtualContent(replacement);
     });
   }
 
@@ -1178,8 +1621,10 @@
       const bridge = scope.webkit && scope.webkit.messageHandlers &&
         scope.webkit.messageHandlers.copyAssistantOutput;
       if (!bridge || typeof bridge.postMessage !== 'function') return;
+      const slot = button.closest('[data-virtual-body]');
+      const record = slot && virtualBodies.get(slot.dataset.virtualBody);
       bridge.postMessage({
-        text: button.dataset.copyText || '',
+        text: eventText(messageByKey.get(button.dataset.copyKey) || (record && record.message) || {}),
         sessionId: String(state.session && (state.session.sessionId || state.session.id) || '')
       });
     });
@@ -1224,6 +1669,81 @@
     });
   }
 
+  // Render compiles one diagram on demand; the toggle flips a rendered diagram
+  // between the chart and its Mermaid source.
+  function installDiagramToggleBridge() {
+    if (!scope || !scope.document) return;
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      if (!target || typeof target.closest !== 'function') return;
+      const renderButton = target.closest('.diagram-render');
+      const toggleButton = renderButton ? null : target.closest('.diagram-toggle');
+      const block = (renderButton || toggleButton || target).closest('.diagram-block');
+      if (!block || !(renderButton || toggleButton)) return;
+      if (renderButton) {
+        const state = block.dataset.state;
+        // A streaming message is rebuilt on every update, so wait until it settles.
+        if ((state !== 'idle' && state !== 'error') || block.closest('.streaming-block')) return;
+        block.dataset.state = 'rendering';
+        renderDiagrams([block]).catch(error => scope.console.error(error));
+      } else if (block.dataset.view === 'source') {
+        delete block.dataset.view;
+        refreshDiagramViewport(block);
+      } else {
+        const canvas = block.querySelector('.diagram-canvas');
+        diagramScrollPositions.set(block, { left: canvas.scrollLeft, top: canvas.scrollTop });
+        block.dataset.view = 'source';
+      }
+    });
+  }
+
+  function installDiagramZoomBridge() {
+    if (!scope || !scope.document) return;
+    const diagramAt = target => {
+      const element = elementForNode(target);
+      const canvas = element && element.closest('.diagram-canvas');
+      const block = canvas && canvas.closest('.diagram-block');
+      return block && block.dataset.state === 'ready' && block.dataset.view !== 'source' ? block : null;
+    };
+    scope.document.addEventListener('click', event => {
+      const target = elementForNode(event.target);
+      const button = target && target.closest('.diagram-zoom-button');
+      if (!button) return;
+      const block = button.closest('.diagram-block');
+      const action = button.dataset.diagramZoom;
+      const zoom = Number(block.dataset.zoom) || 1;
+      zoomDiagram(block, action === 'reset' ? 1 : zoom * (action === 'in' ? 1.25 : 0.8));
+    });
+    let gesture = null;
+    scope.document.addEventListener('wheel', event => {
+      const block = event.ctrlKey && diagramAt(event.target);
+      if (!block) return;
+      event.preventDefault();
+      if (gesture) return;
+      const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scope.innerHeight : 1);
+      zoomDiagram(block, (Number(block.dataset.zoom) || 1) * Math.exp(-pixels / 300), event);
+    }, { passive: false });
+    scope.document.addEventListener('gesturestart', event => {
+      const block = diagramAt(event.target);
+      if (!block) return;
+      event.preventDefault();
+      gesture = { block, zoom: Number(block.dataset.zoom) || 1 };
+    }, { passive: false });
+    scope.document.addEventListener('gesturechange', event => {
+      if (!gesture) return;
+      event.preventDefault();
+      if (gesture.block.isConnected) zoomDiagram(gesture.block, gesture.zoom * event.scale, event);
+    }, { passive: false });
+    scope.document.addEventListener('gestureend', event => {
+      if (!gesture) return;
+      event.preventDefault();
+      gesture = null;
+    }, { passive: false });
+    scope.addEventListener('resize', () => {
+      scope.document.querySelectorAll('.diagram-block[data-state="ready"]').forEach(refreshDiagramViewport);
+    });
+  }
+
   function installMessageImageBridge() {
     if (!scope || !scope.document) return;
     scope.document.addEventListener('click', event => {
@@ -1237,8 +1757,21 @@
     });
   }
 
-  function renderEvent(message, session) {
+  function estimatedEventHeight(message) {
+    const kind = eventKind(message);
+    if (['tool', 'thinking', 'diff'].includes(kind)) return 58;
+    const text = eventText(message);
+    const columns = Math.max(1, Math.floor(((scope.innerWidth || 720) - 100) / 8));
+    const lines = text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / columns)), 0);
+    return Math.max(58, lines * 26 + (kind === 'user' ? 26 : 42)) + ((message.images || []).length ? 210 : 0);
+  }
+
+  function renderEvent(message, session, mounted = false) {
     message = message || {};
+    if (liveRendering && !mounted) {
+      return virtualBlock('event-slot', record => renderLive(() => renderEvent(record.message, state.session, true)),
+        estimatedEventHeight(message), ` data-message-key="${escapeHTML(message.messageKey || '')}"`, { message });
+    }
     const kind = eventKind(message);
     const text = eventText(message);
     const messageKey = escapeHTML(message.messageKey || '');
@@ -1275,13 +1808,17 @@
       return `<div class="turn-prompt"${anchorAttribute}>${longContent(renderMarkdown(text), text)}</div>`;
     }
     const model = cleanTranscriptText(message.model || (session && session.model) || 'Claude');
-    return `<section class="assistant-output"><div class="assistant-output-toolbar"><button type="button" class="assistant-copy-button" data-copy-text="${escapeHTML(text)}"><span aria-hidden="true">⧉</span>${escapeHTML(t('copyOutput'))}</button></div>${contentBody('assistant-text', text, () => renderMarkdown(text), ` data-model="${escapeHTML(model)}"${anchorAttribute}`)}</section>`;
+    return `<section class="assistant-output"><div class="assistant-output-toolbar"><button type="button" class="assistant-copy-button" data-copy-key="${escapeHTML(message.messageKey || '')}"><span aria-hidden="true">⧉</span>${escapeHTML(t('copyOutput'))}</button></div>${contentBody('assistant-text', text, () => renderMarkdown(text), ` data-model="${escapeHTML(model)}"${anchorAttribute}`)}</section>`;
   }
 
-  function renderToolGroup(messages, session) {
+  function renderToolGroup(messages, session, mounted = false) {
     const tools = (Array.isArray(messages) ? messages : [])
       .filter(message => eventKind(message || {}) === 'tool');
     if (!tools.length) return '';
+    if (liveRendering && !mounted) {
+      return virtualBlock('tool-group-slot', record => renderLive(() => renderToolGroup(record.tools, state.session, true)), 58,
+        '', { tools });
+    }
     const body = tools.map(message => renderEvent(message, session)).join('');
     return `<details class="tool-group" data-tool-count="${tools.length}"><summary><span class="event-icon">›_</span><span class="tool-group-title">${escapeHTML(t('toolActivity'))}</span><span class="tool-group-count">${escapeHTML(t('toolCount', { count: tools.length }))}</span></summary><div class="tool-group-events">${body}</div></details>`;
   }
@@ -1361,7 +1898,7 @@
     let current = null;
     const flush = () => {
       if (!current) return;
-      turns.push(`<section class="turn">${current.prompt}<div class="turn-events">${renderEventSequence(current.events, session)}</div>${renderTurnEditSummary(current.events, session, turns.length)}</section>`);
+      turns.push(`<section class="turn" data-turn-index="${turns.length}">${current.prompt}<div class="turn-events">${renderEventSequence(current.events, session)}</div>${renderTurnEditSummary(current.events, session, turns.length)}</section>`);
     };
 
     messages.forEach(message => {
@@ -1394,6 +1931,11 @@
       const update = message.kind === 'question' && answers.get(message.toolUseId);
       if (update) Object.assign(message, { answered: true, answerText: update.answerText });
     }
+    for (const record of virtualBodies.values()) {
+      const message = record.message;
+      const update = message && message.kind === 'question' && answers.get(message.toolUseId);
+      if (update) Object.assign(message, { answered: true, answerText: update.answerText });
+    }
     const root = rootElement();
     if (!root) return;
     root.querySelectorAll('.question-card').forEach(card => {
@@ -1405,8 +1947,44 @@
       template.innerHTML = renderQuestionCard(update);
       const replacement = template.content.firstElementChild;
       replacement.dataset.answerSignature = signature;
+      releaseVirtualContent(card, scope.MathJax);
       card.replaceWith(replacement);
+      typeset([replacement]);
     });
+  }
+
+  function refreshVirtualRecord(record, mathJax) {
+    if (!record.mounted) {
+      if (record.message) {
+        record.height = estimatedEventHeight(record.message);
+        record.node.style.minHeight = `${record.height}px`;
+      }
+      return null;
+    }
+    const slot = record.node;
+    record.ui = captureVirtualUI(slot);
+    record.children = rememberVirtualChildren(slot);
+    releaseVirtualContent(slot, mathJax);
+    slot.innerHTML = record.render(record);
+    restoreVirtualUI(slot, record.ui);
+    restoreVirtualChildren(slot, record.children);
+    registerVirtualContent(slot);
+    return slot;
+  }
+
+  function sameMessageValue(left, right) {
+    if (left === right) return true;
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length && keys.every(key =>
+      Object.prototype.hasOwnProperty.call(right, key) && sameMessageValue(left[key], right[key]));
+  }
+
+  function sameEventContent(left, right) {
+    const fields = ['role', 'kind', 'type', 'text', 'content', 'output', 'error', 'isError',
+      'model', 'toolName', 'name', 'title', 'filePath', 'path', 'oldText', 'newText',
+      'images', 'questions', 'toolUseId', 'answered', 'answerText'];
+    return fields.every(key => sameMessageValue(left[key], right[key]));
   }
 
   function renderClaudeStream() {
@@ -1414,18 +1992,18 @@
     if (!root) return;
     let region = root.querySelector(':scope > .claude-stream');
     if (!state.stream || !sessionMatches(state.stream)) {
-      if (region) region.remove();
+      if (region) { releaseVirtualContent(region, scope.MathJax); region.remove(); }
       return;
     }
     applyQuestionUpdates(state.stream.questionUpdates);
-    const persisted = new Set((state.session.messages || []).map(message => message.messageKey));
-    const messages = state.stream.messages.filter(message => !persisted.has(message.messageKey));
+    const messages = state.stream.messages.filter(message => !messageByKey.has(message.messageKey));
     const shouldFollow = nearBottom();
     captureViewportAnchor();
     if (!region && messages.length) {
       region = scope.document.createElement('div');
       region.className = 'claude-stream';
     }
+    const changedNodes = [];
     if (region) {
       const existing = new Map(Array.from(region.children).map(node => [node.dataset.streamId, node]));
       const retained = new Set();
@@ -1437,30 +2015,35 @@
           node = scope.document.createElement('div');
           node.dataset.streamId = identity;
         }
-        const signature = JSON.stringify(message);
-        if (node.__streamSignature !== signature) {
-          const details = Array.from(node.querySelectorAll('details')).map(item => item.open);
-          const mathJax = scope.MathJax;
-          if (mathJax && mathJax.typesetClear) mathJax.typesetClear([node]);
-          node.innerHTML = renderEvent(message, state.session);
-          node.querySelectorAll('details').forEach((item, index) => {
-            if (index < details.length) item.open = details[index];
-          });
+        if (!sameMessageValue(node.__streamMessage, message)) {
+          const slot = node.firstElementChild;
+          let record = slot && virtualBodies.get(slot.dataset.virtualBody);
+          if (record) {
+            record.message = message;
+            const changed = refreshVirtualRecord(record, scope.MathJax);
+            if (changed) changedNodes.push(changed);
+          } else {
+            node.innerHTML = renderLive(() => renderEvent(message, state.session));
+            registerVirtualContent(node);
+            changedNodes.push(node);
+          }
           node.classList.toggle('streaming-block', Boolean(message.streaming));
-          node.__streamSignature = signature;
-          if (!message.streaming) typeset([node]);
+          node.__streamMessage = message;
         }
         if (region.children[index] !== node)
           region.insertBefore(node, region.children[index] || null);
       });
-      existing.forEach((node, identity) => { if (!retained.has(identity)) node.remove(); });
+      existing.forEach((node, identity) => {
+        if (!retained.has(identity)) { releaseVirtualContent(node, scope.MathJax); node.remove(); }
+      });
       if (messages.length) {
         const waiting = root.querySelector(':scope > .claude-waiting');
         if (region.parentNode !== root || region.nextSibling !== waiting)
           root.insertBefore(region, waiting);
       }
-      else region.remove();
+      else { releaseVirtualContent(region, scope.MathJax); region.remove(); }
     }
+    if (changedNodes.length || virtualCandidates.size) typeset(() => changedNodes);
     syncClaudeWaiting(root);
     if (shouldFollow) scope.scrollTo(0, scope.document.body.scrollHeight);
     else restoreViewportAnchor();
@@ -1662,13 +2245,17 @@
       const followBottom = rootElement() && nearBottom();
       const anchor = rootElement() && (captureViewportAnchor() || state.viewportAnchor);
       const mounted = updateVirtualBodies(mathJax);
-      if (!mathJax || typeof mathJax.typesetPromise !== 'function') return;
+      const hasMath = Boolean(mathJax) && typeof mathJax.typesetPromise === 'function';
       const requestedTargets = Array.from(new Set([...Array.from(typeof targets === 'function' ? targets() : targets || []), ...mounted]));
       const connectedTargets = requestedTargets.filter(target =>
         target && (typeof target.isConnected !== 'boolean' || target.isConnected) &&
-        !requestedTargets.some(parent => parent !== target && parent.contains(target)));
+        !requestedTargets.some(parent => parent !== target && typeof parent.contains === 'function' && parent.contains(target)));
       const scrollBeforeTypeset = scope.scrollY;
-      if (connectedTargets.length) await mathJax.typesetPromise(connectedTargets);
+      // Diagram completion anchors its own layout update; do not wait for
+      // compilation before processing the next transcript or viewport update.
+      renderDiagrams(connectedTargets).catch(error => scope.console.error(error));
+      if (!hasMath) return;
+      if (hasMath && connectedTargets.length) await mathJax.typesetPromise(connectedTargets);
       // The captured anchor belongs to the viewport before the asynchronous
       // work. If it has moved meanwhile, leave the newer position alone.
       if (scope.scrollY !== scrollBeforeTypeset) return;
@@ -1687,24 +2274,90 @@
 
   async function setClaudeSession(session) {
     const root = rootElement();
-    if (!sessionMatches(session)) state.stream = null;
+    const sameSession = sessionMatches(session);
+    if (!sameSession) state.stream = null;
     state.session = Object.assign({}, session, {
       messages: Array.isArray(session && session.messages) ? session.messages.slice() : []
     });
+    messageByKey.clear();
+    for (const message of state.session.messages) messageByKey.set(message.messageKey, message);
     state.waiting = Boolean(state.session.awaitingReply);
     state.renderedCount = state.session.messages.length;
     if (!root) return renderSession(state.session);
     const snapshot = state.session;
     await typeset([root], mathJax => {
       const shouldFollow = nearBottom();
+      const savedUI = new Map();
+      if (sameSession) {
+        for (const record of virtualBodies.values()) {
+          const key = record.message ? `event:${record.message.messageKey}`
+            : record.tools && record.tools.length ? `group:${record.tools[0].messageKey}` : null;
+          if (!key) continue;
+          savedUI.set(key, { ui: record.mounted ? captureVirtualUI(record.node) : record.ui,
+            children: record.mounted ? rememberVirtualChildren(record.node) : record.children,
+            height: record.mounted ? record.node.getBoundingClientRect().height : record.height });
+        }
+      }
       if (mathJax && typeof mathJax.typesetClear === 'function') mathJax.typesetClear([root]);
       state.viewportAnchor = null;
       state.pendingQuote = null;
-      virtualBodies.clear();
+      resetVirtualContent(root, mathJax);
       state.renderedTurns = messageTurns(snapshot.messages);
       root.innerHTML = renderLive(() => renderSession(snapshot));
+      registerVirtualContent(root);
+      for (const record of virtualBodies.values()) {
+        const key = record.message ? `event:${record.message.messageKey}`
+          : record.tools && record.tools.length ? `group:${record.tools[0].messageKey}` : null;
+        const saved = savedUI.get(key);
+        if (!saved) continue;
+        record.ui = saved.ui;
+        record.children = saved.children;
+        record.height = saved.height;
+        record.node.style.minHeight = `${saved.height}px`;
+      }
       renderClaudeStream();
       if (shouldFollow) scope.scrollTo(0, scope.document.body.scrollHeight);
+    });
+    captureViewportAnchor();
+    return state.renderedCount;
+  }
+
+  async function updateClaudeMessages(session, updates) {
+    if (!sessionMatches(session)) return null;
+    const replacements = new Map((updates || []).map(message => [message.messageKey, message]));
+    const metadata = Object.assign({}, session);
+    delete metadata.messages;
+    state.session = Object.assign({}, state.session, metadata, {
+      messages: state.session.messages.map(message => replacements.get(message.messageKey) || message)
+    });
+    for (const message of replacements.values()) messageByKey.set(message.messageKey, message);
+    state.waiting = Boolean(state.session.awaitingReply);
+    const root = rootElement();
+    if (!root) return state.renderedCount;
+    const changedNodes = [];
+    await typeset(() => changedNodes, mathJax => {
+      const follow = nearBottom();
+      captureViewportAnchor();
+      state.renderedTurns = messageTurns(state.session.messages);
+      const dirtyTurns = new Map();
+      // Only top-level cards own message records. Body records are disposable.
+      for (const record of Array.from(virtualBodies.values())) {
+        if (record.tools) record.tools = record.tools.map(message => replacements.get(message.messageKey) || message);
+        const message = record.message && replacements.get(record.message.messageKey);
+        if (!message) continue;
+        record.message = message;
+        const changed = refreshVirtualRecord(record, mathJax);
+        if (changed) changedNodes.push(changed);
+        if (eventKind(message) === 'diff') {
+          const turn = record.node.closest('section.turn');
+          if (turn) dirtyTurns.set(turn, Number(turn.dataset.turnIndex));
+        }
+      }
+      refreshTurnEditSummaries(root, state.session, dirtyTurns);
+      applyQuestionUpdates(session.questionUpdates);
+      renderClaudeStream();
+      syncClaudeWaiting(root);
+      if (follow) scope.scrollTo(0, scope.document.body.scrollHeight);
     });
     captureViewportAnchor();
     return state.renderedCount;
@@ -1728,48 +2381,86 @@
     state.session = Object.assign({}, state.session, metadata, {
       messages: state.session.messages.concat(incoming)
     });
+    for (const message of incoming) messageByKey.set(message.messageKey, message);
     state.waiting = Boolean(state.session.awaitingReply);
     state.renderedCount = state.session.messages.length;
     const root = rootElement();
     if (!root) return renderSession(state.session);
     applyQuestionUpdates(session.questionUpdates);
-    if (!incoming.length) return state.renderedCount;
+    if (!incoming.length) {
+      syncClaudeWaiting(root);
+      return state.renderedCount;
+    }
 
     const snapshot = state.session;
     const addedNodes = [];
     await typeset(() => addedNodes, () => {
       const shouldFollow = nearBottom();
       root.querySelectorAll('.claude-waiting').forEach(node => node.remove());
+      const selection = scope.getSelection();
+      const selected = selection && !selection.isCollapsed ? {
+        anchorNode: selection.anchorNode, anchorOffset: selection.anchorOffset,
+        focusNode: selection.focusNode, focusOffset: selection.focusOffset
+      } : null;
       const dirtyTurns = new Map();
+      const streamCards = new Map();
+      const stream = root.querySelector(':scope > .claude-stream');
+      if (stream) for (const node of stream.children) {
+        const slot = node.firstElementChild;
+        const record = slot && virtualBodies.get(slot.dataset.virtualBody);
+        if (record && record.message) streamCards.set(record.message.messageKey, record);
+      }
       const appendHTML = (parent, html) => {
         const template = scope.document.createElement('template');
         template.innerHTML = html;
         const nodes = Array.from(template.content.childNodes);
-        nodes.forEach(node => parent.appendChild(node));
+        nodes.forEach((node, nodeIndex) => {
+          if (node.nodeType === 1) {
+            const slots = Array.from(node.querySelectorAll('.event-slot'));
+            if (node.classList.contains('event-slot')) slots.unshift(node);
+            for (const slot of slots) {
+              const fresh = virtualBodies.get(slot.dataset.virtualBody);
+              const previous = fresh && fresh.message && streamCards.get(fresh.message.messageKey);
+              if (!previous) continue;
+              const changed = !sameEventContent(previous.message, fresh.message);
+              previous.message = fresh.message;
+              if (changed) refreshVirtualRecord(previous, scope.MathJax);
+              streamCards.delete(fresh.message.messageKey);
+              virtualBodies.delete(fresh.id);
+              slot.replaceWith(previous.node);
+              if (slot === node) { node = previous.node; nodes[nodeIndex] = node; }
+              virtualCandidates.add(previous);
+            }
+          }
+          parent.appendChild(node);
+          if (node.nodeType === 1) registerVirtualContent(node);
+        });
         addedNodes.push(...nodes.filter(node => node.nodeType === 1));
         return nodes.find(node => node.nodeType === 1) || null;
       };
       const emptyTurn = () => appendHTML(root,
-        '<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span></header><div class="turn-events"></div></section>');
+        `<section class="turn" data-turn-index="${state.renderedTurns.length}"><header class="turn-header"><span class="turn-label">TURN</span></header><div class="turn-events"></div></section>`);
       const appendToolMessage = (events, message) => {
         const previous = events.lastElementChild;
-        if (!previous || !previous.classList.contains('tool-group')) {
+        const record = previous && virtualBodies.get(previous.dataset.virtualBody);
+        if (!record || !record.tools) {
           appendHTML(events, renderLive(() => renderToolGroup([message], snapshot)));
           return;
         }
-        const toolEvents = previous.querySelector(':scope > .tool-group-events');
+        record.tools.push(message);
+        if (!record.mounted) return;
+        const group = previous.querySelector('.tool-group');
+        const toolEvents = group.querySelector(':scope > .tool-group-events');
         appendHTML(toolEvents, renderLive(() => renderEvent(message, snapshot)));
-        const count = Number(previous.dataset.toolCount || 0) + 1;
-        previous.dataset.toolCount = String(count);
-        const countLabel = previous.querySelector(':scope > summary .tool-group-count');
-        if (countLabel) countLabel.textContent = t('toolCount', { count });
+        group.dataset.toolCount = String(record.tools.length);
+        group.querySelector(':scope > summary .tool-group-count').textContent = t('toolCount', { count: record.tools.length });
       };
 
       incoming.forEach(message => {
         if (eventKind(message) === 'user') {
           state.renderedTurns.push([]);
           appendHTML(root,
-            `<section class="turn"><header class="turn-header"><span class="turn-label">TURN</span>${renderLive(() => renderEvent(message, snapshot))}</header><div class="turn-events"></div></section>`);
+            `<section class="turn" data-turn-index="${state.renderedTurns.length - 1}"><header class="turn-header"><span class="turn-label">TURN</span>${renderLive(() => renderEvent(message, snapshot))}</header><div class="turn-events"></div></section>`);
           return;
         }
         let turn = root.querySelector('section.turn:last-of-type');
@@ -1784,6 +2475,9 @@
         if (eventKind(message) === 'tool') appendToolMessage(events, message);
         else appendHTML(events, renderLive(() => renderEvent(message, snapshot)));
       });
+      if (selected && selected.anchorNode.isConnected && selected.focusNode.isConnected) {
+        selection.setBaseAndExtent(selected.anchorNode, selected.anchorOffset, selected.focusNode, selected.focusOffset);
+      }
       refreshTurnEditSummaries(root, snapshot, dirtyTurns);
       renderClaudeStream();
       syncClaudeWaiting(root);
@@ -1798,6 +2492,8 @@
   installTranscriptFileBridge();
   installAssistantCopyBridge();
   installCodeCopyBridge();
+  installDiagramToggleBridge();
+  installDiagramZoomBridge();
   installMessageImageBridge();
   installQuestionCardBridge();
   installStableViewport();
@@ -1808,6 +2504,8 @@
     cleanTranscriptText,
     inlineMarkup,
     renderMarkdown,
+    renderDiagrams,
+    createDiagramCache,
     renderFilePreview,
     diffLines,
     changedFileSummary,
@@ -1824,6 +2522,7 @@
     typeset,
     setClaudeSession,
     appendClaudeMessages,
+    updateClaudeMessages,
     sessionMatches
   };
 });

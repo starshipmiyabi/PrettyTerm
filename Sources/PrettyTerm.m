@@ -2290,7 +2290,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         }
     }
     _persistedStreamKeys = keys;
-    for (NSString *identity in _streamOrder.array) {
+    for (NSString *identity in [_streamOrder.array copy]) {
         NSDictionary *record = _streamRecords[identity];
         BOOL mergedQuestionResult = ![record[@"kind"] isEqual:@"question"] &&
             [record[@"toolUseId"] length] && _streamQuestions[record[@"toolUseId"]];
@@ -3700,11 +3700,13 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSString *_floatingRenderedSessionID;
     NSDate *_floatingRenderedModifiedAt;
     NSUInteger _floatingRenderedMessageCount;
+    NSArray<NSDictionary *> *_floatingRenderedMessages;
     NSUInteger _floatingRenderGeneration;
     NSString *_sessionListSignature;
     NSString *_manualRefreshSessionID;
     NSString *_renderedSessionID;
     NSUInteger _renderedMessageCount;
+    NSArray<NSDictionary *> *_renderedMessages;
     NSDate *_renderedModifiedAt;
     BOOL _renderInFlight;
     PTSessionInfo *_pendingRenderSession;
@@ -3949,6 +3951,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _renderedSessionID = nil;
     _renderedModifiedAt = nil;
     _renderedMessageCount = 0;
+    _renderedMessages = nil;
     _gitDiffExpanded = NO;
     _gitReviewShowsTranscriptEdits = NO;
     _transcriptEditReviewEvents = nil;
@@ -5217,6 +5220,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _renderedSessionID = nil;
     _renderedModifiedAt = nil;
     _renderedMessageCount = 0;
+    _renderedMessages = nil;
     if (_webReady) {
         NSString *script = [NSString stringWithFormat:
             @"window.setClaudeSession({sessionId:'',title:'',messages:[],interfaceLanguage:'%@'}); null;",
@@ -5244,6 +5248,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _renderedSessionID = nil;
     _renderedModifiedAt = nil;
     _renderedMessageCount = 0;
+    _renderedMessages = nil;
     _pendingRenderSession = nil;
     PTSessionInfo *session = [self sessionWithID:tab.sessionID];
     if (session) {
@@ -6018,7 +6023,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     NSArray<NSArray<NSString *> *> *models = @[
         @[@"Claude Fable 5", @"claude-fable-5"],
         @[@"Claude Opus 5.5", @"claude-opus-5-5"],
-        @[@"Claude Sonnet 5", @"claude-sonnet-5"],
+        @[@"Claude Sonnet 5.5", @"claude-sonnet-5-5"],
         @[@"Claude Sonnet 4.6", @"claude-sonnet-4-6"],
         @[@"Claude Haiku 4.5", @"claude-haiku-4-5"]
     ];
@@ -6621,13 +6626,17 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 - (void)presentClaudeStreamForBridge:(PTClaudeBridge *)bridge {
     if (!bridge.sessionID.length) return;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:bridge.streamPayload options:0 error:nil];
-    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    NSString *script = [NSString stringWithFormat:@"window.setClaudeStream(%@); null;", json];
-    if (_webReady && [_selectedSession.sessionID isEqual:bridge.sessionID])
-        [_conversationView evaluateJavaScript:script completionHandler:nil];
-    if (_floatingWebReady && _floatingPanel.visible && [_floatingSessionID isEqual:bridge.sessionID])
-        [_floatingConversationView evaluateJavaScript:script completionHandler:nil];
+    BOOL mainVisible = _webReady && [_selectedSession.sessionID isEqual:bridge.sessionID];
+    BOOL floatingVisible = _floatingWebReady && _floatingPanel.visible &&
+        [_floatingSessionID isEqual:bridge.sessionID];
+    if (!mainVisible && !floatingVisible) return;
+    // Keep the executable source constant: transcript/image data travels as
+    // structured arguments, rather than a newly compiled script on every token.
+    NSDictionary *arguments = @{@"snapshot": bridge.streamPayload};
+    if (mainVisible) [_conversationView callAsyncJavaScript:@"return window.setClaudeStream(snapshot);"
+        arguments:arguments inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
+    if (floatingVisible) [_floatingConversationView callAsyncJavaScript:@"return window.setClaudeStream(snapshot);"
+        arguments:arguments inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
 }
 
 - (void)beginAwaitingClaudeReplyForSessionID:(NSString *)sessionID {
@@ -6916,10 +6925,27 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     )) return;
 
     NSUInteger messageCount = session.assistantMessages.count;
+    NSArray<NSDictionary *> *messages = session.assistantMessages ?: @[];
     BOOL canAppend = [_floatingRenderedSessionID isEqual:session.sessionID] &&
-        _floatingRenderedModifiedAt != nil && _floatingRenderedMessageCount < messageCount;
+        _floatingRenderedMessages != nil && _floatingRenderedMessageCount <= messageCount &&
+        [[messages subarrayWithRange:NSMakeRange(0, _floatingRenderedMessageCount)] isEqualToArray:_floatingRenderedMessages];
+    BOOL canPatch = [_floatingRenderedSessionID isEqual:session.sessionID] &&
+        _floatingRenderedMessages != nil && _floatingRenderedMessages.count <= messageCount;
+    NSMutableArray *updates = [NSMutableArray array];
+    if (canPatch && !canAppend) {
+        for (NSUInteger index = 0; index < _floatingRenderedMessageCount; index++) {
+            NSDictionary *previous = _floatingRenderedMessages[index];
+            NSDictionary *message = messages[index];
+            if (![previous[@"messageKey"] isEqual:message[@"messageKey"]]) { canPatch = NO; break; }
+            if (![previous isEqualToDictionary:message]) [updates addObject:message];
+        }
+    }
+    // Copy dictionaries, not their source strings or image data. The snapshot
+    // also detects in-place question/configuration revisions at the same count.
+    NSMutableArray *renderSnapshot = [NSMutableArray arrayWithCapacity:messageCount];
+    for (NSDictionary *message in messages) [renderSnapshot addObject:[message copy]];
 
-    // 与主窗口同一套策略：追加时不再序列化整份历史消息（JS 侧会直接丢弃）。
+    // Unchanged historical messages need only metadata and question updates.
     NSMutableDictionary *payload = [@{
         @"sessionId": session.sessionID ?: @"",
         @"title": session.title ?: @"未命名会话",
@@ -6929,45 +6955,38 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
         @"awaitingReply": @(_awaitingClaudeBaselineBySessionID[session.sessionID] != nil)
     } mutableCopy];
     payload[@"questionUpdates"] = PTQuestionUpdates(session.assistantMessages);
-    if (!canAppend) payload[@"messages"] = session.assistantMessages ?: @[];
+    if (!canAppend && !canPatch) payload[@"messages"] = session.assistantMessages ?: @[];
 
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-    NSString *json = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
-    if (!json) return;
+    NSDictionary *arguments = canAppend
+        ? @{@"metadata": payload, @"messages": [messages subarrayWithRange:
+            NSMakeRange(_floatingRenderedMessageCount, messageCount - _floatingRenderedMessageCount)]}
+        : canPatch ? @{@"metadata": payload, @"updates": updates,
+            @"messages": [messages subarrayWithRange:NSMakeRange(_floatingRenderedMessageCount, messageCount - _floatingRenderedMessageCount)]}
+        : @{@"metadata": payload};
+    NSString *script = canAppend
+        ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.appendClaudeMessages(metadata, messages); return 1;"
+        : canPatch ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.updateClaudeMessages(metadata, updates); if (messages.length) await window.appendClaudeMessages(metadata, messages); return 1;"
+        : @"await window.setClaudeSession(metadata); return 1;";
 
-    NSString *script = nil;
-    if (canAppend) {
-        NSArray *incoming = [session.assistantMessages subarrayWithRange:
-            NSMakeRange(_floatingRenderedMessageCount, messageCount - _floatingRenderedMessageCount)];
-        NSData *incomingData = [NSJSONSerialization dataWithJSONObject:incoming options:0 error:nil];
-        NSString *incomingJSON = incomingData
-            ? [[NSString alloc] initWithData:incomingData encoding:NSUTF8StringEncoding] : nil;
-        if (incomingJSON) {
-            script = [NSString stringWithFormat:
-                @"(function(){var m=%@;"
-                 "if(!window.__ptSessionMatches||!window.__ptSessionMatches(m))return 0;"
-                 "window.appendClaudeMessages(m,%@);return 1;})()",
-                json, incomingJSON];
-        }
-    }
-    if (!script) script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
     NSUInteger generation = _floatingRenderGeneration;
     NSString *targetSessionID = [session.sessionID copy];
     NSDate *targetModifiedAt = session.modifiedAt;
     _floatingRenderInFlight = YES;
     __weak typeof(self) weakSelf = self;
-    [_floatingConversationView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+    [_floatingConversationView callAsyncJavaScript:script arguments:arguments
+        inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
         PTAppDelegate *self = weakSelf;
         if (!self) return;
         self->_floatingRenderInFlight = NO;
-        BOOL appendRejected = canAppend && [result isKindOfClass:NSNumber.class] &&
+        BOOL appendRejected = (canAppend || canPatch) && [result isKindOfClass:NSNumber.class] &&
             ![(NSNumber *)result boolValue];
         BOOL stillCurrent = generation == self->_floatingRenderGeneration &&
             self->_floatingPanel.visible && [self->_floatingSessionID isEqual:targetSessionID];
         if (stillCurrent && !error && !appendRejected) {
             self->_floatingRenderedSessionID = targetSessionID;
             self->_floatingRenderedModifiedAt = targetModifiedAt;
-            self->_floatingRenderedMessageCount = session.assistantMessages.count;
+            self->_floatingRenderedMessageCount = messageCount;
+            self->_floatingRenderedMessages = [renderSnapshot copy];
             [self presentClaudeStreamForBridge:streamBridge];
         } else if (stillCurrent && (error || appendRejected)) {
             self->_floatingPanel.title = @"悬浮对话 · 显示更新失败";
@@ -7014,6 +7033,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _floatingRenderedSessionID = nil;
     _floatingRenderedModifiedAt = nil;
     _floatingRenderedMessageCount = 0;
+    _floatingRenderedMessages = nil;
     _pendingFloatingSession = nil;
     _floatingRenderGeneration += 1;
     if (!wasVisible) [self positionFloatingPanelNearMainWindow];
@@ -7031,6 +7051,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     _floatingRenderedSessionID = nil;
     _floatingRenderedModifiedAt = nil;
     _floatingRenderedMessageCount = 0;
+    _floatingRenderedMessages = nil;
     _pendingFloatingSession = nil;
     [self clearFloatingPendingImagesAfterSuccessfulSend];
     _floatingComposerTextView.string = @"";
@@ -7536,7 +7557,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
     return @[
         @[@"Claude Fable 5", @"Fable 5", @"claude-fable-5"],
         @[@"Claude Opus 5.5", @"Opus 5.5", @"claude-opus-5-5"],
-        @[@"Claude Sonnet 5", @"Sonnet 5", @"claude-sonnet-5"],
+        @[@"Claude Sonnet 5.5", @"Sonnet 5.5", @"claude-sonnet-5-5"],
         @[@"Claude Sonnet 4.6", @"Sonnet 4.6", @"claude-sonnet-4-6"],
         @[@"Claude Haiku 4.5", @"Haiku 4.5", @"claude-haiku-4-5"]
     ];
@@ -8122,7 +8143,7 @@ NSData *PTPNGDataForImageFileURL(NSURL *url) {
 
 static NSColor *PTQuotaTierColor(double percent) {
     if (percent >= 90.0) return NSColor.systemRedColor;
-    if (percent >= 60.0) return NSColor.systemOrangeColor;
+    if (percent >= 75.0) return NSColor.systemYellowColor;
     return NSColor.systemGreenColor;
 }
 
@@ -9543,6 +9564,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
             _renderedSessionID = nil;
             _renderedModifiedAt = nil;
             _renderedMessageCount = 0;
+            _renderedMessages = nil;
         }
         [self showSelectedSession];
     } else if (selectedID.length > 0 || _selectedSession == nil) {
@@ -9553,6 +9575,7 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         _floatingRenderedSessionID = nil;
         _floatingRenderedModifiedAt = nil;
         _floatingRenderedMessageCount = 0;
+        _floatingRenderedMessages = nil;
     }
     [self refreshFloatingConversation];
     [self updateFloatingControls];
@@ -9670,13 +9693,27 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         messageCount
     )) return;
 
+    NSArray<NSDictionary *> *messages = session.assistantMessages ?: @[];
     BOOL canAppend = [_renderedSessionID isEqual:session.sessionID] &&
-        _renderedModifiedAt != nil && _renderedMessageCount < messageCount;
+        _renderedMessages != nil && _renderedMessageCount <= messageCount &&
+        [[messages subarrayWithRange:NSMakeRange(0, _renderedMessageCount)] isEqualToArray:_renderedMessages];
+    BOOL canPatch = [_renderedSessionID isEqual:session.sessionID] &&
+        _renderedMessages != nil && _renderedMessages.count <= messageCount;
+    NSMutableArray *updates = [NSMutableArray array];
+    if (canPatch && !canAppend) {
+        for (NSUInteger index = 0; index < _renderedMessageCount; index++) {
+            NSDictionary *previous = _renderedMessages[index];
+            NSDictionary *message = messages[index];
+            if (![previous[@"messageKey"] isEqual:message[@"messageKey"]]) { canPatch = NO; break; }
+            if (![previous isEqualToDictionary:message]) [updates addObject:message];
+        }
+    }
+    // Copy dictionaries, not their source strings or image data. The snapshot
+    // also detects in-place question/configuration revisions at the same count.
+    NSMutableArray *renderSnapshot = [NSMutableArray arrayWithCapacity:messageCount];
+    for (NSDictionary *message in messages) [renderSnapshot addObject:[message copy]];
 
-    // 追加渲染时不再序列化整份历史消息：app.js 的 appendClaudeMessages 收到
-    // 后第一件事就是 delete metadata.messages，只用元数据 + 增量那几条。
-    // 真实 7.7MB transcript 上，全量 payload 每次要在主线程生成 3.6MB 脚本
-    // （约 17ms，还不含 WebView 解析这 3.6MB 源码的开销），而只传元数据是 10KB。
+    // Unchanged historical messages need only metadata and question updates.
     NSMutableDictionary *payload = [@{
         @"sessionId": session.sessionID ?: @"",
         @"title": session.title ?: @"未命名会话",
@@ -9686,45 +9723,37 @@ static NSString *PTContextCategoryDisplayName(NSString *key) {
         @"awaitingReply": @(_awaitingClaudeBaselineBySessionID[session.sessionID] != nil)
     } mutableCopy];
     payload[@"questionUpdates"] = PTQuestionUpdates(session.assistantMessages);
-    if (!canAppend) payload[@"messages"] = session.assistantMessages ?: @[];
+    if (!canAppend && !canPatch) payload[@"messages"] = session.assistantMessages ?: @[];
 
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-    if (!jsonData) return;
-    NSString *json = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    if (!json) return;
+    NSDictionary *arguments = canAppend
+        ? @{@"metadata": payload, @"messages": [messages subarrayWithRange:
+            NSMakeRange(_renderedMessageCount, messageCount - _renderedMessageCount)]}
+        : canPatch ? @{@"metadata": payload, @"updates": updates,
+            @"messages": [messages subarrayWithRange:NSMakeRange(_renderedMessageCount, messageCount - _renderedMessageCount)]}
+        : @{@"metadata": payload};
+    NSString *script = canAppend
+        ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.appendClaudeMessages(metadata, messages); return 1;"
+        : canPatch ? @"if (!window.__ptSessionMatches(metadata)) return 0; await window.updateClaudeMessages(metadata, updates); if (messages.length) await window.appendClaudeMessages(metadata, messages); return 1;"
+        : @"await window.setClaudeSession(metadata); return 1;";
 
-    NSString *script = nil;
-    if (canAppend) {
-        NSArray *incoming = [session.assistantMessages subarrayWithRange:
-            NSMakeRange(_renderedMessageCount, messageCount - _renderedMessageCount)];
-        NSData *incomingData = [NSJSONSerialization dataWithJSONObject:incoming options:0 error:nil];
-        NSString *incomingJSON = incomingData
-            ? [[NSString alloc] initWithData:incomingData encoding:NSUTF8StringEncoding] : nil;
-        if (incomingJSON) {
-            // 元数据里没有 messages，先核对 JS 仍持有同一个会话。
-            script = [NSString stringWithFormat:
-                @"(function(){var m=%@;"
-                 "if(!window.__ptSessionMatches||!window.__ptSessionMatches(m))return 0;"
-                 "window.appendClaudeMessages(m,%@);return 1;})()",
-                json, incomingJSON];
-        }
-    }
-    if (!script) script = [NSString stringWithFormat:@"window.setClaudeSession(%@); null;", json];
-
+    NSString *targetSessionID = [session.sessionID copy];
+    NSDate *targetModifiedAt = session.modifiedAt;
     _renderInFlight = YES;
     __weak typeof(self) weakSelf = self;
-    [_conversationView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+    [_conversationView callAsyncJavaScript:script arguments:arguments
+        inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
         PTAppDelegate *self = weakSelf;
         if (!self) return;
         self->_renderInFlight = NO;
-        BOOL appendRejected = canAppend && [result isKindOfClass:NSNumber.class] &&
+        BOOL appendRejected = (canAppend || canPatch) && [result isKindOfClass:NSNumber.class] &&
             ![(NSNumber *)result boolValue];
         if (error || appendRejected) {
             self->_statusLabel.stringValue = PTL(@"显示更新失败", @"Display update failed");
         } else {
-            self->_renderedSessionID = session.sessionID;
+            self->_renderedSessionID = targetSessionID;
             self->_renderedMessageCount = messageCount;
-            self->_renderedModifiedAt = session.modifiedAt;
+            self->_renderedMessages = [renderSnapshot copy];
+            self->_renderedModifiedAt = targetModifiedAt;
             [self presentClaudeStreamForBridge:streamBridge];
         }
 

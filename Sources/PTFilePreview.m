@@ -19,7 +19,7 @@ static NSSet<NSString *> *PTFilePreviewTextExtensions(void) {
     static NSSet<NSString *> *extensions;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        extensions = [NSSet setWithArray:[@"ts tsx jsx mjs cjs mts cts jsonl ndjson jsonc json5 toml ini cfg conf env properties editorconfig gitignore gitattributes dockerignore npmignore dockerfile fish cu cuh go rs kt kts scala sc lua jl dart vue svelte scss sass less sql graphql gql proto tex bib cls sty plist gradle cmake lock rst srt ass vtt tf hcl nix zig prisma rb r pl pm php ex exs erl hs ml clj el groovy bat ps1 cs fs vb asm s ld mk v sv vhd log csv tsv yaml yml xml" componentsSeparatedByString:@" "]];
+        extensions = [NSSet setWithArray:[@"ts tsx jsx mjs cjs mts cts jsonl ndjson jsonc json5 toml ini cfg conf env properties editorconfig gitignore gitattributes dockerignore npmignore dockerfile fish cu cuh go rs kt kts scala sc lua jl dart vue svelte scss sass less sql graphql gql proto tex bib cls sty plist gradle cmake lock rst srt ass vtt tf hcl nix zig prisma rb r pl pm php ex exs erl hs ml clj el groovy bat ps1 cs fs vb asm s ld mk v sv vhd log csv tsv yaml yml xml mmd mermaid" componentsSeparatedByString:@" "]];
     });
     return extensions;
 }

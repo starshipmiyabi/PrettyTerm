@@ -137,7 +137,7 @@ cmp "$project_dir/Info.plist" "$contents_dir/Info.plist"
   exit 1
 }
 
-for resource in PrettyTerm.icns PrettyTermLogo.png app.js; do
+for resource in PrettyTerm.icns PrettyTermLogo.png app.js mermaid.min.js; do
   packaged_resource="$resources_dir/$resource"
   [[ -s "$packaged_resource" ]] || {
     print -u2 "Missing packaged resource: $packaged_resource"

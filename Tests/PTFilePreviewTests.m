@@ -31,6 +31,7 @@ int main(void) {
         NSURL *extensionless = PTWriteText(root, @"Makefile", @"all:\n\tprintf ok\n");
         NSURL *typescript = PTWriteText(root, @"main.ts", @"const value: number = 1;\n");
         NSURL *toml = PTWriteText(root, @"pyproject.toml", @"[project]\nname = \"pt\"\n");
+        NSURL *mermaid = PTWriteText(root, @"flow.mmd", @"graph TD\n  A --> B\n");
         NSURL *notebook = PTWriteText(root, @"analysis.ipynb", @"{\"cells\": []}\n");
         NSURL *image = [root URLByAppendingPathComponent:@"photo.png"];
         NSBitmapImageRep *pixels = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
@@ -60,6 +61,8 @@ int main(void) {
         PTAssert([PTFilePreviewKindForURL(typescript) isEqual:@"source"] &&
                  [PTFilePreviewKindForURL(toml) isEqual:@"source"],
             @"code files that UTType misclassifies must still use the source preview kind");
+        PTAssert([PTFilePreviewKindForURL(mermaid) isEqual:@"source"],
+            @"Mermaid files must be previewable as text so the renderer can offer a diagram");
         PTAssert([PTFilePreviewKindForURL(notebook) isEqual:@"notebook"],
             @"Jupyter notebooks must use the notebook preview kind");
         PTAssert([PTFilePreviewKindForURL(image) isEqual:@"image"] &&
@@ -89,7 +92,7 @@ int main(void) {
         NSArray<NSDictionary *> *children = PTFileTreeChildren(root, &treeError);
         PTAssert(treeError == nil, @"previewable directory children must load");
         NSArray *names = [children valueForKey:@"name"];
-        PTAssert([names isEqual:@[@"Sources", @"analysis.ipynb", @"Guide.md", @"main.ts",
+        PTAssert([names isEqual:@[@"Sources", @"analysis.ipynb", @"flow.mmd", @"Guide.md", @"main.ts",
                                   @"Makefile", @"Notes.txt", @"photo.png", @"pyproject.toml",
                                   @"Review.m", @"scan.tiff"]],
             @"tree must sort directories first and include only previewable files");

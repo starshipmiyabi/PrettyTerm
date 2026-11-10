@@ -13,6 +13,7 @@
       svg: { fontCache: 'local' },
       options: {
         enableAssistiveMml: false,
+        ignoreHtmlClass: 'tex2jax_ignore|streaming-block',
         skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
       },
       startup: { typeset: false }
@@ -477,7 +478,10 @@
       white-space: nowrap;
     }
     .code-block-icon { font: 600 11px/1 var(--mono); opacity: .8; }
-    .code-copy-button {
+    .code-copy-button,
+    .diagram-zoom-button,
+    .diagram-toggle,
+    .diagram-render {
       display: inline-flex;
       align-items: center;
       gap: 5px;
@@ -492,10 +496,68 @@
       cursor: default;
     }
     .code-copy-button:hover,
-    .code-copy-button:focus-visible {
+    .code-copy-button:focus-visible,
+    .diagram-zoom-button:hover,
+    .diagram-zoom-button:focus-visible,
+    .diagram-toggle:hover,
+    .diagram-toggle:focus-visible,
+    .diagram-render:hover,
+    .diagram-render:focus-visible {
       color: #fff6ea;
       background: rgba(255, 255, 255, .12);
       outline: none;
+    }
+    /* Mermaid blocks start idle on their source; Render (idle/error/rendering)
+       becomes the Source/Diagram toggle once the chart is "ready". */
+    .diagram-toggle { display: none; margin-left: auto; }
+    .diagram-render { margin-left: auto; }
+    .diagram-render-busy { display: none; }
+    .diagram-block[data-state="rendering"] .diagram-render { pointer-events: none; opacity: .7; }
+    .diagram-block[data-state="rendering"] .diagram-render-idle { display: none; }
+    .diagram-block[data-state="rendering"] .diagram-render-busy { display: inline; }
+    .diagram-block[data-state="ready"] .diagram-render { display: none; }
+    .diagram-toggle-diagram { display: none; }
+    .diagram-zoom-controls { display: none; align-items: center; gap: 2px; flex-shrink: 0; }
+    .diagram-zoom-reset { min-width: 48px; font-variant-numeric: tabular-nums; }
+    .diagram-canvas { display: none; padding: 14px; overflow: auto; text-align: center; }
+    .diagram-canvas svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+    .diagram-error {
+      display: none;
+      padding: 7px 14px;
+      color: #f5b971;
+      background: rgba(245, 185, 113, .1);
+      font: 12px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    }
+    .diagram-block[data-state="error"] .diagram-error { display: block; }
+    .diagram-block[data-state="ready"] .diagram-toggle { display: inline-flex; }
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .diagram-zoom-controls { display: inline-flex; }
+    .diagram-block[data-state="ready"] > .diagram-canvas { display: block; }
+    .diagram-block[data-state="ready"] > pre { display: none; }
+    .diagram-block[data-state="ready"][data-view="source"] > .diagram-canvas { display: none; }
+    .diagram-block[data-state="ready"][data-view="source"] > pre { display: block; }
+    .diagram-block[data-view="source"] .diagram-toggle-source { display: none; }
+    .diagram-block[data-view="source"] .diagram-toggle-diagram { display: inline; }
+    /* The chart view sits on the page palette instead of the dark code surface. */
+    .diagram-block[data-state="ready"]:not([data-view="source"]) {
+      background: var(--paper);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .code-block-header {
+      color: var(--muted);
+      background: var(--soft);
+      border-bottom-color: var(--line);
+    }
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .code-copy-button,
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .diagram-zoom-button,
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .diagram-toggle { color: var(--muted); }
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .code-copy-button:hover,
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .code-copy-button:focus-visible,
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .diagram-zoom-button:hover,
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .diagram-zoom-button:focus-visible,
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .diagram-toggle:hover,
+    .diagram-block[data-state="ready"]:not([data-view="source"]) .diagram-toggle:focus-visible {
+      color: var(--ink);
+      background: var(--line);
     }
     .code-copy-icon { font-size: 14px; }
     .code-copy-done { display: none; }

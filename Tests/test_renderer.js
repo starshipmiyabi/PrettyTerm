@@ -592,3 +592,124 @@ test('code highlighting covers python, json, and escapes markup', () => {
   assert.match(plain, /<pre><code>&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/code><\/pre>/);
   assert.match(plain, /<\/span>代码<\/span>/);
 });
+
+test('a closed mermaid fence becomes an idle diagram block that keeps its source', () => {
+  const html = renderer.renderMarkdown('```mermaid\ngraph TD\n  A["<b>x</b>"] --> B\n```');
+  assert.match(html, /<div class="code-block diagram-block" data-state="idle">/);
+  assert.match(html, /<div class="diagram-canvas" role="img" aria-label="Mermaid"><\/div>/);
+  assert.match(html, /<button type="button" class="diagram-render">/);
+  assert.match(html, /<button type="button" class="diagram-toggle">/);
+  assert.match(html, /<\/span>Mermaid<\/span>/);
+  assert.match(html, /<pre><code class="language-mermaid">/);
+  assert.doesNotMatch(html, /<b>x<\/b>/, 'diagram source must stay escaped');
+});
+
+test('an unclosed mermaid fence and other languages stay plain code blocks', () => {
+  const streaming = renderer.renderMarkdown('```mermaid\ngraph TD\n  A --> B');
+  assert.doesNotMatch(streaming, /diagram-block|diagram-canvas|diagram-toggle/);
+  assert.match(streaming, /<div class="code-block">/);
+
+  const js = renderer.renderMarkdown('```js\nlet x = 1\n```');
+  assert.match(js, /<div class="code-block">/);
+  assert.doesNotMatch(js, /diagram-/);
+});
+
+test('the diagram cache evicts least recently used entries within its budget', () => {
+  const cache = renderer.createDiagramCache(3, 10);
+  cache.set('a', '1234');
+  cache.set('b', '1234');
+  assert.equal(cache.get('a'), '1234', 'reading refreshes recency');
+  cache.set('c', '1234');
+  assert.equal(cache.get('b'), undefined, 'the oldest entry goes first when the byte budget is exceeded');
+  assert.equal(cache.get('a'), '1234');
+  assert.equal(cache.chars, 8);
+  cache.set('huge', 'x'.repeat(11));
+  assert.equal(cache.get('huge'), undefined, 'one oversized SVG is never cached');
+  cache.set('a', '12');
+  assert.equal(cache.chars, 6, 'replacing a key adjusts the running total');
+  const counted = renderer.createDiagramCache(2, 1000);
+  ['x', 'y', 'z'].forEach(key => counted.set(key, '.'));
+  assert.equal(counted.size, 2);
+});
+
+test('Mermaid files in the file manager preview as one manual diagram block', async () => {
+  const mmd = await renderer.renderFilePreview({
+    kind: 'source', title: 'flow.mmd', path: '/tmp/flow.mmd', text: 'graph TD\r\n  A --> B\r\n'
+  });
+  assert.match(mmd, /<article class="file-document source-document">/);
+  assert.match(mmd, /<div class="code-block diagram-block" data-state="idle">/);
+  assert.match(mmd, /graph TD\n  A --&gt; B/);
+  const mermaidExt = await renderer.renderFilePreview({
+    kind: 'source', title: 'flow.MERMAID', path: '/tmp/flow.MERMAID', text: 'graph TD\n A-->B'
+  });
+  assert.match(mermaidExt, /diagram-block/);
+  const other = await renderer.renderFilePreview({
+    kind: 'source', title: 'notes.txt', path: '/tmp/notes.txt', text: 'graph TD\n A-->B'
+  });
+  assert.doesNotMatch(other, /diagram-block/);
+});
+
+test('renderDiagrams compiles only blocks the user asked for, restores cached ones, skips streaming, and falls back on errors', async () => {
+  const originalDocument = globalThis.document;
+  const originalMermaid = globalThis.mermaid;
+  let renders = 0;
+  globalThis.document = { documentElement: {}, body: {}, head: {}, getElementById: () => null };
+  globalThis.mermaid = {
+    initialize() {},
+    render: async (id, source) => {
+      renders++;
+      if (source.includes('BROKEN')) throw new Error('Parse error on line 2:\n...BROKEN\n-----^');
+      return { svg: `<svg data-source="${source.length}"></svg>` };
+    }
+  };
+  const makeBlock = (source, { state = 'rendering', streaming = false } = {}) => {
+    const canvas = { innerHTML: '' };
+    const error = { textContent: '' };
+    const block = {
+      canvas, error,
+      isConnected: true,
+      dataset: { state },
+      closest: selector => (streaming && selector === '.streaming-block' ? {} : null),
+      matches: () => ['idle', 'rendering'].includes(block.dataset.state),
+      querySelectorAll: () => [],
+      querySelector: selector => selector === 'pre code' ? { textContent: source }
+        : selector === '.diagram-canvas' ? canvas : error
+    };
+    return block;
+  };
+
+  try {
+    const untouched = makeBlock('graph TD\n NEVER', { state: 'idle' });
+    assert.equal(await renderer.renderDiagrams([untouched]), false);
+    assert.equal(untouched.dataset.state, 'idle', 'an idle block is never compiled without a Render click');
+    assert.equal(renders, 0, 'nothing is rendered, or even loaded, until the user asks');
+
+    const first = makeBlock('graph TD\n A-->B');
+    assert.equal(await renderer.renderDiagrams([first]), true);
+    assert.equal(first.dataset.state, 'ready');
+    assert.match(first.canvas.innerHTML, /^<svg data-source="15">/);
+    assert.equal(renders, 1);
+
+    const remounted = makeBlock('graph TD\n A-->B', { state: 'idle' });
+    assert.equal(await renderer.renderDiagrams([remounted]), true);
+    assert.equal(remounted.dataset.state, 'ready', 'a remounted block whose SVG is cached comes back without a click');
+    assert.equal(renders, 1, 'restoring from the cache does not call Mermaid again');
+
+    const streaming = makeBlock('graph LR\n C-->D', { streaming: true });
+    assert.equal(await renderer.renderDiagrams([streaming]), false);
+    assert.equal(streaming.dataset.state, 'rendering', 'blocks inside a streaming message wait for it to settle');
+
+    const broken = makeBlock('graph TD\n BROKEN');
+    assert.equal(await renderer.renderDiagrams([broken]), true);
+    assert.equal(broken.dataset.state, 'error');
+    assert.match(broken.error.textContent, /Parse error on line 2:$/);
+    assert.doesNotMatch(broken.error.textContent, /\n/, 'only the first line of the parser message is shown');
+
+    assert.equal(await renderer.renderDiagrams([{ id: 'not-a-dom-node' }]), false);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+    if (originalMermaid === undefined) delete globalThis.mermaid;
+    else globalThis.mermaid = originalMermaid;
+  }
+});

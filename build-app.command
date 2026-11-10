@@ -28,6 +28,7 @@ clang \
 
 cp "$project_dir/Info.plist" "$contents_dir/Info.plist"
 cp "$project_dir/Resources/tex-svg.js" "$resources_dir/tex-svg.js"
+cp "$project_dir/Resources/mermaid.min.js" "$resources_dir/mermaid.min.js"
 cp "$project_dir/Resources/index.html" "$resources_dir/index.html"
 cp "$project_dir/Resources/PrettyTerm.icns" "$resources_dir/PrettyTerm.icns"
 cp "$project_dir/Resources/PrettyTermLogo.png" "$resources_dir/PrettyTermLogo.png"

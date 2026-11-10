@@ -21,6 +21,8 @@ static BOOL PTPricingForModel(NSString *model, NSDate *date, PTModelPricing *pri
                [lower containsString:@"opus-4-6"] ||
                [lower containsString:@"opus-4-5"]) {
         value = (PTModelPricing){5.0, 6.25, 10.0, 0.5, 25.0};
+    } else if ([lower containsString:@"sonnet-5-5"]) {
+        value = (PTModelPricing){2.0, 2.5, 4.0, 0.2, 10.0};
     } else if ([lower containsString:@"sonnet-5"]) {
         NSDateComponents *components = [[NSDateComponents alloc] init];
         components.calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];

@@ -19,7 +19,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 @interface PTClaudeBridge (LaunchTestAccess)
 - (BOOL)writeFrame:(NSDictionary *)frame completion:(void (^)(BOOL))completion;
 - (NSString *)releaseInteractiveSession:(NSString *)sessionID;
-- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume;
+- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume model:(NSString *)model;
 - (void)consumeFrame:(NSDictionary *)frame;
 - (void)finishProcessIfEnded;
 - (void)reportError:(NSString *)message;
@@ -36,6 +36,7 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
 @property(nonatomic) BOOL deferInitialize;
 @property(nonatomic, copy) NSString *lastDirectory;
 @property(nonatomic) BOOL lastResume;
+@property(nonatomic, copy) NSString *lastModel;
 @property(nonatomic) NSUInteger releases;
 @property(nonatomic) NSUInteger launches;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *writtenFrames;
@@ -61,10 +62,11 @@ static BOOL PTRunLoopUntil(NSTimeInterval timeout, BOOL (^condition)(void)) {
     return YES;
 }
 
-- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume {
+- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume model:(NSString *)model {
     self.launches++;
     self.lastDirectory = cwd;
     self.lastResume = resume;
+    self.lastModel = model;
     if (self.launchError.length) {
         [self reportError:self.launchError];
         [self setValue:nil forKey:@"connectingSessionID"];
@@ -175,6 +177,7 @@ int main(int argc, const char *argv[]) {
         PTSessionInfo *session = [PTSessionInfo new];
         session.sessionID = @"target-session";
         session.cwd = @"/expected/project";
+        session.model = @"claude-opus-5-5";
 
         PTLaunchProbe *blank = [PTLaunchProbe new];
         __block NSString *blankStatus = nil;
@@ -213,9 +216,34 @@ int main(int argc, const char *argv[]) {
             [NSString stringWithFormat:@"resume must bind cleanly: %@", status]);
         Check(bridge.launches == 1 && bridge.lastResume && bridge.releases == 1,
             @"repeated connect while connecting must deduplicate into one resume launch");
+        Check([bridge.lastModel isEqual:@"claude-opus-5-5"],
+            @"resuming an Opus transcript must launch with its own recorded model");
         [bridge connectToSession:session];
         PTRunLoopUntil(0.1, ^BOOL { return NO; });
         Check(bridge.launches == 1, @"connecting again while already running on the same session must be a no-op");
+
+        NSString *overrideSessionID = [@"resume-override-" stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSMutableDictionary *savedOverrides = [[NSUserDefaults.standardUserDefaults
+            dictionaryForKey:@"PTSessionModelOverrides"] mutableCopy] ?: [NSMutableDictionary dictionary];
+        NSDictionary *previousOverrides = [NSUserDefaults.standardUserDefaults
+            dictionaryForKey:@"PTSessionModelOverrides"];
+        savedOverrides[overrideSessionID] = @"claude-fable-5-2";
+        [NSUserDefaults.standardUserDefaults setObject:savedOverrides forKey:@"PTSessionModelOverrides"];
+        PTSessionInfo *overriddenSession = [PTSessionInfo new];
+        overriddenSession.sessionID = overrideSessionID;
+        overriddenSession.cwd = @"/expected/project";
+        overriddenSession.model = @"claude-opus-5-5";
+        PTLaunchProbe *overridden = [PTLaunchProbe new];
+        Connect(overridden, overriddenSession, NO);
+        Check(overridden.running,
+            @"a session with a saved model choice must reconnect");
+        Check([overridden.lastModel isEqual:@"claude-fable-5-2"],
+            @"an explicit per-session model choice must take precedence over the transcript model");
+        if (previousOverrides) {
+            [NSUserDefaults.standardUserDefaults setObject:previousOverrides forKey:@"PTSessionModelOverrides"];
+        } else {
+            [NSUserDefaults.standardUserDefaults removeObjectForKey:@"PTSessionModelOverrides"];
+        }
 
         PTLaunchProbe *denied = [PTLaunchProbe new];
         denied.releaseError = @"Session takeover failed";

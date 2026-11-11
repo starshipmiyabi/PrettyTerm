@@ -280,11 +280,52 @@ int main(void) {
         PTAssert([tool[@"kind"] isEqual:@"tool"], @"ordinary tool calls should become tool events");
         PTAssert([tool[@"text"] containsString:@"a.m"], @"tool inputs should remain inspectable");
 
+        NSDictionary *edit = PTEventFromAssistantBlock(
+            @{ @"type": @"tool_use", @"name": @"Edit",
+              @"input": @{ @"file_path": @"/tmp/edit.m", @"old_string": @"a\nb",
+                            @"new_string": @"a\nB\nc" } }, @"k-edit", @"t", @"Claude");
+        PTAssert([edit[@"added"] integerValue] == 2 && [edit[@"removed"] integerValue] == 1,
+            @"Edit events should carry added and removed line counts");
+
+        NSDictionary *write = PTEventFromAssistantBlock(
+            @{ @"type": @"tool_use", @"name": @"Write",
+              @"input": @{ @"file_path": @"/tmp/new.m", @"content": @"one\ntwo\n" } },
+            @"k-write", @"t", @"Claude");
+        PTAssert([write[@"added"] integerValue] == 2 && [write[@"removed"] integerValue] == 0,
+            @"Write events should count content lines without counting a trailing newline");
+
+        NSDictionary *repeatedWrite = PTDiffStats(@"", @"same\nsame\n");
+        PTAssert([repeatedWrite[@"added"] integerValue] == 2,
+            @"Write counts should include repeated identical lines");
+
         NSDictionary *error = PTEventFromToolResultBlock(
             @{@"type": @"tool_result", @"is_error": @YES,
               @"content": @"permission denied"}, @"k3", @"t");
         PTAssert([error[@"kind"] isEqual:@"error"], @"failed tool results should be expanded error events");
         PTAssert([error[@"text"] isEqual:@"permission denied"], @"tool result text should be preserved");
+
+        NSMutableString *huge = [NSMutableString stringWithString:@"HEAD-MARK\n"];
+        while (huge.length < 500000) [huge appendString:@"0123456789abcdef\n"];
+        [huge appendString:@"TAIL-MARK"];
+        NSDictionary *hugeResult = PTEventFromToolResultBlock(
+            @{@"type": @"tool_result", @"content": huge}, @"k4", @"t");
+        NSString *hugeText = hugeResult[@"text"];
+        PTAssert(hugeText.length < 21000,
+            @"a huge tool result must be capped before it reaches memory and the web view");
+        PTAssert([hugeText hasPrefix:@"HEAD-MARK"] && [hugeText hasSuffix:@"TAIL-MARK"],
+            @"a capped tool result must keep both its beginning and its end");
+        PTAssert([hugeText containsString:@"已省略"],
+            @"a capped tool result must say that content was omitted");
+
+        NSString *base64 = [@"" stringByPaddingToLength:300000 withString:@"QUJD" startingAtIndex:0];
+        NSDictionary *mixedResult = PTEventFromToolResultBlock(
+            @{@"type": @"tool_result", @"content": @[
+                @{@"type": @"text", @"text": @"截图如下"},
+                @{@"type": @"image", @"source": @{@"type": @"base64", @"data": base64}}
+            ]}, @"k5", @"t");
+        PTAssert([mixedResult[@"text"] hasPrefix:@"截图如下"] &&
+                 [mixedResult[@"text"] length] < 200,
+            @"tool result images must become a placeholder, never inline base64");
 
         puts("PTAgentStateTests: PASS");
     }

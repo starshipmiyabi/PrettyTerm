@@ -277,18 +277,24 @@ export const ChatList = memo<ChatListProps>(({ onOpenFile, onReviewTurn }) => {
     const saved = scrollAnchors.get(sessionId);
     nearBottomRef.current = saved?.atBottom ?? true;
     restoringAnchor.current = true;
-    const frame = requestAnimationFrame(() => {
+    const place = () => {
       const list = listRef.current;
-      if (list) {
-        const index = saved ? rowIds.indexOf(saved.id) : -1;
-        if (saved && !saved.atBottom && index >= 0) {
-          list.scrollToIndex(index, { align: 'start', offset: saved.offset });
-          setShowBackBottom(true);
-        } else {
-          list.scrollTo(list.scrollSize);
-          setShowBackBottom(false);
-        }
+      if (!list) return;
+      const index = saved ? rowIds.indexOf(saved.id) : -1;
+      if (saved && !saved.atBottom && index >= 0) {
+        list.scrollToIndex(index, { align: 'start', offset: saved.offset });
+        setShowBackBottom(true);
+      } else {
+        // scrollTo(scrollSize) 用的是尚未测量的估算总高度，落点会偏；按行号对齐到底部更准。
+        list.scrollToIndex(rowIds.length - 1, { align: 'end' });
+        setShowBackBottom(false);
       }
+    };
+    // 先在首帧绘制前定位，避免每次切换都先闪现对话顶部；
+    // 下一帧行高测量完成后再校正一次。
+    place();
+    const frame = requestAnimationFrame(() => {
+      place();
       restoringAnchor.current = false;
     });
     return () => {
@@ -352,6 +358,7 @@ export const ChatList = memo<ChatListProps>(({ onOpenFile, onReviewTurn }) => {
         <>
           <VList
             data={rowIds}
+            itemSize={240}
             key={sessionId}
             keepMounted={keepMounted}
             onScroll={handleScroll}

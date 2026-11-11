@@ -16,10 +16,12 @@ import {
   Loader2,
   Quote,
   Terminal,
+  X,
 } from 'lucide-react';
 import { AnimatePresence } from 'motion/react';
 import * as m from 'motion/react-m';
-import { memo, useCallback, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { UILanguage } from '@/bridge/contracts';
 import { invokeNativeUI } from '@/bridge/native';
@@ -30,6 +32,7 @@ import type {
   TurnEditedFile,
   WorkflowStep,
 } from '@/bridge/transcript';
+import { groupAssistantTimeline } from '@/bridge/transcript';
 import { sx } from '@/upstream/styles/sx';
 
 const styles = stylex.create({
@@ -70,6 +73,46 @@ const styles = stylex.create({
     maxWidth: 220,
     objectFit: 'cover',
   },
+  userThumbButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    borderRadius: 10,
+    cursor: 'zoom-in',
+    display: 'block',
+    lineHeight: 0,
+    overflow: 'hidden',
+    padding: 0,
+  },
+  imageLightbox: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.84)',
+    display: 'flex',
+    inset: 0,
+    justifyContent: 'center',
+    position: 'fixed',
+    zIndex: 10000,
+  },
+  imageLightboxImage: {
+    display: 'block',
+    height: '80vh',
+    objectFit: 'contain',
+    width: '80vw',
+  },
+  imageLightboxClose: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.16)',
+    borderRadius: 999,
+    borderWidth: 0,
+    color: 'white',
+    cursor: 'pointer',
+    display: 'flex',
+    height: 40,
+    justifyContent: 'center',
+    position: 'fixed',
+    right: 20,
+    top: 20,
+    width: 40,
+  },
   collapseMoreBtn: {
     backgroundColor: 'transparent',
     borderWidth: 0,
@@ -101,7 +144,7 @@ const styles = stylex.create({
     color: cssVar.colorTextTertiary,
     fontSize: 12,
   },
-  workflowTrigger: {
+  workflowSummary: {
     alignItems: 'center',
     backgroundColor: 'transparent',
     borderWidth: 0,
@@ -314,7 +357,7 @@ const StepItemView = memo<{
   sessionId: string;
   turnId: string;
 }>(({ language, onOpenFile, sessionId, step, turnId }) => {
-  const [expanded, setExpanded] = useTurnState(sessionId, `${turnId}:step:${step.id}`, step.kind === 'error');
+  const [expanded, setExpanded] = useTurnState(sessionId, `${turnId}:step:${step.id}`, false);
 
   const iconNode = useMemo(() => {
     if (step.status === 'running') {
@@ -408,6 +451,73 @@ const StepItemView = memo<{
 });
 
 StepItemView.displayName = 'StepItemView';
+
+const WorkflowStepGroup = memo<{
+  groupId: string;
+  language: UILanguage;
+  onOpenFile: (path: string) => void;
+  sessionId: string;
+  steps: WorkflowStep[];
+  turnId: string;
+}>(({ groupId, language, onOpenFile, sessionId, steps, turnId }) => {
+  const [expanded, setExpanded] = useTurnState(
+    sessionId,
+    `${turnId}:workflow:${groupId}`,
+    false,
+  );
+  const isRunning = steps.some((step) => step.status === 'running');
+
+  return (
+    <div>
+      <button
+        aria-expanded={expanded}
+        data-pt-workflow-summary="1"
+        data-pt-workflow-group={groupId}
+        onClick={() => setExpanded((value) => !value)}
+        type="button"
+        {...sx(styles.workflowSummary)}
+      >
+        <span>
+          {isRunning
+            ? language === 'en'
+              ? `Running ${steps.length} steps…`
+              : `正在执行 · 已运行 ${steps.length} 步…`
+            : language === 'en'
+              ? `Ran ${steps.length} steps`
+              : `共运行 ${steps.length} 步`}
+        </span>
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+      </button>
+
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <m.div
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            initial={{ height: 0, opacity: 0 }}
+            style={{ overflow: 'hidden' }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+          >
+            <div {...sx(styles.stepList)}>
+              {steps.map((step) => (
+                <StepItemView
+                  key={step.id}
+                  language={language}
+                  onOpenFile={onOpenFile}
+                  sessionId={sessionId}
+                  step={step}
+                  turnId={turnId}
+                />
+              ))}
+            </div>
+          </m.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+});
+
+WorkflowStepGroup.displayName = 'WorkflowStepGroup';
 
 const QuestionCardView = memo<{
   block: QuestionBlock;
@@ -585,44 +695,83 @@ export const UserTurnView = memo<{ language: UILanguage; sessionId: string; turn
     const longInput = lines.length > 20;
     const [expanded, setExpanded] = useTurnState(sessionId, `${turn.id}:expand`, false);
     const visibleText = longInput && !expanded ? lines.slice(0, 14).join('\n') : turn.text;
+    const [previewImage, setPreviewImage] = useState<{ alt: string; src: string } | null>(null);
+
+    useEffect(() => {
+      if (!previewImage) return;
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') setPreviewImage(null);
+      };
+      window.addEventListener('keydown', closeOnEscape);
+      return () => window.removeEventListener('keydown', closeOnEscape);
+    }, [previewImage]);
 
     return (
-      <div data-pt-turn-index={turn.turnIndex} data-pt-turn-kind="user" {...sx(styles.userRow)}>
-        {turn.images.length > 0 && (
-          <div {...sx(styles.userImages)}>
-            {turn.images.map((img, i) =>
-              img.dataUrl ? (
-                <img
-                  key={`${turn.id}-img-${i}`}
-                  alt={img.name || 'image'}
-                  src={img.dataUrl}
-                  {...sx(styles.userThumb)}
-                />
-              ) : null,
-            )}
-          </div>
+      <>
+        <div data-pt-turn-index={turn.turnIndex} data-pt-turn-kind="user" {...sx(styles.userRow)}>
+          {turn.images.length > 0 && (
+            <div {...sx(styles.userImages)}>
+              {turn.images.map((img, i) => {
+                const dataUrl = img.dataUrl;
+                if (!dataUrl) return null;
+                const alt = img.name || 'image';
+                return (
+                  <button
+                    aria-label={language === 'en' ? 'Enlarge image' : '放大图片'}
+                    key={`${turn.id}-img-${i}`}
+                    onClick={() => setPreviewImage({ alt, src: dataUrl })}
+                    type="button"
+                    {...sx(styles.userThumbButton)}
+                  >
+                    <img alt={alt} src={dataUrl} {...sx(styles.userThumb)} />
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {turn.text.length > 0 && (
+            <div {...sx(styles.userBubble)}>
+              <div>{visibleText}</div>
+              {longInput && (
+                <button
+                  onClick={() => setExpanded((v) => !v)}
+                  type="button"
+                  {...sx(styles.collapseMoreBtn)}
+                >
+                  {expanded
+                    ? language === 'en'
+                      ? 'Collapse'
+                      : '收起长输入'
+                    : language === 'en'
+                      ? `Show all (${lines.length} lines)`
+                      : `展开全部 (${lines.length} 行)`}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {previewImage && createPortal(
+          <div onClick={() => setPreviewImage(null)} {...sx(styles.imageLightbox)}>
+            <div
+              aria-label={language === 'en' ? 'Image preview' : '图片预览'}
+              aria-modal="true"
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+            >
+              <img alt={previewImage.alt} src={previewImage.src} {...sx(styles.imageLightboxImage)} />
+            </div>
+            <button
+              aria-label={language === 'en' ? 'Close image preview' : '关闭图片预览'}
+              onClick={() => setPreviewImage(null)}
+              type="button"
+              {...sx(styles.imageLightboxClose)}
+            >
+              <X size={20} />
+            </button>
+          </div>,
+          document.body,
         )}
-        {turn.text.length > 0 && (
-          <div {...sx(styles.userBubble)}>
-            <div>{visibleText}</div>
-            {longInput && (
-              <button
-                onClick={() => setExpanded((v) => !v)}
-                type="button"
-                {...sx(styles.collapseMoreBtn)}
-              >
-                {expanded
-                  ? language === 'en'
-                    ? 'Collapse'
-                    : '收起长输入'
-                  : language === 'en'
-                    ? `Show all (${lines.length} lines)`
-                    : `展开全部 (${lines.length} 行)`}
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+      </>
     );
   },
 );
@@ -637,14 +786,13 @@ export const AssistantTurnView = memo<{
   sessionId: string;
   turn: RenderedAssistantTurn;
 }>(({ language, onOpenFile, onQuote, onReviewTurn, sessionId, turn }) => {
-  const [workflowPreference, setWorkflowOpen] = useTurnState<boolean | undefined>(sessionId, `${turn.id}:workflow`, undefined);
-  const workflowOpen = workflowPreference ?? (turn.hasStreaming || turn.steps.some((s) => s.status === 'error'));
   const [copied, setCopied] = useState(false);
 
   const combinedAnswerText = useMemo(
     () => turn.answerBlocks.map((b) => b.text).join('\n\n'),
     [turn.answerBlocks],
   );
+  const groupedTimeline = groupAssistantTimeline(turn.timeline);
 
   const handleCopyTurn = useCallback(() => {
     if (!combinedAnswerText) return;
@@ -667,53 +815,6 @@ export const AssistantTurnView = memo<{
         )}
       </div>
 
-      {turn.steps.length > 0 && (
-        <div>
-          <button
-            data-pt-workflow-toggle="1"
-            onClick={() => setWorkflowOpen(!workflowOpen)}
-            type="button"
-            {...sx(styles.workflowTrigger)}
-          >
-            <span>
-              {turn.hasStreaming
-                ? language === 'en'
-                  ? `Running ${turn.steps.length} steps…`
-                  : `正在执行 · 已运行 ${turn.steps.length} 步…`
-                : language === 'en'
-                  ? `Ran ${turn.steps.length} steps`
-                  : `共运行 ${turn.steps.length} 步`}
-            </span>
-            {workflowOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </button>
-
-          <AnimatePresence initial={false}>
-            {workflowOpen && (
-              <m.div
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                initial={{ height: 0, opacity: 0 }}
-                style={{ overflow: 'hidden' }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
-              >
-                <div {...sx(styles.stepList)}>
-                  {turn.steps.map((step) => (
-                    <StepItemView
-                      key={step.id}
-                      language={language}
-                      onOpenFile={onOpenFile}
-                      sessionId={sessionId}
-                      step={step}
-                      turnId={turn.id}
-                    />
-                  ))}
-                </div>
-              </m.div>
-            )}
-          </AnimatePresence>
-        </div>
-      )}
-
       {turn.waitingPlaceholder && turn.steps.length === 0 && turn.answerBlocks.length === 0 && (
         <div style={{ alignItems: 'center', color: 'var(--lobe-color-text-secondary)', display: 'flex', fontSize: 13, gap: 8 }}>
           <Loader2 className="pt-spin" size={14} />
@@ -721,23 +822,38 @@ export const AssistantTurnView = memo<{
         </div>
       )}
 
-      {turn.answerBlocks.map((block) => (
-        <div key={block.id} data-pt-assistant-prose="1">
-          <Markdown
-            animated={block.streaming}
-            enableLatex
-            enableMermaid
-            enableStream
-            variant="chat"
-          >
-            {block.text}
-          </Markdown>
-        </div>
-      ))}
+      {groupedTimeline.map((item) => {
+        if (item.kind === 'answer') {
+          return (
+            <div key={`answer:${item.answer.id}`} data-pt-assistant-prose="1">
+              <Markdown
+                animated={item.answer.streaming}
+                enableLatex
+                enableMermaid
+                enableStream
+                variant="chat"
+              >
+                {item.answer.text}
+              </Markdown>
+            </div>
+          );
+        }
+        if (item.kind === 'question') {
+          return <QuestionCardView key={`question:${item.question.id}`} block={item.question} language={language} sessionId={sessionId} />;
+        }
 
-      {turn.questionBlocks.map((qb) => (
-        <QuestionCardView key={qb.id} block={qb} language={language} sessionId={sessionId} />
-      ))}
+        return (
+          <WorkflowStepGroup
+            groupId={item.id}
+            key={`step-group:${item.id}`}
+            language={language}
+            onOpenFile={onOpenFile}
+            sessionId={sessionId}
+            steps={item.steps}
+            turnId={turn.id}
+          />
+        );
+      })}
 
       <EditedFilesCard
         files={turn.editedFiles}

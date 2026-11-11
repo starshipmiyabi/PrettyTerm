@@ -119,6 +119,12 @@ const styles = stylex.create({
     minWidth: 36,
     textAlign: 'right',
   },
+  meterSubtext: {
+    color: cssVar.colorTextTertiary,
+    fontSize: 10.5,
+    lineHeight: '14px',
+    marginLeft: 80,
+  },
   costRow: {
     color: cssVar.colorTextSecondary,
     display: 'flex',
@@ -171,19 +177,22 @@ function SegmentedMeter({
   const color = pct >= 90 ? '#ef4444' : pct >= 75 ? '#d97706' : '#16a34a';
 
   return (
-    <div title={subtext} {...sx(styles.meterRow)}>
-      <span {...sx(styles.meterLabel)}>{label}</span>
-      <div {...sx(styles.barsWrap)}>
-        {Array.from({ length: totalTicks }, (_, idx) => (
-          <span
-            key={idx}
-            {...sx(styles.tick, idx < activeCount && { backgroundColor: color })}
-          />
-        ))}
+    <div title={subtext}>
+      <div {...sx(styles.meterRow)}>
+        <span {...sx(styles.meterLabel)}>{label}</span>
+        <div {...sx(styles.barsWrap)}>
+          {Array.from({ length: totalTicks }, (_, idx) => (
+            <span
+              key={idx}
+              {...sx(styles.tick, idx < activeCount && { backgroundColor: color })}
+            />
+          ))}
+        </div>
+        <span {...sx(styles.meterVal, { color: percent !== null ? color : 'var(--lobe-color-text-tertiary)' })}>
+          {percent === null ? '—' : `${Math.round(pct)}%`}
+        </span>
       </div>
-      <span {...sx(styles.meterVal, { color: percent !== null ? color : 'var(--lobe-color-text-tertiary)' })}>
-        {percent === null ? '—' : `${Math.round(pct)}%`}
-      </span>
+      {subtext && <div {...sx(styles.meterSubtext)}>{subtext}</div>}
     </div>
   );
 }
@@ -264,19 +273,23 @@ export const OverviewPane = memo<OverviewPaneProps>(({ onOpenTab, onToggleTermin
             percent={ctxPct}
             subtext={
               activeSession?.contextUsed
-                ? `${activeSession.contextUsed.toLocaleString()} / ${(activeSession.contextWindow ?? 200000).toLocaleString()}`
+                ? `${activeSession.contextUsed.toLocaleString()} / ${(activeSession.contextWindow ?? 200000).toLocaleString()} tokens`
                 : undefined
             }
           />
           <SegmentedMeter
             label={language === 'en' ? '5h Quota' : '5 小时额度'}
             percent={fivePct}
-            subtext={usage?.fiveHourResetText}
+            subtext={usage?.fiveHourResetText
+              ? `${language === 'en' ? 'Resets in ' : '重置剩余 '}${usage.fiveHourResetText}`
+              : undefined}
           />
           <SegmentedMeter
             label={language === 'en' ? '7d Quota' : '7 天额度'}
             percent={sevenPct}
-            subtext={usage?.sevenDayResetText}
+            subtext={usage?.sevenDayResetText
+              ? `${language === 'en' ? 'Resets in ' : '重置剩余 '}${usage.sevenDayResetText}`
+              : undefined}
           />
 
           <div {...sx(styles.costRow)}>

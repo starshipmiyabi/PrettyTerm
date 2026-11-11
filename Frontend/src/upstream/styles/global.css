@@ -10,6 +10,23 @@
   src: url('../../assets/PrettyTermDisplay.woff2') format('woff2');
 }
 
+/* Newsreader (SIL OFL 1.1, see assets/fonts/OFL-Newsreader.txt): variable weight 200-800. */
+@font-face {
+  font-family: 'Newsreader';
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('../../assets/fonts/Newsreader.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Newsreader';
+  font-style: italic;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('../../assets/fonts/Newsreader-Italic.woff2') format('woff2');
+}
+
 html,
 body,
 #root {
@@ -74,6 +91,47 @@ html[data-font-antialiasing='off'] * {
 .lobe-context-trigger[data-popup-open]:not([data-no-highlight]),
 .lobe-dropdown-menu-trigger[data-popup-open]:not([data-no-highlight]) {
   background: var(--lobe-color-fill-tertiary);
+}
+
+.lobe-markdown table {
+  width: 100%;
+  margin-inline: auto;
+  box-shadow: 0 0 0 1px var(--lobe-color-border);
+}
+
+.lobe-markdown table tr {
+  box-shadow: inset 0 -1px 0 var(--lobe-color-border);
+}
+
+.lobe-markdown table th,
+.lobe-markdown table td {
+  border-block-end: 1px solid var(--lobe-color-border);
+  border-inline-end: 1px solid var(--lobe-color-border);
+}
+
+.lobe-markdown table tr > :last-child {
+  border-inline-end: 0;
+}
+
+.lobe-markdown table tbody tr:last-child {
+  box-shadow: none;
+}
+
+.lobe-markdown table tbody tr:last-child > th,
+.lobe-markdown table tbody tr:last-child > td {
+  border-block-end: 0;
+}
+
+.lobe-markdown .katex-display {
+  box-sizing: border-box;
+  margin: 1.2em auto;
+  max-width: 100%;
+  text-align: center;
+}
+
+.lobe-markdown .katex-display > .katex {
+  margin-inline: auto;
+  text-align: center;
 }
 
 @keyframes pt-spin-kf {

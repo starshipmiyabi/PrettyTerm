@@ -61,10 +61,44 @@ export interface RenderedAssistantTurn {
   model: string;
   questionBlocks: QuestionBlock[];
   steps: WorkflowStep[];
+  timeline: AssistantTimelineItem[];
   timestamp?: string;
   turnIndex: number;
   usage?: { costUSD?: number; outputTokens?: number; totalTokens?: number };
   waitingPlaceholder?: boolean;
+}
+
+export type AssistantTimelineItem =
+  | { answer: RenderedAssistantTurn['answerBlocks'][number]; kind: 'answer' }
+  | { kind: 'question'; question: QuestionBlock }
+  | { kind: 'step'; step: WorkflowStep };
+
+export type GroupedAssistantTimelineItem =
+  | { answer: RenderedAssistantTurn['answerBlocks'][number]; kind: 'answer' }
+  | { kind: 'question'; question: QuestionBlock }
+  | { id: string; kind: 'stepGroup'; steps: WorkflowStep[] };
+
+export function groupAssistantTimeline(
+  timeline: readonly AssistantTimelineItem[],
+): GroupedAssistantTimelineItem[] {
+  const grouped: GroupedAssistantTimelineItem[] = [];
+  let pendingSteps: WorkflowStep[] = [];
+  const flushSteps = () => {
+    if (pendingSteps.length === 0) return;
+    grouped.push({ id: pendingSteps[0].id, kind: 'stepGroup', steps: pendingSteps });
+    pendingSteps = [];
+  };
+
+  for (const item of timeline) {
+    if (item.kind === 'step') {
+      pendingSteps.push(item.step);
+    } else {
+      flushSteps();
+      grouped.push(item);
+    }
+  }
+  flushSteps();
+  return grouped;
 }
 
 export type RenderedTurn = RenderedUserTurn | RenderedAssistantTurn;
@@ -142,12 +176,15 @@ function formatStepSummary(
     };
   }
   if (name === 'Edit' || name === 'Write' || name === 'MultiEdit') {
+    const counts = typeof msg.added === 'number' && typeof msg.removed === 'number'
+      ? ` (+${msg.added} -${msg.removed})`
+      : '';
     return {
       subtitle: filePath || undefined,
       title:
         language === 'en'
-          ? `${name} ${basename(filePath)}`
-          : `${name === 'Write' ? '写入文件' : '修改文件'} ${basename(filePath)}`,
+          ? `${name} ${basename(filePath)}${counts}`
+          : `${name === 'Write' ? '写入文件' : '修改文件'} ${basename(filePath)}${counts}`,
     };
   }
   if (name === 'Bash' || name === 'run_command') {
@@ -196,6 +233,7 @@ function projectAssistant(
     model: model || 'Claude',
     questionBlocks: [],
     steps: [],
+    timeline: [],
     turnIndex,
     waitingPlaceholder: active && records.length === 0,
   };
@@ -218,20 +256,22 @@ function projectAssistant(
     // Question card
     if (msg.kind === 'question' && msg.toolUseId) {
       const upd = questions.get(msg.toolUseId);
-      group.questionBlocks.push({
+      const question: QuestionBlock = {
         answerText: upd?.answerText ?? msg.answerText ?? '',
         answered: upd?.answered ?? Boolean(msg.answered),
         id: msg.messageKey || `q-${msg.toolUseId}`,
         questions: msg.questions ?? [],
         toolUseId: msg.toolUseId,
-      });
+      };
+      group.questionBlocks.push(question);
+      group.timeline.push({ kind: 'question', question });
       continue;
     }
 
     // Thinking step
     if (msg.kind === 'thinking') {
       const { title } = formatStepSummary(msg, language);
-      group.steps.push({
+      const step: WorkflowStep = {
         id: msg.streamID || msg.messageKey || `thinking-${i}`,
         inputText: msg.text || '',
         kind: 'thinking',
@@ -239,7 +279,9 @@ function projectAssistant(
         streaming: Boolean(msg.streaming),
         timestamp: msg.timestamp,
         title,
-      });
+      };
+      group.steps.push(step);
+      group.timeline.push({ kind: 'step', step });
       continue;
     }
 
@@ -262,6 +304,7 @@ function projectAssistant(
         toolUseId: msg.toolUseId,
       };
       group.steps.push(step);
+      group.timeline.push({ kind: 'step', step });
       if (msg.toolUseId) steps.set(msg.toolUseId, step);
       if (msg.filePath) {
         let diff = diffCounts.get(msg);
@@ -320,17 +363,20 @@ function projectAssistant(
         toolUseId: msg.toolUseId,
       };
       group.steps.push(step);
+      group.timeline.push({ kind: 'step', step });
       if (msg.toolUseId) steps.set(msg.toolUseId, step);
       continue;
     }
 
     // Assistant prose reply
     if (msg.role === 'assistant' && typeof msg.text === 'string' && msg.text.length > 0) {
-      group.answerBlocks.push({
+      const answer = {
         id: msg.streamID || msg.messageKey || `ans-${i}`,
         streaming: Boolean(msg.streaming),
         text: msg.text,
-      });
+      };
+      group.answerBlocks.push(answer);
+      group.timeline.push({ kind: 'answer', answer });
     }
   }
 

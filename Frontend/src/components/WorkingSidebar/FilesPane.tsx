@@ -223,6 +223,10 @@ export const FilesPane = memo(() => {
     void invokeNativeUI('listDirectory', { path: dirPath, rootPath, tabId });
   }, [rootPath, tabId]);
 
+  const refreshTree = useCallback(() => {
+    for (const path of new Set([rootPath, ...Object.keys(fileTreeByPath)])) loadDir(path);
+  }, [fileTreeByPath, loadDir, rootPath]);
+
   useEffect(() => {
     if (rootPath && !fileTreeByPath[rootPath]) {
       loadDir(rootPath);
@@ -284,9 +288,9 @@ export const FilesPane = memo(() => {
 
         <ActionIcon
           icon={RefreshCw}
-          onClick={() => rootPath && loadDir(rootPath)}
+          onClick={refreshTree}
           size="small"
-          title={language === 'en' ? 'Refresh directory' : '刷新目录'}
+          title={language === 'en' ? 'Refresh file tree' : '刷新文件树'}
         />
       </div>
 

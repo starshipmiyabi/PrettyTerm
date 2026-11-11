@@ -182,6 +182,7 @@ export interface AskUserQuestionItem {
 }
 
 export interface PrettyTermMessage {
+  added?: number;
   answerText?: string;
   answered?: boolean;
   command?: string;
@@ -194,6 +195,7 @@ export interface PrettyTermMessage {
   newText?: string;
   oldText?: string;
   questions?: AskUserQuestionItem[];
+  removed?: number;
   role: 'user' | 'assistant' | 'tool' | 'system' | string;
   startLine?: number;
   streamID?: string;

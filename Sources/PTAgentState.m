@@ -334,7 +334,10 @@ BOOL PTSessionRenderNeedsUpdate(
 static NSArray<NSString *> *PTLines(NSString *value) {
     NSString *normalized = [[value ?: @"" stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
         stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
-    return normalized.length ? [normalized componentsSeparatedByString:@"\n"] : @[];
+    if (!normalized.length) return @[];
+    NSMutableArray<NSString *> *lines = [[normalized componentsSeparatedByString:@"\n"] mutableCopy];
+    if ([normalized hasSuffix:@"\n"]) [lines removeLastObject];
+    return lines;
 }
 
 NSDictionary<NSString *, NSNumber *> *PTDiffStats(NSString *oldText, NSString *newText) {
@@ -375,16 +378,54 @@ NSArray<NSDictionary *> *PTAggregateChangedFiles(NSArray<NSDictionary *> *events
     return result;
 }
 
+// 一条工具输入/输出在界面里只会被折叠展示，完整内容始终保留在 JSONL 里。
+// 不设上限时，一个会话里几百 MB 的工具输出会整个进内存、再整包序列化发给网页。
+static const NSUInteger PTInspectableTextLimit = 20000;
+static const NSUInteger PTInspectableTextTail = 6000;
+
+static NSString *PTLimitedInspectableText(NSString *text) {
+    if (text.length <= PTInspectableTextLimit) return text;
+    NSUInteger headEnd = PTInspectableTextLimit - PTInspectableTextTail;
+    NSUInteger tailStart = text.length - PTInspectableTextTail;
+    headEnd = NSMaxRange([text rangeOfComposedCharacterSequenceAtIndex:headEnd - 1]);
+    tailStart = [text rangeOfComposedCharacterSequenceAtIndex:tailStart].location;
+    return [NSString stringWithFormat:@"%@\n\n… 已省略 %lu 个字符 · %lu characters omitted（完整内容见会话 JSONL）…\n\n%@",
+        [text substringToIndex:headEnd],
+        (unsigned long)(tailStart - headEnd), (unsigned long)(tailStart - headEnd),
+        [text substringFromIndex:tailStart]];
+}
+
 static NSString *PTInspectableText(id value) {
-    if ([value isKindOfClass:NSString.class]) return value;
+    if ([value isKindOfClass:NSString.class]) return PTLimitedInspectableText(value);
     if (!value || value == NSNull.null) return @"";
+    if ([value isKindOfClass:NSArray.class]) {
+        // tool_result 的 content 可能是 [{type:text,...},{type:image,source:{base64}}]。
+        // 只取文字块，图片用占位符，避免把整段 base64 当文本塞进消息。
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        BOOL onlyKnownBlocks = YES;
+        for (id block in (NSArray *)value) {
+            NSDictionary *item = [block isKindOfClass:NSDictionary.class] ? block : nil;
+            NSString *type = [item[@"type"] isKindOfClass:NSString.class] ? item[@"type"] : @"";
+            if ([type isEqual:@"text"] && [item[@"text"] isKindOfClass:NSString.class]) {
+                [parts addObject:item[@"text"]];
+            } else if ([type isEqual:@"image"]) {
+                [parts addObject:@"[图片 / image]"];
+            } else {
+                onlyKnownBlocks = NO;
+                break;
+            }
+        }
+        if (onlyKnownBlocks && parts.count > 0) {
+            return PTLimitedInspectableText([parts componentsJoinedByString:@"\n"]);
+        }
+    }
     if ([NSJSONSerialization isValidJSONObject:value]) {
         NSData *data = [NSJSONSerialization dataWithJSONObject:value
             options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
         NSString *text = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-        if (text.length) return text;
+        if (text.length) return PTLimitedInspectableText(text);
     }
-    return [value description] ?: @"";
+    return PTLimitedInspectableText([value description] ?: @"");
 }
 
 static id PTCompactToolValue(id value, NSUInteger maxStringLength) {
@@ -469,6 +510,9 @@ NSDictionary *PTEventFromAssistantBlock(
             event[@"filePath"] = filePath;
             event[@"oldText"] = oldText;
             event[@"newText"] = newText;
+            NSDictionary *stats = PTDiffStats(oldText, newText);
+            event[@"added"] = stats[@"added"];
+            event[@"removed"] = stats[@"removed"];
             event[@"startLine"] = [toolName isEqual:@"Write"] ? @1 : @0;
             return event;
         }

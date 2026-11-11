@@ -40,7 +40,10 @@ int main(void) {
         PTAssertNear(PTAPIEquivalentCostForUsage(@"claude-opus-5", usage, date, &supported),
                      46.75, @"Opus 5 pricing should be correct");
         PTAssertNear(PTAPIEquivalentCostForUsage(@"claude-fable-5", usage, date, &supported),
-                     93.5, @"Fable 5 pricing should be correct");
+                     93.5, @"historical Fable 5 usage pricing should remain supported");
+        PTAssertNear(PTAPIEquivalentCostForUsage(@"claude-fable-5-2", usage, date, &supported),
+                     93.5, @"Fable 5.2 pricing should be recognized");
+        PTAssert(supported, @"Fable 5.2 should be supported");
         PTAssertNear(PTAPIEquivalentCostForUsage(@"unknown", usage, date, &supported),
                      0, @"Unknown models must not invent a cost");
         PTAssert(!supported, @"Unknown model must be marked unsupported");

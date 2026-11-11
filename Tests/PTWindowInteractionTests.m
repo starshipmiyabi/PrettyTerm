@@ -27,9 +27,10 @@ FOUNDATION_EXPORT NSString *PTMessageByAppendingClaudeAttachMarkers(
     (void)sessionID;
     return nil;
 }
-- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume {
+- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume model:(NSString *)model {
     (void)cwd;
     (void)resume;
+    (void)model;
     NSString *initID = @"probe-init-1";
     [self setValue:initID forKey:@"initializeID"];
     [self consumeFrame:@{

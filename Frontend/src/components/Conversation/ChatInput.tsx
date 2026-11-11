@@ -25,7 +25,7 @@ import { sx } from '@/upstream/styles/sx';
 import { ControlBar } from './ControlBar';
 
 const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-fable-5', label: 'Claude Fable 5', shortLabel: 'claude-fable-5' },
+  { id: 'claude-fable-5-2', label: 'Claude Fable 5.2', shortLabel: 'claude-fable-5-2' },
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', shortLabel: 'claude-opus-5-5' },
   { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', shortLabel: 'claude-sonnet-5-5' },
   { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', shortLabel: 'claude-sonnet-4-6' },

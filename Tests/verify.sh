@@ -56,6 +56,21 @@ clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -o "$project_dir/.build/PTSessionParserTests"
 "$project_dir/.build/PTSessionParserTests"
 
+mkdir -p "$project_dir/.build/PTTranscriptProjectionTests"
+"$project_dir/Frontend/node_modules/.bin/tsc" \
+  --ignoreConfig \
+  --target ES2022 \
+  --module commonjs \
+  --moduleResolution node \
+  --ignoreDeprecations 6.0 \
+  --skipLibCheck \
+  --rootDir "$project_dir/Frontend/src/bridge" \
+  --outDir "$project_dir/.build/PTTranscriptProjectionTests" \
+  "$project_dir/Frontend/src/bridge/transcript.ts" \
+  "$project_dir/Frontend/src/bridge/contracts.ts"
+node "$project_dir/Tests/PTTranscriptProjectionTests.cjs" \
+  "$project_dir/.build/PTTranscriptProjectionTests/transcript.js"
+
 clang -fobjc-arc -fmodules -mmacosx-version-min=13.0 \
   -Wno-nullability-completeness \
   -framework AppKit -framework WebKit -framework UniformTypeIdentifiers -framework ImageIO \

@@ -64,14 +64,10 @@ export const AppTheme = memo<AppThemeProps>(
 
     useEffect(() => {
       const { style } = document.documentElement;
-      style.setProperty(
-        '--lobe-font-family',
-        "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif",
-      );
-      style.setProperty(
-        '--lobe-font-family-code',
-        "'PrettyTermDisplay', ui-monospace, 'SF Mono', Menlo, Monaco, monospace",
-      );
+      // 界面、代码和命令输出统一使用同一个字体栈（Newsreader 负责西文，苹方负责中文，宋体兜底）。
+      const serif = "'Newsreader', 'PingFang SC', 'Songti SC', 'STSong', serif";
+      style.setProperty('--lobe-font-family', serif);
+      style.setProperty('--lobe-font-family-code', serif);
     }, []);
 
     return (

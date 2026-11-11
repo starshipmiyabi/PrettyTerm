@@ -541,18 +541,23 @@ static NSString *PTTextFromMessageContent(id content) {
     return [parts componentsJoinedByString:@"\n"];
 }
 
-static NSArray<NSString *> *PTImagesFromMessageContent(id content) {
+static NSArray<NSDictionary *> *PTImagesFromMessageContent(id content) {
     if (![content isKindOfClass:NSArray.class]) return @[];
-    NSMutableArray<NSString *> *images = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *images = [NSMutableArray array];
     for (NSDictionary *block in content) {
         if (![block isKindOfClass:NSDictionary.class] || ![block[@"type"] isEqual:@"image"]) continue;
         NSDictionary *source = block[@"source"];
         if (![source isKindOfClass:NSDictionary.class]) continue;
         if ([source[@"type"] isEqual:@"base64"] && [source[@"data"] isKindOfClass:NSString.class]) {
-            [images addObject:[NSString stringWithFormat:@"data:%@;base64,%@",
-                source[@"media_type"], source[@"data"]]];
+            NSMutableDictionary *image = [@{
+                @"dataUrl": [NSString stringWithFormat:@"data:%@;base64,%@",
+                    source[@"media_type"], source[@"data"]]
+            } mutableCopy];
+            if ([source[@"media_type"] isKindOfClass:NSString.class])
+                image[@"mediaType"] = source[@"media_type"];
+            [images addObject:[image copy]];
         } else if ([source[@"type"] isEqual:@"url"] && [source[@"url"] isKindOfClass:NSString.class]) {
-            [images addObject:source[@"url"]];
+            [images addObject:@{@"dataUrl": source[@"url"]}];
         }
     }
     return images;
@@ -603,9 +608,20 @@ static void PTRememberObservedPath(NSString *rawPath,
     if ([path rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:
         @"*?[]<>|"]].location != NSNotFound) return;
 
+    // 同一个路径在一个会话里会出现成百上千次，每次都 stat 一遍（外置卷上很慢）。
+    // 只缓存"找到了目录"的结果；不存在的路径可能之后才被创建，所以不缓存。
+    static NSMutableDictionary<NSString *, NSString *> *resolvedDirectories;
+    static dispatch_once_t cacheOnce;
+    dispatch_once(&cacheOnce, ^{ resolvedDirectories = [NSMutableDictionary dictionary]; });
+    NSString *directory = nil;
+    @synchronized (resolvedDirectories) { directory = resolvedDirectories[path]; }
+    if (directory.length > 1) {
+        [directories addObject:directory];
+        return;
+    }
+
     BOOL isDirectory = NO;
     BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDirectory];
-    NSString *directory = nil;
     if (exists) {
         directory = isDirectory ? path : path.stringByDeletingLastPathComponent;
     } else if (path.pathExtension.length > 0) {
@@ -616,7 +632,14 @@ static void PTRememberObservedPath(NSString *rawPath,
             directory = parent;
         }
     }
-    if (directory.length > 1) [directories addObject:directory.stringByStandardizingPath];
+    if (directory.length > 1) {
+        NSString *standardized = directory.stringByStandardizingPath;
+        [directories addObject:standardized];
+        @synchronized (resolvedDirectories) {
+            if (resolvedDirectories.count >= 8192) [resolvedDirectories removeAllObjects];
+            resolvedDirectories[path] = standardized;
+        }
+    }
 }
 
 static BOOL PTStoredDirectoryPathIsValid(NSString *path) {
@@ -780,6 +803,30 @@ static NSArray<NSDictionary *> *PTLoadTasksForSession(NSString *sessionID) {
     return tasks;
 }
 
+static BOOL PTBytesHavePrefix(const uint8_t *bytes, NSUInteger length, const char *prefix) {
+    size_t prefixLength = strlen(prefix);
+    return length >= prefixLength && memcmp(bytes, prefix, prefixLength) == 0;
+}
+
+static BOOL PTBytesContain(const uint8_t *bytes, NSUInteger length, const char *needle) {
+    return memmem(bytes, length, needle, strlen(needle)) != NULL;
+}
+
+// 这些记录对会话列表和对话显示都没有用，却占了大会话文件的大部分体积，
+// 所以在 JSON 解析之前就直接跳过：
+// - api-request / api-request-blob：Claude 把发给 API 的请求原样又存了一遍。
+// - 纯 tool_result 的用户记录：只有展开会话时才需要它的内容，列表里只需要
+//   cwd，而 cwd 已经读到之后就不用再解析它了。
+// 含 "type":"text" 或 "type":"image"（未转义的结构）的记录可能带用户文字，一律照常解析。
+static BOOL PTTranscriptLineIsSkippable(const uint8_t *line, NSUInteger length,
+                                        BOOL includeMessages, BOOL haveCWD) {
+    if (PTBytesHavePrefix(line, length, "{\"type\":\"api-request")) return YES;
+    if (includeMessages || !haveCWD) return NO;
+    return PTBytesContain(line, length, "\"type\":\"tool_result\"") &&
+        !PTBytesContain(line, length, "\"type\":\"text\"") &&
+        !PTBytesContain(line, length, "\"type\":\"image\"");
+}
+
 static PTSessionInfo *PTParseSessionData(
     NSData *data,
     NSString *filePath,
@@ -788,26 +835,12 @@ static PTSessionInfo *PTParseSessionData(
     BOOL includeMessages
 ) {
     if (!data) return nil;
-    // Claude 还在往这个文件追加写的时候，文件末尾可能截在一个多字节 UTF-8
-    // 字符的中间，导致整段 initWithData:encoding: 直接返回 nil，
-    // 让这个正在活跃的会话从侧栏"消失"一下又"回来"，一直闪烁。
-    // 按行切开后逐行解码，坏掉的只是最后半行，不会拖垮整个 session。
-    NSString *source = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (!source) {
-        NSMutableArray<NSString *> *lines = [NSMutableArray array];
-        NSUInteger lineStart = 0;
-        const char *bytes = data.bytes;
-        NSUInteger length = data.length;
-        for (NSUInteger index = 0; index < length; index++) {
-            if (bytes[index] != '\n') continue;
-            NSData *lineData = [data subdataWithRange:NSMakeRange(lineStart, index - lineStart)];
-            NSString *line = [[NSString alloc] initWithData:lineData encoding:NSUTF8StringEncoding];
-            if (line) [lines addObject:line];
-            lineStart = index + 1;
-        }
-        if (lines.count == 0) return nil;
-        source = [lines componentsJoinedByString:@"\n"];
-    }
+    // 按字节逐行解析，不把整个文件转成一个超大 NSString 再切行（大会话文件有
+    // 上 GB，那样瞬时内存是文件大小的好几倍）。Claude 还在追加写时，文件末尾
+    // 可能截在多字节 UTF-8 字符中间，这一行只会解析失败被跳过，不会拖垮整个
+    // session，也就不会让活跃会话在侧栏里"消失"又"回来"。
+    const uint8_t *bytes = data.bytes;
+    const NSUInteger length = data.length;
 
     PTSessionInfo *session = [[PTSessionInfo alloc] init];
     session.sessionID = baseSession.sessionID.length
@@ -859,9 +892,18 @@ static PTSessionInfo *PTParseSessionData(
         }
     }
 
-    for (NSString *line in [source componentsSeparatedByString:@"\n"]) { @autoreleasepool {
-        if (line.length < 2) continue;
-        NSData *lineData = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSUInteger position = 0;
+    while (position < length) { @autoreleasepool {
+        const uint8_t *lineStart = bytes + position;
+        const uint8_t *newline = memchr(lineStart, '\n', length - position);
+        NSUInteger lineLength = newline ? (NSUInteger)(newline - lineStart) : length - position;
+        position += lineLength + 1;
+        if (lineLength < 2) continue;
+        if (PTTranscriptLineIsSkippable(lineStart, lineLength, includeMessages,
+                                        session.cwd.length > 0)) continue;
+        NSData *lineData = [NSData dataWithBytesNoCopy:(void *)lineStart
+                                                length:lineLength
+                                          freeWhenDone:NO];
         NSDictionary *object = [NSJSONSerialization JSONObjectWithData:lineData options:0 error:nil];
         if (![object isKindOfClass:NSDictionary.class]) continue;
 
@@ -1978,7 +2020,7 @@ static NSDictionary *PTClaudeTaskSummary(NSDictionary *task) {
         NSString *uuid = frame[@"uuid"];
         if (!uuid.length) return;
         NSString *text = PTTextFromMessageContent(message[@"content"]);
-        NSArray<NSString *> *images = PTImagesFromMessageContent(message[@"content"]);
+        NSArray<NSDictionary *> *images = PTImagesFromMessageContent(message[@"content"]);
         if ((text.length || images.count) && ![frame[@"isMeta"] boolValue] && !_submittedCommands[uuid]) {
             NSString *key = [uuid stringByAppendingString:@":user"];
             [self putStreamRecord:@{@"role": @"user", @"text": text, @"images": images, @"messageKey": key} identity:key];
@@ -2472,12 +2514,17 @@ static NSDictionary *PTClaudeTaskSummary(NSDictionary *task) {
                 [self completePendingSends:NO];
                 return;
             }
-            [self startProcessInDirectory:cwd resume:resume];
+            NSString *model = nil;
+            if (resume) {
+                model = [NSUserDefaults.standardUserDefaults dictionaryForKey:PTSessionModelOverridesKey][sessionID];
+                if (!model.length) model = session.model;
+            }
+            [self startProcessInDirectory:cwd resume:resume model:model];
         });
     });
 }
 
-- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume {
+- (void)startProcessInDirectory:(NSString *)cwd resume:(BOOL)resume model:(NSString *)model {
     _task = [NSTask new];
     _inputPipe = [NSPipe pipe];
     _outputPipe = [NSPipe pipe];
@@ -2500,10 +2547,7 @@ static NSDictionary *PTClaudeTaskSummary(NSDictionary *task) {
         @"--input-format", @"stream-json", @"--output-format", @"stream-json",
         @"--verbose", @"--replay-user-messages", @"--include-partial-messages",
         resume ? @"--resume" : @"--session-id", _sessionID] mutableCopy];
-    if (resume) {
-        NSString *model = [NSUserDefaults.standardUserDefaults dictionaryForKey:PTSessionModelOverridesKey][_sessionID];
-        if (model.length) [arguments addObjectsFromArray:@[@"--model", model]];
-    }
+    if (resume && model.length) [arguments addObjectsFromArray:@[@"--model", model]];
     _task.arguments = arguments;
     _task.standardInput = _inputPipe;
     _task.standardOutput = _outputPipe;
@@ -3707,7 +3751,7 @@ static NSDictionary *PTClaudeTaskSummary(NSDictionary *task) {
 
 - (NSArray<NSArray<NSString *> *> *)composerModelEntries {
     return @[
-        @[@"Claude Fable 5", @"Fable 5", @"claude-fable-5"],
+        @[@"Claude Fable 5.2", @"Fable 5.2", @"claude-fable-5-2"],
         @[@"Claude Opus 5.5", @"Opus 5.5", @"claude-opus-5-5"],
         @[@"Claude Sonnet 5.5", @"Sonnet 5.5", @"claude-sonnet-5-5"],
         @[@"Claude Sonnet 4.6", @"Sonnet 4.6", @"claude-sonnet-4-6"],

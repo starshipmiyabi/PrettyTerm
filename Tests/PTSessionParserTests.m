@@ -250,6 +250,74 @@ int main(void) {
 
         [NSFileManager.defaultManager removeItemAtPath:questionFile error:nil];
 
+        // Byte-level scanning must skip API request copies and, for sessions that are not
+        // open, pure tool output - without losing user text, cwd, usage or the last line.
+        NSString *skipFile = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"prettyterm-skip-%@.jsonl", NSUUID.UUID.UUIDString]];
+        NSMutableString *skipText = [NSMutableString string];
+        [skipText appendString:@"{\"type\":\"api-request-blob\",\"sessionId\":\"s\",\"message\":{\"role\":\"user\",\"content\":\"BLOB-NOT-A-MESSAGE\"}}\n"];
+        [skipText appendString:@"{\"type\":\"api-request\",\"sessionId\":\"s\",\"params\":{}}\n"];
+        [skipText appendString:@"{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/tmp/skip\",\"uuid\":\"su1\",\"message\":{\"role\":\"user\",\"content\":\"第一句\"}}\n"];
+        [skipText appendString:@"{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/tmp/skip\",\"uuid\":\"su2\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"t1\",\"type\":\"tool_result\",\"content\":\"OUTPUT-ONE\"}]}}\n"];
+        [skipText appendString:@"{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/tmp/skip\",\"uuid\":\"su3\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"t2\",\"type\":\"tool_result\",\"content\":[{\"type\":\"text\",\"text\":\"OUTPUT-TWO\"}]}]}}\n"];
+        [skipText appendString:@"{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/tmp/skip\",\"uuid\":\"su4\",\"message\":{\"role\":\"user\",\"content\":\"提到 \\\"type\\\":\\\"tool_result\\\" 的用户文字\"}}\n"];
+        [skipText appendString:@"{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/tmp/skip\",\"uuid\":\"su5\",\"message\":{\"role\":\"user\",\"content\":\"最后一行没有换行\"}}"];
+        [skipText writeToFile:skipFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+        NSUInteger skipSize = 0;
+        PTSessionInfo *listing = PTParseSessionWithDetail(
+            skipFile, [NSDate dateWithTimeIntervalSince1970:1], &skipSize, NO);
+        PTParserAssert([listing.cwd isEqual:@"/tmp/skip"],
+            @"skipping lines must still leave the session cwd intact");
+        PTParserAssert(listing.conversationTurnCount == 3,
+            @"list mode must count exactly the three real user turns, not API copies or tool output");
+        PTParserAssert([listing.title hasPrefix:@"第一句"] || [listing.title containsString:@"最后一行"],
+            @"list mode must still derive the title from real user text");
+
+        PTSessionInfo *opened = PTParseSessionWithDetail(
+            skipFile, [NSDate dateWithTimeIntervalSince1970:1], &skipSize, YES);
+        NSUInteger userMessages = 0, toolResults = 0;
+        for (NSDictionary *message in opened.assistantMessages) {
+            if ([message[@"role"] isEqual:@"user"]) userMessages++;
+            if ([message[@"kind"] isEqual:@"tool"]) toolResults++;
+            PTParserAssert(![[message[@"text"] description] containsString:@"BLOB-NOT-A-MESSAGE"],
+                @"API request copies must never appear as conversation messages");
+        }
+        PTParserAssert(userMessages == 3 && toolResults == 2,
+            @"an opened session must show the three user turns and both tool results");
+        [NSFileManager.defaultManager removeItemAtPath:skipFile error:nil];
+
+        NSString *imageFile = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"prettyterm-image-parser-%@.jsonl", NSUUID.UUID.UUIDString]];
+        NSDictionary *imageRecord = @{
+            @"type": @"user", @"sessionId": @"image-session", @"cwd": @"/tmp/project",
+            @"uuid": @"image-user-1",
+            @"message": @{
+                @"role": @"user",
+                @"content": @[
+                    @{@"type": @"image", @"source": @{
+                        @"type": @"base64", @"media_type": @"image/png", @"data": @"aGVsbG8="
+                    }},
+                    @{@"type": @"text", @"text": @"看这张图"}
+                ]
+            }
+        };
+        NSData *imageJSON = [NSJSONSerialization dataWithJSONObject:imageRecord options:0 error:nil];
+        NSMutableData *imageTranscript = [imageJSON mutableCopy];
+        [imageTranscript appendBytes:"\n" length:1];
+        [imageTranscript writeToFile:imageFile atomically:YES];
+        NSUInteger imageParsedSize = 0;
+        PTSessionInfo *imageSession = PTParseSession(
+            imageFile, [NSDate dateWithTimeIntervalSince1970:1], &imageParsedSize);
+        NSDictionary *imageMessage = imageSession.assistantMessages.firstObject;
+        NSDictionary *parsedImage = [imageMessage[@"images"] firstObject];
+        PTParserAssert([parsedImage[@"dataUrl"] isEqual:@"data:image/png;base64,aGVsbG8="] &&
+                       [parsedImage[@"mediaType"] isEqual:@"image/png"],
+            @"parsed user images must use the dataUrl/mediaType object contract expected by the frontend");
+        PTParserAssert([imageMessage[@"text"] isEqual:@"看这张图"],
+            @"image parsing must preserve accompanying user text");
+        [NSFileManager.defaultManager removeItemAtPath:imageFile error:nil];
+
         puts("PTSessionParserTests: PASS");
     }
     return 0;
